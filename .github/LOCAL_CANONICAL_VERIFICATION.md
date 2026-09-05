@@ -148,6 +148,17 @@ multiple Browser owners, shared composition, or unknown Browser ownership fail
 closed to `full-canonical`. Documentation may accompany a targeted owner
 without adding an unrelated phase.
 
+The exact project-experience verification family has a separate targeted owner:
+its Browser executable, private fixture builder, keyed result contract,
+hydration boundary, and their focused tests. It retains typecheck, unit,
+**authority**, and `e2e-project-experience` after the fixed validator and both
+clean dependency installations. Authority remains necessary because its
+verification-policy contract consumes the Browser executable and enforces
+fixture and lifecycle boundaries. This admission does not cover arbitrary
+Browser scripts, shared fixture/lifecycle helpers, or owner manifests. The
+[verification architecture audit](../docs/verification/VERIFICATION_OWNERSHIP_AUDIT.md)
+records consumers, exclusions, comparative plans, and retained responsibilities.
+
 Deletion is classified by the responsibility being removed. Only an explicitly
 registered owner whose manifest deletion policy is `targeted` may use the
 bounded path; this version admits that behavior only for the dedicated Local

@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   OWNER_TARGETED_DEPENDENCY_PHASE_IDS,
@@ -29,9 +30,21 @@ import {
   validateCanonicalOperatingPolicyChange,
   validateCanonicalOwnerTargetedChange,
 } from "./validate-canonical-docs-change.mjs";
+import { buildPhasePlan } from "./run-local-canonical-verification.mjs";
 
 const temporaryRoot = mkdtempSync(path.join(tmpdir(), "ag-planner-"));
 const results = [];
+const comparisons = [];
+const projectExperienceVerificationPaths = [
+  "scripts/browser-validate-project-experience-v1.mjs",
+  "scripts/project-experience-browser-fixture-v1.ts",
+  "scripts/test-project-experience-browser-fixture-v1.ts",
+  "scripts/project-experience-result-contract-v1.mjs",
+  "scripts/test-project-experience-result-contract-v1.mjs",
+  "scripts/project-experience-hydration-boundary-v1.mjs",
+  "scripts/test-project-experience-hydration-boundary-v1.mjs",
+];
+let comparisonPlanner = null;
 const targetedPhaseIds = (...ownerPhaseIds) => [
   "targeted-change-validator",
   ...OWNER_TARGETED_DEPENDENCY_PHASE_IDS,
@@ -39,6 +52,29 @@ const targetedPhaseIds = (...ownerPhaseIds) => [
 ];
 
 try {
+  // Optional read-only audit: replay the same exact fixture commits through a
+  // pre-change planner and its two manifests. This never chooses deciding tests.
+  if (process.argv.length > 2) {
+    assert.equal(process.argv[2], "--compare-base");
+    assert.equal(process.argv.length, 4);
+    const comparisonBase = process.argv[3];
+    assert.match(comparisonBase, /^[0-9a-f]{40}$/u);
+    const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const snapshotRoot = path.join(temporaryRoot, "baseline-planner");
+    mkdirSync(snapshotRoot);
+    for (const name of [
+      "canonical-change-planner.mjs",
+      "local-canonical-change-owners.v1.json",
+      "browser-verification-owners.v1.json",
+    ]) {
+      writeFileSync(path.join(snapshotRoot, name), git(sourceRoot, [
+        "show", `${comparisonBase}:scripts/${name}`,
+      ]));
+    }
+    comparisonPlanner = (await import(pathToFileURL(
+      path.join(snapshotRoot, "canonical-change-planner.mjs"),
+    ).href)).planCanonicalChange;
+  }
   runPlanCase("README-only", "documentation-only", ({ write }) => {
     write("README.md", "# Updated\n");
   });
@@ -204,6 +240,81 @@ try {
       browserPhaseIds: ["e2e-operator-multi-candidate"],
     },
   );
+  for (const relativePath of projectExperienceVerificationPaths) {
+    runPlanCase(`project-verification:${relativePath}`, "owner-targeted", ({ write }) => {
+      write(relativePath, "export const changed = true;\n");
+    }, {
+      ownerIds: ["project-experience-verification"],
+      phaseIds: targetedPhaseIds("typecheck", "unit", "authority", "e2e-project-experience"),
+      browserPhaseIds: ["e2e-project-experience"],
+    });
+  }
+  runPlanCase("project-verification-with-docs", "owner-targeted", ({ write }) => {
+    for (const relativePath of projectExperienceVerificationPaths) write(relativePath, "export {};\n");
+    write("docs/guide.md", "# Browser harness\n");
+  }, {
+    ownerIds: ["documentation", "project-experience-verification"],
+    phaseIds: targetedPhaseIds("typecheck", "unit", "authority", "e2e-project-experience"),
+    browserPhaseIds: ["e2e-project-experience"],
+  });
+  runPlanCase("project-verification-same-product-owner", "owner-targeted", ({ write }) => {
+    write(projectExperienceVerificationPaths[0], "export {};\n");
+    write("components/project-home/project-home.tsx", "export {};\n");
+  }, {
+    phaseIds: targetedPhaseIds("typecheck", "unit", "authority", "e2e-project-experience"),
+  });
+  runPlanCase("project-verification-second-browser-owner", "full-canonical", ({ write }) => {
+    write(projectExperienceVerificationPaths[0], "export {};\n");
+    write("components/guide-brief/current-action.tsx", "export {};\n");
+  });
+  runPlanCase("project-verification-deletion", "full-canonical", ({ remove }) => {
+    remove(projectExperienceVerificationPaths[0]);
+  });
+  runPlanCase("project-verification-rename", "full-canonical", ({ rename }) => {
+    rename(projectExperienceVerificationPaths[0], "scripts/browser-project-renamed.mjs");
+  });
+  for (const relativePath of [
+    "scripts/project-experience-unregistered-helper.mjs",
+    "scripts/vnext-operator-browser-fixture-builder-v0-1.ts",
+    "scripts/test-harness-process-lifecycle.mjs",
+    "scripts/browser-verification-owners.v1.json",
+    "scripts/local-canonical-change-owners.v1.json",
+    "scripts/run-canonical-test-suite.mjs",
+    "scripts/local-canonical-receipt.mjs",
+    "scripts/run-local-canonical-verification.mjs",
+    "lib/vnext/persistence/durable-semantic-store.ts",
+    "lib/db.ts",
+    "lib/vnext/native-host/codex-qualified-runtime-registry.v1.json",
+    "lib/vnext/native-host/codex-managed-runtime-store.ts",
+    "scripts/operational-reentry-perturbation-report.ts",
+  ]) {
+    runPlanCase(`project-verification-escalates:${relativePath}`, "full-canonical", ({ write }) => {
+      write(projectExperienceVerificationPaths[0], "export {};\n");
+      write(relativePath, "changed\n");
+    });
+  }
+  // Omit the lowercase fixture so even case-insensitive hosts preserve the
+  // new path's literal spelling in Git rather than treating it as an edit.
+  runPlanCase("project-verification-case-variant", "full-canonical", ({ write }) => {
+    write("scripts/PROJECT-experience-hydration-boundary-v1.mjs", "export {};\n");
+  }, { seedProjectVerification: false });
+  runPlanCase("project-verification-directory-case-variant", "full-canonical", ({ write }) => {
+    write("SCRIPTS/project-experience-hydration-boundary-v1.mjs", "export {};\n");
+  }, { seedProjectVerification: false });
+  runPlanCase("project-verification-addition", "owner-targeted", ({ write }) => {
+    write(projectExperienceVerificationPaths[0], "export {};\n");
+  }, {
+    seedProjectVerification: false,
+    phaseIds: targetedPhaseIds("typecheck", "unit", "authority", "e2e-project-experience"),
+  });
+  for (const [name, relativePath] of [
+    ["core-semantic-owner", "lib/vnext/persistence/durable-semantic-store.ts"],
+    ["qualified-runtime-registry-source", "lib/vnext/native-host/codex-qualified-runtime-registry.v1.json"],
+    ["managed-runtime-source", "lib/vnext/native-host/codex-managed-runtime-store.ts"],
+    ["research-script-only", "scripts/operational-reentry-perturbation-report.ts"],
+  ]) {
+    runPlanCase(name, "full-canonical", ({ write }) => write(relativePath, "changed\n"));
+  }
   runPlanCase(
     "targeted-owner-plus-documentation",
     "owner-targeted",
@@ -316,6 +427,12 @@ try {
     results.push("executable-mode-change:posix_mode_unavailable_on_windows_ntfs");
     results.push("symlink:windows_symlink_privilege_unavailable");
   } else {
+    runPlanCase("project-verification-backslash-alias", "full-canonical", ({ write }) => {
+      write("scripts\\project-experience-hydration-boundary-v1.mjs", "export {};\n");
+    });
+    runPlanCase("project-verification-executable-mode", "full-canonical", ({ chmod }) => {
+      chmod(projectExperienceVerificationPaths[0], 0o755);
+    });
     runPlanCase("AGENTS-mode-change", "full-canonical", ({ chmod }) => {
       chmod("AGENTS.md", 0o755);
     });
@@ -460,6 +577,19 @@ try {
     /duplicate canonical owner id/u,
   );
   results.push("owner-manifest-fail-closed");
+  const aliasedLiteralManifest = structuredClone(ownerManifest);
+  aliasedLiteralManifest.targeted_owners[0].path_rules.literal_exact_paths = [
+    "scripts/../scripts/project-experience-hydration-boundary-v1.mjs",
+  ];
+  assert.throws(() => validateChangeOwnerManifest(aliasedLiteralManifest),
+    /literal exact path is not normalized/u);
+  const duplicateLiteralManifest = structuredClone(ownerManifest);
+  duplicateLiteralManifest.targeted_owners[1].path_rules.exact_paths.push(
+    "scripts/browser-validate-project-experience-v1.mjs",
+  );
+  assert.throws(() => validateChangeOwnerManifest(duplicateLiteralManifest),
+    /duplicate canonical targeted exact path/u);
+  results.push("literal-owner-manifest-fail-closed");
 
   runDocumentationValidatorCases();
 
@@ -471,6 +601,7 @@ try {
         cases: results,
         fail_closed: true,
         documentation_validation: true,
+        ...(comparisonPlanner ? { comparisons } : {}),
       },
       null,
       2,
@@ -481,7 +612,7 @@ try {
 }
 
 function runPlanCase(name, expectedPlan, mutate, expected = {}) {
-  const repository = createRepository(name);
+  const repository = createRepository(name, expected.seedProjectVerification ?? true);
   mutate(repository);
   commitAll(repository.cwd, `case: ${name}`);
   const headSha = git(repository.cwd, ["rev-parse", "HEAD"]).trim();
@@ -491,6 +622,29 @@ function runPlanCase(name, expectedPlan, mutate, expected = {}) {
     headSha,
     cwd: repository.cwd,
   });
+  if (comparisonPlanner) {
+    const oldPlan = comparisonPlanner({
+      eventName: "pull_request",
+      baseSha: repository.baseSha,
+      headSha,
+      cwd: repository.cwd,
+    });
+    const summarize = (value) => ({
+      plan: value.plan,
+      phases: buildPhasePlan({
+        mode: "changed", selectedPlan: value.plan,
+        baseSha: repository.baseSha, headSha,
+        browserPhaseIds: value.browser_phase_ids,
+        targetedPhaseIds: value.targeted_phase_ids,
+      }).map((phase) => phase.id),
+      owners: value.owner_ids,
+      targeted_phases: value.targeted_phase_ids,
+      browser_phases: value.browser_phase_ids,
+      full_reasons: value.full_reasons,
+    });
+    comparisons.push({ name, base: repository.baseSha, head: headSha,
+      old: summarize(oldPlan), new: summarize(plan) });
+  }
   assert.equal(plan.plan, expectedPlan, name);
   if (expected.reason) assert.equal(plan.reason, expected.reason, name);
   if (expected.ownerIds) {
@@ -525,7 +679,7 @@ function runPlanCase(name, expectedPlan, mutate, expected = {}) {
   results.push(name);
 }
 
-function createRepository(name) {
+function createRepository(name, seedProjectVerification = true) {
   const cwd = path.join(temporaryRoot, name);
   mkdirSync(cwd, { recursive: true });
   git(cwd, ["init", "--quiet"]);
@@ -535,16 +689,21 @@ function createRepository(name) {
   write(cwd, "AGENTS.md", "# Instructions\n");
   write(cwd, "docs/existing.md", "# Existing\n");
   write(cwd, "package.json", "{\"private\":true}\n");
+  for (const relativePath of seedProjectVerification ? projectExperienceVerificationPaths : []) {
+    write(cwd, relativePath, "export const baseline = true;\n");
+  }
   write(
     cwd,
     "fixtures/local-canonical-owner-contract/retired.json",
     "{}\n",
   );
-  write(
-    cwd,
-    "scripts/test-codex-augnes-user-hook-migration.mjs",
-    "export const baseline = true;\n",
-  );
+  if (seedProjectVerification) {
+    write(
+      cwd,
+      "scripts/test-codex-augnes-user-hook-migration.mjs",
+      "export const baseline = true;\n",
+    );
+  }
   commitAll(cwd, "base");
   const baseSha = git(cwd, ["rev-parse", "HEAD"]).trim();
   return {
