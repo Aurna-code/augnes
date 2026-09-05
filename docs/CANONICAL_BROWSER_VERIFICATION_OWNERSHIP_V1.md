@@ -162,6 +162,10 @@ owner manifest decides whether that Browser ownership is narrow enough for an
 - a known single detailed Browser owner may join typecheck and unit in an
   `owner-targeted` deciding plan after the fixed clean root and nested
   dependency preparation;
+- the exact project-experience verification family also retains the authority
+  suite, whose static policy contract consumes the Browser executable; its
+  seven admitted paths are enumerated in the Local Canonical change owner
+  manifest, with no prefix-based extension to new helpers;
 - first-work-to-result composition changes select golden plus affected detailed
   owners and therefore require `full-canonical` in the current planner;
 - shared runtime, fixture, lifecycle, planner, executor, receipt, or ambiguous

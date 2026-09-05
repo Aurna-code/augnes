@@ -543,6 +543,9 @@ function matchesPathRules(relativePath, rules) {
   const normalized = normalizeRepositoryPath(relativePath).toLowerCase();
   const basename = path.posix.basename(normalized);
   return (
+    // An audited executable admission must not include case variants or path
+    // normalization aliases that can name distinct, unregistered consumers.
+    rules.literal_exact_paths?.includes(relativePath) ||
     rules.exact_paths?.some(
       (candidate) => candidate.toLowerCase() === normalized,
     ) ||
@@ -600,7 +603,10 @@ export function validateChangeOwnerManifest(manifest) {
       throw new Error(`canonical targeted owner is invalid: ${owner.id}`);
     }
     validatePathRules(owner.path_rules, owner.id);
-    for (const exactPath of owner.path_rules.exact_paths ?? []) {
+    for (const exactPath of [
+      ...(owner.path_rules.literal_exact_paths ?? []),
+      ...(owner.path_rules.exact_paths ?? []),
+    ]) {
       const normalized = normalizeRepositoryPath(exactPath).toLowerCase();
       if (exactTargetedPaths.has(normalized)) {
         throw new Error(`duplicate canonical targeted exact path: ${exactPath}`);
@@ -654,7 +660,13 @@ function assertOwnerIdentity(owner, ownerIds) {
 }
 
 function validatePathRules(rules, ownerId) {
+  if (rules?.literal_exact_paths !== undefined &&
+      (!Array.isArray(rules.literal_exact_paths) ||
+       rules.literal_exact_paths.length === 0)) {
+    throw new Error(`canonical literal exact paths are invalid: ${ownerId}`);
+  }
   const entries = [
+    ...(rules?.literal_exact_paths ?? []),
     ...(rules?.exact_paths ?? []),
     ...(rules?.path_prefixes ?? []),
     ...(rules?.path_fragments ?? []),
@@ -668,6 +680,11 @@ function validatePathRules(rules, ownerId) {
   }
   for (const exactPath of rules?.exact_paths ?? []) {
     normalizeRepositoryPath(exactPath);
+  }
+  for (const exactPath of rules?.literal_exact_paths ?? []) {
+    if (exactPath !== normalizeRepositoryPath(exactPath)) {
+      throw new Error(`canonical literal exact path is not normalized: ${ownerId}`);
+    }
   }
   for (const prefix of rules?.path_prefixes ?? []) {
     normalizeRepositoryPath(prefix);

@@ -19,6 +19,27 @@
   ],
   "targeted_owners": [
     {
+      "id": "project-experience-verification",
+      "phase_ids": [
+        "typecheck",
+        "unit",
+        "authority",
+        "e2e-project-experience"
+      ],
+      "deletion_policy": "full",
+      "path_rules": {
+        "literal_exact_paths": [
+          "scripts/browser-validate-project-experience-v1.mjs",
+          "scripts/project-experience-browser-fixture-v1.ts",
+          "scripts/test-project-experience-browser-fixture-v1.ts",
+          "scripts/project-experience-result-contract-v1.mjs",
+          "scripts/test-project-experience-result-contract-v1.mjs",
+          "scripts/project-experience-hydration-boundary-v1.mjs",
+          "scripts/test-project-experience-hydration-boundary-v1.mjs"
+        ]
+      }
+    },
+    {
       "id": "codex-user-reuse-hook",
       "phase_ids": [
         "unit"

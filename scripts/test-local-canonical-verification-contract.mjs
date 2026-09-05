@@ -867,6 +867,7 @@ assert.deepEqual(
 assert.deepEqual(
   changeOwnerManifest.targeted_owners.map((owner) => owner.id),
   [
+    "project-experience-verification",
     "codex-user-reuse-hook",
     "augnes-operator-plugin-setup",
     "codex-qualified-runtime-registry",
@@ -875,6 +876,13 @@ assert.deepEqual(
     "codex-managed-runtime-store",
     "local-canonical-owner-contract-fixture",
   ],
+);
+assert.deepEqual(
+  changeOwnerManifest.targeted_owners.find(
+    (owner) => owner.id === "project-experience-verification",
+  ).phase_ids,
+  ["typecheck", "unit", "authority", "e2e-project-experience"],
+  "the Browser harness must retain its authority-suite static contract consumer",
 );
 assert.deepEqual(
   changeOwnerManifest.targeted_owners
