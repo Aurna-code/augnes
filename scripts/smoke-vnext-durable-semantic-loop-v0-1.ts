@@ -2757,6 +2757,31 @@ function runSparseContextCompilerCoverage(
           recovery_before: recoveryBefore, recovery_after: recoveryAfter } }));
       } finally { database.exec("ROLLBACK TO unchanged_reselection_review; RELEASE unchanged_reselection_review"); }
       assert.deepEqual(readDatabaseSnapshot(database), beforeReselection);
+      if (index === 2) {
+        // A completed packet read must not retain source validation across a
+        // subsequent negative-fixture mutation or its rollback.
+        database.exec("SAVEPOINT packet_read_snapshot");
+        try {
+          database.exec("DROP TRIGGER trg_vnext_core_records_immutable_delete");
+          database.prepare("DELETE FROM vnext_core_records WHERE record_id = ?").run(
+            appliedStates[0]!.receipt.semantic_commit_gate.evaluation_ref.external_id,
+          );
+          ensureVNextDurableSemanticStoreSchemaV01(database);
+          const invalidSnapshot = readDatabaseSnapshot(database);
+          assert.throws(() => inspect(packet), /persisted_semantic_commit_gate_missing/);
+          assert.equal(validateRecoveryCanonicalDatabaseV01(database).status, "invalid");
+          assert.deepEqual(readDatabaseSnapshot(database), invalidSnapshot);
+        } finally {
+          database.exec("ROLLBACK TO packet_read_snapshot; RELEASE packet_read_snapshot");
+        }
+        assert.equal(inspect(packet).projection_current, true);
+        assert.deepEqual(validateRecoveryCanonicalDatabaseV01(database), recoveryBefore);
+        assert.deepEqual(readDatabaseSnapshot(database), beforeReselection);
+        console.log(JSON.stringify({ packet_candidate_read_snapshot: {
+          valid_before: true, missing_gate_refused_after_read: true,
+          valid_after_rollback: true, reader_writes: 0,
+        } }));
+      }
     }
   }
   assert(lastReceipt);

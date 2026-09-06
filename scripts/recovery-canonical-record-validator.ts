@@ -63,6 +63,7 @@ import {
 } from "../lib/vnext/persistence/project-verify-material-store";
 import { assertPersistedProjectVerifyLifecycleProposalSourceBoundV01 } from "../lib/vnext/persistence/project-verify-lifecycle-admission";
 import {
+  createValidatedVNextSemanticTransitionRelationReadSessionV01,
   loadValidatedVNextSemanticCommitGateRelationV01,
   loadValidatedVNextSemanticTransitionRelationV01,
 } from "../lib/vnext/runtime/durable-semantic-transition";
@@ -929,32 +930,36 @@ function validateCompiledTaskContextPacketRelationV01(
     }
     return priorPacket;
   });
-  const transitions = transitionRefs.map((transitionRef) => {
-    requireRelatedRecordV01(byIdentity, {
-      kind: "state_transition_receipt",
-      id: transitionRef.external_id,
-      fingerprint: transitionRef.source_ref,
-      workspace_id: record.workspace_id,
-      project_id: record.project_id,
+  // Keep source reuse inside this packet's synchronous read snapshot. Every
+  // candidate still validates; no session survives import, rollback or restore.
+  const transitions = db.transaction(() => {
+    const readTransition =
+      createValidatedVNextSemanticTransitionRelationReadSessionV01(db, record);
+    return transitionRefs.map((transitionRef) => {
+      requireRelatedRecordV01(byIdentity, {
+        kind: "state_transition_receipt",
+        id: transitionRef.external_id,
+        fingerprint: transitionRef.source_ref,
+        workspace_id: record.workspace_id,
+        project_id: record.project_id,
+      });
+      const transition = readTransition({
+        transition_receipt_id: transitionRef.external_id,
+        transition_receipt_fingerprint: requiredStringV01(
+          transitionRef.source_ref,
+        ),
+      });
+      if (
+        canonicalizeProtocolValueV01(transitionRef) !==
+        canonicalizeProtocolValueV01(
+          createStateTransitionReceiptLineageRefV01(transition.receipt),
+        )
+      ) {
+        refuseV01();
+      }
+      return transition;
     });
-    const transition = loadValidatedVNextSemanticTransitionRelationV01(db, {
-      workspace_id: record.workspace_id,
-      project_id: record.project_id,
-      transition_receipt_id: transitionRef.external_id,
-      transition_receipt_fingerprint: requiredStringV01(
-        transitionRef.source_ref,
-      ),
-    });
-    if (
-      canonicalizeProtocolValueV01(transitionRef) !==
-      canonicalizeProtocolValueV01(
-        createStateTransitionReceiptLineageRefV01(transition.receipt),
-      )
-    ) {
-      refuseV01();
-    }
-    return transition;
-  });
+  })();
   const immediatePrior = resolveImmediatePersistedSemanticPriorPacketV01({
     packet,
     prior_packets: priorPackets,

@@ -41,6 +41,7 @@ import {
   validateSemanticTransitionFullChainV01,
 } from "@/lib/vnext/state-transition-eligibility";
 import {
+  createValidatedVNextSemanticTransitionRelationReadSessionV01,
   loadValidatedVNextSemanticTransitionRelationV01,
 } from "@/lib/vnext/runtime/durable-semantic-transition";
 import {
@@ -1029,26 +1030,30 @@ function validateCompiledPacketLineage(
   if (immediatePrior.status !== "resolved") {
     throw continuityError("operator_pilot_compiled_packet_lineage_ambiguous", 422);
   }
-  const transitionCandidates = receiptRefs.map((receiptRef) => {
-    if (!receiptRef.source_ref) {
-      throw continuityError("operator_pilot_compiled_packet_lineage_invalid", 422);
-    }
-    const transition = loadValidatedVNextSemanticTransitionRelationV01(db, {
-      workspace_id: config.workspace_id,
-      project_id: config.project_id,
-      transition_receipt_id: receiptRef.external_id,
-      transition_receipt_fingerprint: receiptRef.source_ref,
+  // Validate every candidate in one read snapshot. Shared immutable ancestors
+  // need one exact validation here; the bounded session never escapes this read.
+  const transitionCandidates = db.transaction(() => {
+    const readTransition =
+      createValidatedVNextSemanticTransitionRelationReadSessionV01(db, config);
+    return receiptRefs.map((receiptRef) => {
+      if (!receiptRef.source_ref) {
+        throw continuityError("operator_pilot_compiled_packet_lineage_invalid", 422);
+      }
+      const transition = readTransition({
+        transition_receipt_id: receiptRef.external_id,
+        transition_receipt_fingerprint: receiptRef.source_ref,
+      });
+      if (
+        canonicalizeProtocolValueV01(receiptRef) !==
+        canonicalizeProtocolValueV01(
+          createStateTransitionReceiptLineageRefV01(transition.receipt),
+        )
+      ) {
+        throw continuityError("operator_pilot_compiled_packet_provenance_mismatch", 422);
+      }
+      return transition;
     });
-    if (
-      canonicalizeProtocolValueV01(receiptRef) !==
-      canonicalizeProtocolValueV01(
-        createStateTransitionReceiptLineageRefV01(transition.receipt),
-      )
-    ) {
-      throw continuityError("operator_pilot_compiled_packet_provenance_mismatch", 422);
-    }
-    return transition;
-  });
+  })();
   const relations = transitionCandidates.flatMap((transition) => {
       const relation = validateSemanticTransitionFullChainV01({
         ...transition.eligibility_input,
