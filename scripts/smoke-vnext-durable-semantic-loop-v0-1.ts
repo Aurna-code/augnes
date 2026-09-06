@@ -89,6 +89,8 @@ import {
   compileTaskContextPacketFromPersistedSemanticStateV01,
   compileTaskContextPacketFromPersistedSemanticStateInsideTransactionV01,
 } from "../lib/vnext/runtime/persisted-semantic-context-compiler";
+import { inspectVNextOperatorPilotPacketLineageV01 } from "../lib/vnext/runtime/operator-pilot-project-continuity";
+import { validateRecoveryCanonicalDatabaseV01 } from "./recovery-canonical-record-validator";
 import {
   buildRunReceiptV01,
   validateRunReceiptV01,
@@ -2675,6 +2677,11 @@ function runSparseContextCompilerCoverage(
   const opened = openDatabase("sparse-selection");
   const { database } = opened;
   const prefix = scenarios.prefix;
+  const config = { enabled: true as const, workspace_id: prefix.prior_packet.workspace_id,
+    project_id: prefix.prior_packet.project_id, operator_id: "operator:disposable-lineage-review", database_path: opened.path };
+  const inspect = (candidate: TaskContextPacketV01) => inspectVNextOperatorPilotPacketLineageV01(database, {
+    config, packet_id: candidate.packet_id, packet_fingerprint: candidate.integrity.fingerprint,
+  });
   let packet = rebuildPacketV01({ ...prefix.prior_packet, gaps: [...prefix.prior_packet.gaps, {
     code: "missing_selected_context",
     summary: "No accepted semantic state exists before this disposable sequence.",
@@ -2722,6 +2729,35 @@ function runSparseContextCompilerCoverage(
     packets.push(packet);
     bytes.push(JSON.stringify(packet));
     durableBytes.push(readPacketBytes(packet));
+    if (index <= 2) {
+      assert.equal(inspect(packet).projection_current, true);
+      const recoveryBefore = validateRecoveryCanonicalDatabaseV01(database);
+      assert.equal(recoveryBefore.status, "valid");
+      const beforeReselection = readDatabaseSnapshot(database);
+      database.exec("SAVEPOINT unchanged_reselection_review");
+      try {
+        const first = appliedStates[0]!;
+        const reselect = () => compileTaskContextPacketFromPersistedSemanticStateInsideTransactionV01(database,
+          compilerInput(first.scenario, packet, first.receipt, "2026-07-10T14:07:01.000Z"));
+        if (index === 1) {
+          const result = reselect();
+          assert.equal(result.status, "inserted");
+          assert.deepEqual(result.later_packet.selected_context, packet.selected_context);
+          assert.equal(inspect(result.later_packet).source_transition_receipt?.transition_receipt_id,
+            first.receipt.transition_receipt_id);
+        } else {
+          assertCompilerRefusalNoWrite(opened, reselect, beforeReselection,
+            /compiled_packet_transition_lineage_ambiguous/, "unchanged reselection cannot persist ambiguous lineage");
+          assert.equal(inspect(packet).projection_current, true);
+        }
+        const recoveryAfter = validateRecoveryCanonicalDatabaseV01(database);
+        assert.equal(recoveryAfter.status, "valid");
+        console.log(JSON.stringify({ unchanged_reselection: { normal_writer_states: index,
+          prior_lineage: "valid", compiler: index === 1 ? "inserted_unique" : "refused_ambiguous_without_write",
+          recovery_before: recoveryBefore, recovery_after: recoveryAfter } }));
+      } finally { database.exec("ROLLBACK TO unchanged_reselection_review; RELEASE unchanged_reselection_review"); }
+      assert.deepEqual(readDatabaseSnapshot(database), beforeReselection);
+    }
   }
   assert(lastReceipt);
   const control = compileTaskContextPacketFromPersistedSemanticStateV01(
@@ -2795,10 +2831,17 @@ function runSparseContextCompilerCoverage(
     assert.deepEqual(repeatedPacket.constraints.forbidden_actions, packet.constraints.forbidden_actions);
     assert.deepEqual(repeatedPacket.task, packet.task);
     assert.deepEqual(repeatedPacket.constraints.required_checks, packet.constraints.required_checks);
+    // Recovery's generic RunReceipt reader currently refuses the direct
+    // probe's role-specific packet ref. Check this packet-history boundary
+    // before those separate records, without changing that probe contract.
+    if (boundary === 1) assert.equal(validateRecoveryCanonicalDatabaseV01(database).status, "valid");
     const probe = runLocalContextUseProbeV01(database,
       localContextUseProbeInput(prior, repeatedPacket, required.receipt, DURABLE_LOCAL_LOOP_CONTEXT_USE_PROBE_RECORDED_AT));
     assert.equal(probe.relation.status, "valid");
     assert.equal(probe.resolved_states.length, 2);
+    const lineage = inspect(repeatedPacket);
+    assert.equal(lineage.projection_current, true);
+    assert.equal(lineage.source_transition_receipt?.transition_receipt_id, required.receipt.transition_receipt_id);
     packets.push(repeatedPacket);
     bytes.push(JSON.stringify(repeatedPacket));
     durableBytes.push(readPacketBytes(repeatedPacket));
@@ -2809,11 +2852,14 @@ function runSparseContextCompilerCoverage(
 
   const unselected = control.current_state_entries.find((entry) =>
     entry.state_fingerprint === omitted.source_ref)!;
+  const omittedReceipt = appliedStates.find(({ receipt }) => receipt.transition_receipt_id === unselected.source_transition_receipt_id)!.receipt;
   const negativeCases = [
     { label: "omitted projection missing", sql: "DELETE FROM vnext_semantic_state_entries WHERE target_key = ?",
       args: [unselected.target_key], error: /semantic_target_head_projection_presence_mismatch/ },
     { label: "omitted projection and head missing", sql: "DELETE FROM vnext_semantic_state_entries WHERE target_key = ?",
       remove_head: true, args: [unselected.target_key], error: /semantic_target_head_missing/ },
+    { label: "omitted projection, head and gate missing", sql: "DELETE FROM vnext_semantic_state_entries WHERE target_key = ?",
+      remove_head: true, remove_gate: true, args: [unselected.target_key], error: /persisted_semantic_commit_gate_missing/ },
     { label: "omitted revision drift", sql: "UPDATE vnext_semantic_state_entries SET revision = revision + 1 WHERE target_key = ?",
       args: [unselected.target_key], error: /semantic_target_head_projection_drift/ },
     { label: "omitted foreign projection", sql: "UPDATE vnext_semantic_state_entries SET project_id = 'project:foreign-fixture' WHERE target_key = ?",
@@ -2833,12 +2879,23 @@ function runSparseContextCompilerCoverage(
       if ("remove_head" in negative) {
         database.prepare("DELETE FROM vnext_semantic_target_heads WHERE target_key = ?").run(unselected.target_key);
       }
+      if ("remove_gate" in negative) {
+        database.prepare("DELETE FROM vnext_core_records WHERE record_id = ?").run(omittedReceipt.semantic_commit_gate.evaluation_ref.external_id);
+        assert(readVNextCoreRecordV01(database, { workspace_id: sparsePrior.workspace_id,
+          project_id: sparsePrior.project_id, record_kind: "semantic_state", record_id: unselected.state_ref.external_id }));
+        assert(readVNextCoreRecordV01(database, { workspace_id: sparsePrior.workspace_id,
+          project_id: sparsePrior.project_id, record_kind: "state_transition_receipt", record_id: omittedReceipt.transition_receipt_id }));
+      }
       database.prepare(negative.sql).run(...negative.args);
       ensureVNextDurableSemanticStoreSchemaV01(database);
       assertCompilerRefusalNoWrite(opened,
         () => compileTaskContextPacketFromPersistedSemanticStateInsideTransactionV01(database,
-          compilerInput(lastScenario, sparsePrior, lastReceipt!, DURABLE_LOCAL_LOOP_LATER_PACKET_GENERATED_AT)),
+          compilerInput(lastScenario, sparsePrior, lastReceipt!, "2026-07-10T14:07:20.000Z")),
         readDatabaseSnapshot(database), negative.error, negative.label);
+      if ("remove_gate" in negative) console.log(JSON.stringify({ missing_applied_source: {
+        guards_restored: true, immutable_state_retained: true, applied_receipt_retained: true,
+        compiler: "persisted_semantic_commit_gate_missing", new_packets: 0, other_changes: 0,
+      } }));
     } finally { database.exec("ROLLBACK TO sparse_negative; RELEASE sparse_negative"); }
   }
   const forgedSelection = clone(sparsePrior.selected_context);

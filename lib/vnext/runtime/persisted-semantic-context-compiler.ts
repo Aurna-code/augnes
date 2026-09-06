@@ -430,6 +430,47 @@ function compileTaskContextPacketInternalV01(
         .join(",")}`,
     );
   }
+  // Readers reconstruct the binding from every referenced receipt, not from
+  // the caller's chosen receipt. In particular, unchanged reselection can
+  // otherwise validate against more than one already-carried Transition.
+  for (const ref of laterPacket.compatibility.source_refs) {
+    if (
+      ref.ref_type !== "state_transition_receipt" ||
+      ref.compatibility_namespace !== "augnes.vnext.state-transition-receipt.v0.1"
+    ) {
+      continue;
+    }
+    if (!ref.source_ref) {
+      throw new Error("compiled_packet_transition_source_missing");
+    }
+    const candidate =
+      ref.external_id === transition.receipt.transition_receipt_id &&
+      ref.source_ref === transition.receipt.integrity.fingerprint
+      ? transition
+      : loadValidatedVNextSemanticTransitionRelationV01(db, {
+          workspace_id: input.workspace_id,
+          project_id: input.project_id,
+          transition_receipt_id: ref.external_id,
+          transition_receipt_fingerprint: ref.source_ref,
+        });
+    if (
+      canonicalizeProtocolValueV01(ref) !== canonicalizeProtocolValueV01(
+        createStateTransitionReceiptLineageRefV01(candidate.receipt),
+      )
+    ) {
+      throw new Error("compiled_packet_transition_source_provenance_mismatch");
+    }
+    if (candidate === transition) continue;
+    const alternative = validateSemanticTransitionFullChainV01({
+      ...candidate.eligibility_input,
+      receipt: candidate.receipt,
+      prior_packet: input.prior_packet,
+      later_packet: laterPacket,
+    });
+    if (alternative.status === "valid") {
+      throw new Error("compiled_packet_transition_lineage_ambiguous");
+    }
+  }
   const write = insertVNextCoreRecordV01(db, {
     record_kind: "task_context_packet",
     record_id: laterPacket.packet_id,

@@ -1232,9 +1232,13 @@ Before-state legitimacy comes from current-state observation and applied lineage
 full-chain eligibility, not uninterrupted prior packet selection. An exact persisted
 Transition whose effects remain current can explicitly reselect its state for later
 context without applying it again. Newly bound Transition refs cannot be substituted
-with carried historical receipts. Historical packets remain immutable; obsolete
-budget exclusions are removed only from a newly built packet when their state is
-reselected or retired. Continuity checks the currentness of selected states and the
+with carried historical receipts.
+Before persistence, every referenced Transition candidate is source-validated and
+the compiler refuses if another candidate also satisfies the full-chain relation.
+An unchanged reselection is supported only when its Transition remains unique.
+Historical packets remain immutable; obsolete budget exclusions are removed only
+from a newly built packet when their state is reselected or retired. Continuity
+checks the currentness of selected states and the
 bound Transition without treating sparse selection as a missing canonical snapshot.
 Current-work selection uses validated immediate packet succession to exclude old
 work candidates; disconnected current candidates remain ambiguous.
