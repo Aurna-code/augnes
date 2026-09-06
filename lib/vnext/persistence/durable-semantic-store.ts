@@ -625,6 +625,58 @@ export function listVNextCoreRecordsV01(
   return rows.map(parseCoreRecord);
 }
 
+/**
+ * Walk immutable project history in bounded keyset pages. A caller combining
+ * pages/relations must own a synchronous read transaction for one snapshot.
+ * Filters select payload relations; they do not validate or authenticate them.
+ */
+export function* iterateVNextCoreRecordsV01(
+  db: Database.Database,
+  input: {
+    workspace_id: string;
+    project_id: string;
+    record_kind: VNextCoreRecordKindV01;
+    source_proposal_id?: string;
+    source_decision_id?: string;
+  },
+): Generator<VNextCoreRecordEnvelopeV01> {
+  const scope = [
+    normalizeRequiredText(input.workspace_id, "workspace_id"),
+    normalizeRequiredText(input.project_id, "project_id"),
+    input.record_kind,
+  ];
+  const filters: string[] = [];
+  for (const [field, value] of [
+    ["source_proposal.proposal_id", input.source_proposal_id],
+    ["source_decision.decision_id", input.source_decision_id],
+  ] as const) {
+    if (value !== undefined) {
+      filters.push(`json_extract(payload_json, '$.${field}') = ?`);
+      scope.push(normalizeRequiredText(value, field));
+    }
+  }
+  let cursor: { created_at: string; record_id: string } | undefined;
+  const pageSize = 64;
+  for (;;) {
+    const rows = db
+      .prepare(
+        `SELECT * FROM vnext_core_records
+       WHERE workspace_id = ? AND project_id = ? AND record_kind = ?
+         ${filters.map((filter) => `AND ${filter}`).join(" ")}
+         ${cursor ? "AND (created_at < ? OR (created_at = ? AND record_id > ?))" : ""}
+       ORDER BY created_at DESC, record_id ASC LIMIT ?`,
+      )
+      .all(
+        ...scope,
+        ...(cursor ? [cursor.created_at, cursor.created_at, cursor.record_id] : []),
+        pageSize,
+      ) as CoreRecordRowV01[];
+    for (const row of rows) yield parseCoreRecord(row);
+    if (rows.length < pageSize) return;
+    cursor = rows.at(-1)!;
+  }
+}
+
 export function countVNextCoreRecordsV01(
   db: Database.Database,
   input?: {
