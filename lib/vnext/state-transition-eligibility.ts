@@ -949,6 +949,15 @@ export function validateTaskContextPacketTransitionRelationV01(
     return buildPacketRelationResult(accumulator);
   }
 
+  if (priorPacket.packet_id === laterPacket.packet_id) {
+    addPacketRelationError(
+      accumulator,
+      "packet_transition_self_reference",
+      "$.later_packet.packet_id",
+      "A later packet must be distinct from its prior packet, including on reselection.",
+    );
+  }
+
   for (const [actual, expected, code, path] of [
     [
       priorPacket.workspace_id,
