@@ -295,6 +295,7 @@ function readProjectWorkInitializationStrictV01(
         packet,
         lineage_kind: lineage.lineage_kind,
         projection_current: lineage.projection_current,
+        prior_packet: lineage.prior_packet,
       }];
     } catch {
       // A packet whose exact executable lineage cannot be proven is durable
@@ -305,7 +306,17 @@ function readProjectWorkInitializationStrictV01(
       return [];
     }
   });
-  const currentCandidates = inspected.filter((entry) => entry.projection_current);
+  // A sparse predecessor may still select only current state. Work succession
+  // comes from validated packet lineage, not equality with all canonical state.
+  const semanticPredecessors = new Set(inspected.flatMap((entry) =>
+    entry.lineage_kind === "semantic_transition" && entry.prior_packet
+      ? [`${entry.prior_packet.packet_id}|${entry.prior_packet.packet_fingerprint}`]
+      : [],
+  ));
+  const currentCandidates = inspected.filter((entry) =>
+    entry.projection_current &&
+    !semanticPredecessors.has(`${entry.packet.packet_id}|${entry.packet.integrity.fingerprint}`),
+  );
   const current = currentCandidates
     .sort(
       (left, right) =>

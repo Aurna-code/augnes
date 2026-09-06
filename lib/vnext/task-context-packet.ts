@@ -207,20 +207,17 @@ type JsonRecord = Record<string, unknown>;
 
 export function buildTaskContextPacketV01(
   input: TaskContextPacketBuilderInputV01,
+  options: { required_selected_entry_ids?: readonly string[] } = {},
 ): TaskContextPacketV01 {
   const requestedBudget = normalizeContextBudgetV01(
     input.constraints.context_budget,
   );
-  const allSelectedContext = normalizeSelectedContextV01(
-    input.selected_context,
-  );
-  const selectedEntryLimit =
-    requestedBudget.max_selected_entries ?? DEFAULT_MAX_SELECTED_ENTRIES;
-  const selectedContext = allSelectedContext.slice(
-    0,
-    selectedEntryLimit,
-  );
-  const droppedSelectedContext = allSelectedContext.slice(selectedEntryLimit);
+  const { selected: selectedContext, dropped: droppedSelectedContext } =
+    selectTaskContextPacketEntriesV01(
+      input.selected_context,
+      requestedBudget,
+      options.required_selected_entry_ids,
+    );
   const allProjectionItems = input.current_projection
     ? normalizeProjectionItemsV01(input.current_projection.items)
     : [];
@@ -250,15 +247,7 @@ export function buildTaskContextPacketV01(
   };
   const excludedContext = normalizeExcludedContextV01([
     ...(input.excluded_context ?? []),
-    ...droppedSelectedContext.map(
-      (entry): TaskContextPacketExcludedEntryV01 => ({
-        entry_id: `budget-excluded:${entry.entry_id}`,
-        source_ref: entry.source_ref,
-        external_ref: entry.external_ref,
-        why_excluded: "Excluded by the explicit selected-context budget.",
-        currentness: entry.currentness,
-      }),
-    ),
+    ...droppedSelectedContext.map(createTaskContextPacketBudgetExclusionV01),
   ]);
   const tensions = normalizeIssuesV01(input.tensions ?? [], "tension");
   const risks = normalizeIssuesV01(input.risks ?? [], "risk");
@@ -293,7 +282,7 @@ export function buildTaskContextPacketV01(
     estimated_tokens: null,
     truncation_applied:
       requestedBudget.truncation_applied ||
-      selectedContext.length !== allSelectedContext.length ||
+      droppedSelectedContext.length > 0 ||
       projectionItems.length !== allProjectionItems.length,
   };
   const authoritySummary = createTaskContextPacketAuthoritySummaryV01(
@@ -371,6 +360,50 @@ export function buildTaskContextPacketV01(
   };
   assertTaskContextPacketBuildBudgetV01(packet);
   return packet;
+}
+
+/** Select working context deterministically; mandatory entries may never be truncated. */
+export function selectTaskContextPacketEntriesV01(
+  entries: TaskContextPacketSelectedEntryV01[],
+  budget: Pick<TaskContextPacketContextBudgetV01, "max_selected_entries">,
+  requiredEntryIds: readonly string[] = [],
+): {
+  selected: TaskContextPacketSelectedEntryV01[];
+  dropped: TaskContextPacketSelectedEntryV01[];
+} {
+  const normalized = normalizeSelectedContextV01(entries);
+  const requiredIds = new Set(requiredEntryIds);
+  if (
+    [...requiredIds].some(
+      (id) => !normalized.some((entry) => entry.entry_id === id),
+    )
+  ) {
+    throw new Error("task_context_required_selection_missing");
+  }
+  const required = normalized.filter((entry) => requiredIds.has(entry.entry_id));
+  const optional = normalized.filter((entry) => !requiredIds.has(entry.entry_id));
+  const limit = budget.max_selected_entries ?? DEFAULT_MAX_SELECTED_ENTRIES;
+  if (required.length > limit) {
+    throw new RangeError("task_context_mandatory_selection_budget_exceeded");
+  }
+  return {
+    selected: [...required, ...optional.slice(0, limit - required.length)].sort(
+      compareCanonical,
+    ),
+    dropped: optional.slice(limit - required.length),
+  };
+}
+
+export function createTaskContextPacketBudgetExclusionV01(
+  entry: TaskContextPacketSelectedEntryV01,
+): TaskContextPacketExcludedEntryV01 {
+  return {
+    entry_id: `budget-excluded:${entry.entry_id}`,
+    source_ref: entry.source_ref,
+    external_ref: entry.external_ref,
+    why_excluded: "Excluded by the explicit selected-context budget.",
+    currentness: entry.currentness,
+  };
 }
 
 export function createTaskContextPacketAuthoritySummaryV01(

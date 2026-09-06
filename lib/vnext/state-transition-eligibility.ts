@@ -25,7 +25,11 @@ import {
   compareStateTransitionReceiptReplayCompatibilityV01,
   validateStateTransitionReceiptV01,
 } from "@/lib/vnext/state-transition-receipt";
-import { validateTaskContextPacketV01 } from "@/lib/vnext/task-context-packet";
+import {
+  createTaskContextPacketBudgetExclusionV01,
+  selectTaskContextPacketEntriesV01,
+  validateTaskContextPacketV01,
+} from "@/lib/vnext/task-context-packet";
 import type { ExternalRefV01 } from "@/types/vnext/external-ref";
 import type {
   EpisodeDeltaProposalOperationV01,
@@ -945,6 +949,15 @@ export function validateTaskContextPacketTransitionRelationV01(
     return buildPacketRelationResult(accumulator);
   }
 
+  if (priorPacket.packet_id === laterPacket.packet_id) {
+    addPacketRelationError(
+      accumulator,
+      "packet_transition_self_reference",
+      "$.later_packet.packet_id",
+      "A later packet must be distinct from its prior packet, including on reselection.",
+    );
+  }
+
   for (const [actual, expected, code, path] of [
     [
       priorPacket.workspace_id,
@@ -996,6 +1009,27 @@ export function validateTaskContextPacketTransitionRelationV01(
   }
 
   const receiptRef = createStateTransitionReceiptLineageRefV01(receipt);
+  const newReceiptRefs = laterPacket.compatibility.source_refs.filter(
+    (ref) =>
+      ref.ref_type === receiptRef.ref_type &&
+      ref.compatibility_namespace === receiptRef.compatibility_namespace &&
+      !priorPacket.compatibility.source_refs.some(
+        (prior) => canonicalExternalRef(prior) === canonicalExternalRef(ref),
+      ),
+  );
+  if (
+    newReceiptRefs.length > 0 &&
+    !newReceiptRefs.some(
+      (ref) => canonicalExternalRef(ref) === canonicalExternalRef(receiptRef),
+    )
+  ) {
+    addPacketRelationError(
+      accumulator,
+      "transition_receipt_not_new_packet_source",
+      "$.later_packet.compatibility.source_refs",
+      "A newly bound Transition cannot be replaced by a carried historical receipt.",
+    );
+  }
   const exactLineage = laterPacket.compatibility.source_refs.some(
     (ref) => canonicalExternalRef(ref) === canonicalExternalRef(receiptRef),
   );
@@ -1032,6 +1066,7 @@ export function validateTaskContextPacketTransitionRelationV01(
 
   const affectedBeforeSnapshotKeys = new Set<string>();
   const expectedAfterSelectionKeys = new Set<string>();
+  const afterSelections: TaskContextPacketSelectedEntryV01[] = [];
   const expectedRetractionExclusionKeys = new Set<string>();
   let hasCreateEffect = false;
   for (const [effectIndex, effect] of receipt.effects.entries()) {
@@ -1062,6 +1097,7 @@ export function validateTaskContextPacketTransitionRelationV01(
         );
       } else {
         expectedAfterSelectionKeys.add(selectedStateKey(exactEntry));
+        afterSelections.push(exactEntry);
       }
     }
     const beforeState = effect.before_state;
@@ -1084,21 +1120,9 @@ export function validateTaskContextPacketTransitionRelationV01(
           "Replaced, superseded, or retracted before-state must not remain selected.",
         );
       }
-      const priorIncluded = priorPacket.selected_context.some((entry) =>
-        selectedEntryMatchesSnapshot(
-          entry,
-          beforeState.state_ref,
-          beforeState.state_fingerprint,
-        ),
-      );
-      if (!priorIncluded) {
-        addPacketRelationError(
-          accumulator,
-          "prior_before_state_missing",
-          "$.prior_packet.selected_context",
-          "Strict transition relation requires the present before-state in prior selected context.",
-        );
-      }
+      // Prior selection is working context, not proof that canonical state
+      // exists. Full-chain eligibility validates the exact before-state and
+      // required prior applied lineage independently of packet selection.
       if (effect.operation === "retract") {
         const identityMatches = laterPacket.excluded_context.filter(
           (entry) => externalRefIdentity(entry.external_ref) === beforeIdentity,
@@ -1168,9 +1192,47 @@ export function validateTaskContextPacketTransitionRelationV01(
     if (entry.entry_kind !== "accepted_state_ref") return true;
     return !expectedAfterSelectionKeys.has(selectedStateKey(entry));
   });
+  let expectedUnrelated = priorUnrelated;
+  try {
+    const selection = selectTaskContextPacketEntriesV01(
+      [...priorUnrelated, ...afterSelections],
+      laterPacket.constraints.context_budget,
+      [
+        ...priorUnrelated.filter((entry) => entry.entry_kind !== "accepted_state_ref"),
+        ...afterSelections,
+      ].map((entry) => entry.entry_id),
+    );
+    expectedUnrelated = selection.selected.filter(
+      (entry) => !expectedAfterSelectionKeys.has(selectedStateKey(entry)),
+    );
+    for (const dropped of selection.dropped) {
+      const expectedExclusion = createTaskContextPacketBudgetExclusionV01(dropped);
+      if (
+        !laterPacket.excluded_context.some(
+          (entry) => canonicalizeProtocolValueV01(entry) ===
+            canonicalizeProtocolValueV01(expectedExclusion),
+        ) ||
+        !laterPacket.constraints.context_budget.truncation_applied
+      ) {
+        addPacketRelationError(
+          accumulator,
+          "budget_exclusion_missing_or_inexact",
+          "$.later_packet.excluded_context",
+          "Omitted optional selections require exact, truthful budget exclusions.",
+        );
+      }
+    }
+  } catch {
+    addPacketRelationError(
+      accumulator,
+      "task_context_mandatory_selection_budget_exceeded",
+      "$.later_packet.constraints.context_budget",
+      "Required context and present Transition effects must fit the declared budget.",
+    );
+  }
   if (
     canonicalizeProtocolValueV01(
-      [...priorUnrelated].sort(compareProtocolCanonicalV01),
+      [...expectedUnrelated].sort(compareProtocolCanonicalV01),
     ) !==
     canonicalizeProtocolValueV01(
       [...laterUnrelated].sort(compareProtocolCanonicalV01),
@@ -1180,7 +1242,7 @@ export function validateTaskContextPacketTransitionRelationV01(
       accumulator,
       "unrelated_selected_context_changed",
       "$.later_packet.selected_context",
-      "Unrelated selected context must remain unchanged in the strict relation.",
+      "Unrelated context may change only through the deterministic optional accepted-state budget selection.",
     );
   }
 

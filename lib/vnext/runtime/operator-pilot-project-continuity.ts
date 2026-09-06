@@ -4,6 +4,7 @@ import { VNEXT_LOCAL_CONTEXT_USE_PROBE_VERSION_V01 } from "@/lib/vnext/adapters/
 import {
   assertVNextCoreRecordMatchesProtocolPayloadBindingV01,
   assertVNextDurableSemanticStoreSchemaV01,
+  assertVNextSemanticProjectionPresenceV01,
   deriveVNextSemanticTargetKeyV01,
   iterateVNextCoreRecordsV01,
   listVNextSemanticStateEntriesV01,
@@ -40,6 +41,7 @@ import {
   validateSemanticTransitionFullChainV01,
 } from "@/lib/vnext/state-transition-eligibility";
 import {
+  createValidatedVNextSemanticTransitionRelationReadSessionV01,
   loadValidatedVNextSemanticTransitionRelationV01,
 } from "@/lib/vnext/runtime/durable-semantic-transition";
 import {
@@ -832,6 +834,7 @@ function* loadTransitionReceipts(db: Database.Database, config: VNextLocalOperat
 }
 
 function validateCurrentSemanticState(db: Database.Database, config: VNextLocalOperatorPilotConfigV01) {
+  assertVNextSemanticProjectionPresenceV01(db, config);
   const entries = listVNextSemanticStateEntriesV01(db, config);
   if (entries.length > MAX_STATE_TARGETS) {
     throw continuityError("operator_pilot_semantic_state_bound_exceeded", 422);
@@ -1027,26 +1030,30 @@ function validateCompiledPacketLineage(
   if (immediatePrior.status !== "resolved") {
     throw continuityError("operator_pilot_compiled_packet_lineage_ambiguous", 422);
   }
-  const transitionCandidates = receiptRefs.map((receiptRef) => {
-    if (!receiptRef.source_ref) {
-      throw continuityError("operator_pilot_compiled_packet_lineage_invalid", 422);
-    }
-    const transition = loadValidatedVNextSemanticTransitionRelationV01(db, {
-      workspace_id: config.workspace_id,
-      project_id: config.project_id,
-      transition_receipt_id: receiptRef.external_id,
-      transition_receipt_fingerprint: receiptRef.source_ref,
+  // Validate every candidate in one read snapshot. Shared immutable ancestors
+  // need one exact validation here; the bounded session never escapes this read.
+  const transitionCandidates = db.transaction(() => {
+    const readTransition =
+      createValidatedVNextSemanticTransitionRelationReadSessionV01(db, config);
+    return receiptRefs.map((receiptRef) => {
+      if (!receiptRef.source_ref) {
+        throw continuityError("operator_pilot_compiled_packet_lineage_invalid", 422);
+      }
+      const transition = readTransition({
+        transition_receipt_id: receiptRef.external_id,
+        transition_receipt_fingerprint: receiptRef.source_ref,
+      });
+      if (
+        canonicalizeProtocolValueV01(receiptRef) !==
+        canonicalizeProtocolValueV01(
+          createStateTransitionReceiptLineageRefV01(transition.receipt),
+        )
+      ) {
+        throw continuityError("operator_pilot_compiled_packet_provenance_mismatch", 422);
+      }
+      return transition;
     });
-    if (
-      canonicalizeProtocolValueV01(receiptRef) !==
-      canonicalizeProtocolValueV01(
-        createStateTransitionReceiptLineageRefV01(transition.receipt),
-      )
-    ) {
-      throw continuityError("operator_pilot_compiled_packet_provenance_mismatch", 422);
-    }
-    return transition;
-  });
+  })();
   const relations = transitionCandidates.flatMap((transition) => {
       const relation = validateSemanticTransitionFullChainV01({
         ...transition.eligibility_input,
@@ -1106,11 +1113,12 @@ function validateCompiledPacketLineage(
   const packetSelections = packet.selected_context.filter(
     (entry) => entry.entry_kind === "accepted_state_ref",
   );
-  const fullSelectionCurrent =
-    packetSelections.length === currentEntries.length &&
-    currentEntries.every((projection) =>
-      packetSelections.some(
-        (entry) =>
+  // Packet selection is bounded working context. Omitted canonical states do
+  // not make it stale; every state it actually selects must still be current.
+  const selectionCurrent =
+    packetSelections.every((entry) =>
+      currentEntries.some(
+        (projection) =>
           entry.source_ref === projection.state_fingerprint &&
           canonicalizeProtocolValueV01(entry.external_ref) ===
             canonicalizeProtocolValueV01(projection.state_ref),
@@ -1123,7 +1131,7 @@ function validateCompiledPacketLineage(
       packet_id: priorPacket.packet_id,
       packet_fingerprint: priorPacket.integrity.fingerprint,
     },
-    projection_current: affectedCurrent && fullSelectionCurrent,
+    projection_current: affectedCurrent && selectionCurrent,
     source_transition_receipt: {
       transition_receipt_id: transition.receipt.transition_receipt_id,
       transition_receipt_fingerprint: transition.receipt.integrity.fingerprint,

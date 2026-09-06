@@ -8,6 +8,7 @@ import {
 import {
   assertVNextCoreRecordMatchesProtocolPayloadBindingV01,
   assertVNextDurableSemanticStoreSchemaV01,
+  assertVNextSemanticProjectionPresenceV01,
   deriveVNextSemanticTargetKeyV01,
   insertVNextCoreRecordV01,
   listVNextSemanticStateEntriesV01,
@@ -31,7 +32,6 @@ import {
   validateSemanticTransitionFullChainV01,
   type StateTransitionFullChainValidationInputV01,
 } from "@/lib/vnext/state-transition-eligibility";
-import { validateStateTransitionReceiptV01 } from "@/lib/vnext/state-transition-receipt";
 import {
   buildTaskContextPacketV01,
   validateTaskContextPacketV01,
@@ -391,7 +391,8 @@ function compileTaskContextPacketInternalV01(
     transition,
     currentStateEntries,
   );
-  validateUnrelatedPersistedStateSelections(
+  assertVNextSemanticProjectionPresenceV01(db, input);
+  validatePersistedStateAndPriorSelections(
     db,
     transition,
     currentStateEntries,
@@ -428,6 +429,47 @@ function compileTaskContextPacketInternalV01(
         .map((issue) => issue.code)
         .join(",")}`,
     );
+  }
+  // Readers reconstruct the binding from every referenced receipt, not from
+  // the caller's chosen receipt. In particular, unchanged reselection can
+  // otherwise validate against more than one already-carried Transition.
+  for (const ref of laterPacket.compatibility.source_refs) {
+    if (
+      ref.ref_type !== "state_transition_receipt" ||
+      ref.compatibility_namespace !== "augnes.vnext.state-transition-receipt.v0.1"
+    ) {
+      continue;
+    }
+    if (!ref.source_ref) {
+      throw new Error("compiled_packet_transition_source_missing");
+    }
+    const candidate =
+      ref.external_id === transition.receipt.transition_receipt_id &&
+      ref.source_ref === transition.receipt.integrity.fingerprint
+      ? transition
+      : loadValidatedVNextSemanticTransitionRelationV01(db, {
+          workspace_id: input.workspace_id,
+          project_id: input.project_id,
+          transition_receipt_id: ref.external_id,
+          transition_receipt_fingerprint: ref.source_ref,
+        });
+    if (
+      canonicalizeProtocolValueV01(ref) !== canonicalizeProtocolValueV01(
+        createStateTransitionReceiptLineageRefV01(candidate.receipt),
+      )
+    ) {
+      throw new Error("compiled_packet_transition_source_provenance_mismatch");
+    }
+    if (candidate === transition) continue;
+    const alternative = validateSemanticTransitionFullChainV01({
+      ...candidate.eligibility_input,
+      receipt: candidate.receipt,
+      prior_packet: input.prior_packet,
+      later_packet: laterPacket,
+    });
+    if (alternative.status === "valid") {
+      throw new Error("compiled_packet_transition_lineage_ambiguous");
+    }
   }
   const write = insertVNextCoreRecordV01(db, {
     record_kind: "task_context_packet",
@@ -569,7 +611,7 @@ function resolvePersistedEffectStates(
   );
 }
 
-function validateUnrelatedPersistedStateSelections(
+function validatePersistedStateAndPriorSelections(
   db: Database.Database,
   transition: ValidatedVNextSemanticTransitionRelationV01,
   currentEntries: VNextSemanticStateProjectionEntryV01[],
@@ -597,23 +639,25 @@ function validateUnrelatedPersistedStateSelections(
       snapshotKey(projection.state_ref, projection.state_fingerprint),
     ),
   );
+  const sourceReceipts = new Map<string, StateTransitionReceiptV01>();
+  const selectedSnapshots = new Set(
+    priorPacket.selected_context.map(selectedEntrySnapshotKey),
+  );
   for (const projection of currentEntries) {
     if (affectedTargetKeys.has(projection.target_key)) continue;
-    assertProjectionHeadAndReceipt(db, projection);
+    const sourceReceipt = assertProjectionHeadAndReceipt(db, projection);
     const state = loadValidatedProjectionState(db, projection);
-    const exactPriorSelection = priorPacket.selected_context.some(
-      (entry) =>
-        entry.entry_kind === "accepted_state_ref" &&
-        entry.source_ref === state.state_content_fingerprint &&
-        entry.trust_class === state.state_ref.trust_class &&
-        canonicalizeProtocolValueV01(entry.external_ref) ===
-          canonicalizeProtocolValueV01(state.state_ref),
-    );
-    if (!exactPriorSelection) {
-      throw new Error(
-        "unrelated_persisted_state_missing_from_prior_packet_selection",
-      );
+    // Canonical integrity belongs to persisted state, heads and exact applied
+    // lineage, even when this task did not select a state into its packet.
+    if (
+      state.source_decision_id !== sourceReceipt.source_decision.decision_id ||
+      state.source_decision_fingerprint !==
+        sourceReceipt.source_decision.decision_fingerprint
+    ) {
+      throw new Error("applied_semantic_state_record_drift");
     }
+    const key = snapshotKey(projection.state_ref, projection.state_fingerprint);
+    if (selectedSnapshots.has(key)) sourceReceipts.set(key, sourceReceipt);
   }
   for (const entry of priorPacket.selected_context) {
     if (
@@ -633,6 +677,24 @@ function validateUnrelatedPersistedStateSelections(
       !currentProjectionSnapshots.has(key)
     ) {
       throw new Error("prior_packet_stale_local_semantic_state_selection");
+    }
+    if (affectedBeforeSnapshots.has(key)) continue;
+    const receipt = sourceReceipts.get(key) ?? transition.receipt;
+    const effect = receipt.effects.find(
+      (item) =>
+        item.after_state.presence === "present" &&
+        snapshotKey(item.after_state.state_ref, item.after_state.state_fingerprint) === key,
+    );
+    if (
+      !effect ||
+      entry.trust_class !== entry.external_ref.trust_class ||
+      canonicalizeProtocolValueV01(entry.compatibility_source_ref) !==
+        canonicalizeProtocolValueV01(createStateTransitionReceiptLineageRefV01(receipt)) ||
+      canonicalizeProtocolValueV01(entry.currentness.source_ref) !==
+        canonicalizeProtocolValueV01(effect.after_application_observation_ref) ||
+      entry.currentness.as_of !== effect.after_application_observation_ref.observed_at
+    ) {
+      throw new Error("prior_packet_local_semantic_state_provenance_mismatch");
     }
   }
 }
@@ -735,7 +797,7 @@ function assertTargetHeadMatchesReceiptEffect(
 function assertProjectionHeadAndReceipt(
   db: Database.Database,
   projection: VNextSemanticStateProjectionEntryV01,
-): void {
+): StateTransitionReceiptV01 {
   const head = readRequiredTargetHead(
     db,
     projection.workspace_id,
@@ -754,37 +816,35 @@ function assertProjectionHeadAndReceipt(
   ) {
     throw new Error("semantic_target_head_projection_drift");
   }
-  const record = readVNextCoreRecordV01(db, {
-    record_kind: "state_transition_receipt",
-    record_id: head.source_transition_receipt_id,
+  const transition = loadValidatedVNextSemanticTransitionRelationV01(db, {
+    transition_receipt_id: head.source_transition_receipt_id,
+    transition_receipt_fingerprint: head.source_transition_receipt_fingerprint,
     workspace_id: projection.workspace_id,
     project_id: projection.project_id,
   });
-  if (!record) throw new Error("semantic_target_head_receipt_missing");
-  const validation = validateStateTransitionReceiptV01(record.payload);
-  if (validation.status !== "valid") {
-    throw new Error("semantic_target_head_receipt_invalid");
-  }
-  const receipt = record.payload as StateTransitionReceiptV01;
-  assertVNextCoreRecordMatchesProtocolPayloadBindingV01(record, {
-    workspace_id: receipt.workspace_id,
-    project_id: receipt.project_id,
-    fingerprint: receipt.integrity.fingerprint,
-  });
+  const receipt = transition.receipt;
   const effect = receipt.effects.find(
     (item) =>
       deriveVNextSemanticTargetKeyV01(item.target_ref) ===
       projection.target_key,
   );
   if (
-    record.record_id !== receipt.transition_receipt_id ||
-    record.idempotency_key !== receipt.idempotency_key ||
-    record.created_at !== receipt.recorded_at ||
-    !effect
+    !effect ||
+    effect.after_state.presence !== "present" ||
+    canonicalizeProtocolValueV01(effect.after_state.state_ref) !==
+      canonicalizeProtocolValueV01(projection.state_ref) ||
+    receipt.source_proposal.proposal_id !== projection.source_proposal_id ||
+    receipt.source_proposal.proposal_fingerprint !== projection.source_proposal_fingerprint ||
+    receipt.source_candidate.candidate_id !== projection.source_candidate_id ||
+    receipt.source_candidate.candidate_fingerprint !== projection.source_candidate_fingerprint ||
+    transition.gate_record.intended_effects.find(
+      (item) => item.target_key === projection.target_key,
+    )?.expected_revision !== head.revision
   ) {
     throw new Error("semantic_target_head_receipt_drift");
   }
   assertTargetHeadMatchesReceiptEffect(head, receipt, effect);
+  return receipt;
 }
 
 function buildLaterPacket(
@@ -878,7 +938,19 @@ function buildLaterPacket(
     current_projection: input.prior_packet.current_projection,
     selected_context: selectedContext,
     excluded_context: [
-      ...input.prior_packet.excluded_context,
+      ...input.prior_packet.excluded_context.filter((entry) => {
+        if (
+          entry.why_excluded !== "Excluded by the explicit selected-context budget." ||
+          !entry.external_ref ||
+          !entry.source_ref
+        ) {
+          return true;
+        }
+        const key = snapshotKey(entry.external_ref, entry.source_ref);
+        return !beforeSnapshots.has(key) && !selectedContext.some(
+          (selected) => selectedEntrySnapshotKey(selected) === key,
+        );
+      }),
       ...retractExclusions,
       ...(canonicalPersonalPerspectiveScope
         ? personalPerspectiveSelection.excluded_context
@@ -928,6 +1000,13 @@ function buildLaterPacket(
       ...input.prior_packet.authority_summary.notes,
       "The Context Compiler reads persisted state but does not authorize or apply semantic transitions.",
     ],
+  }, {
+    required_selected_entry_ids: selectedContext.filter((entry) =>
+      entry.entry_kind !== "accepted_state_ref" ||
+      presentEffects.some(({ projection }) =>
+        selectedEntrySnapshotKey(entry) === snapshotKey(projection.state_ref, projection.state_fingerprint),
+      ),
+    ).map((entry) => entry.entry_id),
   });
 }
 
