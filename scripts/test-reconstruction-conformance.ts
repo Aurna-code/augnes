@@ -35,6 +35,7 @@ import {
 import {
   insertVNextCoreRecordV01,
   listVNextCoreRecordsV01,
+  listVNextSemanticStateEntriesV01,
   readVNextCoreRecordV01,
 } from "../lib/vnext/persistence/durable-semantic-store";
 import {
@@ -81,6 +82,7 @@ import {
 } from "../lib/vnext/runtime/local-operator-session";
 import { readProjectVerifyLineageV01 } from "../lib/vnext/runtime/project-verify-lineage";
 import { readProjectVerifyReconciliationV01 } from "../lib/vnext/runtime/project-verify-reconciliation";
+import { readProjectWorkInitializationV01 } from "../lib/vnext/runtime/project-work-initialization";
 import {
   projectVNextOperatorPilotContinuityV01,
   resolveVNextOperatorPilotPendingContextUseReviewV01,
@@ -232,6 +234,15 @@ async function main(): Promise<void> {
       baseFixtureManifest,
     );
     const fixtureManifest = augmentation.manifest;
+    const sparseSourceStates = listVNextSemanticStateEntriesV01(source, fixtureManifest);
+    assert(sparseSourceStates.length > 1);
+    const sparseSourcePacket = readVNextCoreRecordV01(source, {
+      ...fixtureManifest, record_kind: "task_context_packet", record_id: fixtureManifest.packet_id,
+    })!.payload as TaskContextPacketV01;
+    assert.equal(sparseSourcePacket.selected_context.filter((entry) => entry.entry_kind === "accepted_state_ref").length, 1);
+    assert(sparseSourceStates.some((state) => sparseSourcePacket.excluded_context.some((entry) =>
+      entry.source_ref === state.state_fingerprint && entry.why_excluded === "Excluded by the explicit selected-context budget.")));
+    record("sparse_task_selection_preserves_unselected_current_state");
     assert.equal(augmentation.provider_calls, 0);
     assert.equal(augmentation.external_network_calls, 0);
     record("project_verify_lifecycle_uses_current_authenticated_writers_and_zero_model_later_use");
@@ -269,6 +280,31 @@ async function main(): Promise<void> {
       sourceDbPath,
       fixtureManifest,
     );
+    // A valid sibling is a real ambiguity. Packet succession must not choose
+    // between disconnected tips merely by timestamp or selected-state count.
+    source.exec("SAVEPOINT sparse_work_branch");
+    try {
+      const priorPacket = readVNextCoreRecordV01(source, {
+        ...fixtureManifest,
+        record_kind: "task_context_packet",
+        record_id: augmentation.immediate_prior_packet_ref.packet_id,
+      })!.payload as TaskContextPacketV01;
+      const sibling = compileTaskContextPacketFromPersistedSemanticStateInsideTransactionV01(source, {
+        workspace_id: fixtureManifest.workspace_id,
+        project_id: fixtureManifest.project_id,
+        prior_packet: priorPacket,
+        transition_receipt_id: fixtureManifest.transition_receipt_id,
+        transition_receipt_fingerprint: fixtureManifest.transition_receipt_fingerprint,
+        expiry_policy: { mode: "explicit", expires_at: null },
+        clock: fixedClockV01(new Date(Date.parse(sparseSourcePacket.generated_at) + 1_000).toISOString()),
+      });
+      assert.equal(sibling.full_chain_relation.status, "valid");
+      assert.equal(readProjectWorkInitializationV01(source, fixtureManifest).reason,
+        "multiple_current_packet_candidates");
+    } finally {
+      source.exec("ROLLBACK TO sparse_work_branch; RELEASE sparse_work_branch");
+    }
+    record("sparse_current_work_uses_exact_succession_and_refuses_disconnected_tips");
     const baselineSelection = readActiveProjectSelectionV01(
       source,
       fixtureManifest.workspace_id,
@@ -344,6 +380,10 @@ async function main(): Promise<void> {
     });
     assert.equal(imported.status, "imported");
     assert.equal(imported.projection_reader_verification, "verified");
+    // The source-owned portable validator and importer both require full
+    // recovery validation; reuse that boundary instead of repeating its reads.
+    assert.deepEqual(listVNextSemanticStateEntriesV01(reconstructed, fixtureManifest), sparseSourceStates);
+    record("portable_reconstruction_and_full_recovery_preserve_all_current_state_independent_of_sparse_packet_selection");
     assert.equal(imported.semantic_authority_created, false);
     assert.equal(imported.automation_authority_created, false);
     assert.equal(imported.external_action_created, false);
@@ -1008,6 +1048,14 @@ function withRc1CriterionVerificationPlanV01(
     },
     constraints: {
       ...packet.constraints,
+      context_budget: {
+        ...packet.constraints.context_budget,
+        // One task-selected semantic state; other current states remain in
+        // Core and must survive exact portable reconstruction independently.
+        max_selected_entries: packet.selected_context.filter(
+          (entry) => entry.entry_kind !== "accepted_state_ref",
+        ).length + 1,
+      },
       required_checks: [
         ...new Set([
           ...packet.constraints.required_checks,
@@ -1023,6 +1071,21 @@ function withRc1CriterionVerificationPlanV01(
           ...packet.return_contract.required_checks,
           ...requiredChecks,
         ]),
+      ],
+    },
+    compatibility: {
+      ...packet.compatibility,
+      source_refs: [
+        ...packet.compatibility.source_refs,
+        {
+          ref_version: "external_ref.v0.1",
+          ref_type: "task_context_packet",
+          external_id: packet.packet_id,
+          trust_class: "derived_interpretation",
+          observed_at: packet.generated_at,
+          source_ref: packet.integrity.fingerprint,
+          compatibility_namespace: VNEXT_PERSISTED_SEMANTIC_CONTEXT_COMPILER_VERSION_V01,
+        },
       ],
     },
     authority_notes: [...authoritySummary.notes],
@@ -1542,6 +1605,10 @@ async function readCurrentOwnersV01(
     config,
     clock: { now: () => OBSERVED_AT },
   });
+  assert.equal(operatorContinuity.latest_compiled_packet?.packet_id, manifest.packet_id);
+  assert.equal(operatorContinuity.packet_currentness, "fresh");
+  assert.equal(operatorContinuity.latest_compiled_packet?.accepted_state_count, 1);
+  assert(operatorContinuity.current_accepted_state_count > 1);
   const pendingFeedback = resolveVNextOperatorPilotPendingContextUseReviewV01(
     db,
     { config, continuity: operatorContinuity },
@@ -2495,7 +2562,13 @@ function rebuildPacketWithRetiredSelectionV01(
       (entry) => entry.entry_id !== retired.entry_id,
     ),
     authority_notes: [...authoritySummary.notes],
-  } satisfies TaskContextPacketBuilderInputV01);
+  } satisfies TaskContextPacketBuilderInputV01, {
+    required_selected_entry_ids: [
+      ...packet.selected_context.filter((entry) => entry.entry_kind !== "accepted_state_ref")
+        .map((entry) => entry.entry_id),
+      retired.entry_id,
+    ],
+  });
 }
 
 function verifyRelationVocabularyV01(

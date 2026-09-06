@@ -1311,6 +1311,43 @@ export function listVNextSemanticStateEntriesV01(
   return rows.map(parseProjection);
 }
 
+/** A present target head must have a current projection even when no packet selects it. */
+export function assertVNextSemanticProjectionPresenceV01(
+  db: Database.Database,
+  input: { workspace_id: string; project_id: string },
+): void {
+  const mismatch = db.prepare(
+    `SELECT 1 FROM vnext_semantic_target_heads AS head
+     LEFT JOIN vnext_semantic_state_entries AS state
+       ON state.workspace_id = head.workspace_id AND state.project_id = head.project_id
+       AND state.target_key = head.target_key
+     WHERE head.workspace_id = ? AND head.project_id = ?
+       AND ((head.presence = 'present' AND state.target_key IS NULL)
+         OR (head.presence = 'absent' AND state.target_key IS NOT NULL))
+     LIMIT 1`,
+  ).get(input.workspace_id, input.project_id);
+  if (mismatch) throw new Error("semantic_target_head_projection_presence_mismatch");
+  // Applied gate targets retain a head even after retraction. Check the
+  // immutable source too, so losing both mutable rows cannot hide an omitted
+  // state. SQLite returns only the existence result, not history payloads.
+  const missingAppliedHead = db.prepare(
+    `SELECT 1 FROM vnext_core_records AS receipt
+     JOIN vnext_core_records AS gate
+       ON gate.record_kind = 'semantic_commit_gate'
+       AND gate.workspace_id = receipt.workspace_id AND gate.project_id = receipt.project_id
+       AND gate.record_id = json_extract(receipt.payload_json, '$.semantic_commit_gate.evaluation_ref.external_id')
+     JOIN json_each(gate.payload_json, '$.intended_effects') AS effect
+     LEFT JOIN vnext_semantic_target_heads AS head
+       ON head.workspace_id = receipt.workspace_id AND head.project_id = receipt.project_id
+       AND head.target_key = json_extract(effect.value, '$.target_key')
+     WHERE receipt.record_kind = 'state_transition_receipt'
+       AND receipt.workspace_id = ? AND receipt.project_id = ?
+       AND head.target_key IS NULL
+     LIMIT 1`,
+  ).get(input.workspace_id, input.project_id);
+  if (missingAppliedHead) throw new Error("semantic_target_head_missing");
+}
+
 export function listRecentVNextSemanticStateEntriesV01(
   db: Database.Database,
   input: { workspace_id: string; project_id: string; limit: number },

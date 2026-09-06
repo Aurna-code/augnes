@@ -85,7 +85,10 @@ import {
   validateStateTransitionReceiptAgainstEligibilityV01,
   validateTaskContextPacketTransitionRelationV01,
 } from "../lib/vnext/state-transition-eligibility";
-import { compileTaskContextPacketFromPersistedSemanticStateV01 } from "../lib/vnext/runtime/persisted-semantic-context-compiler";
+import {
+  compileTaskContextPacketFromPersistedSemanticStateV01,
+  compileTaskContextPacketFromPersistedSemanticStateInsideTransactionV01,
+} from "../lib/vnext/runtime/persisted-semantic-context-compiler";
 import {
   buildRunReceiptV01,
   validateRunReceiptV01,
@@ -95,6 +98,7 @@ import {
   validateStateTransitionReceiptV01,
 } from "../lib/vnext/state-transition-receipt";
 import { createSemanticTransitionDecisionInputV01 } from "../fixtures/vnext/protocol/semantic-transition-loop-v0-1";
+import { buildSemanticReviewLoopProposalFixture } from "../fixtures/vnext/protocol/semantic-review-loop-v0-1";
 import type { ExternalRefV01 } from "../types/vnext/external-ref";
 import type { StateTransitionReceiptV01 } from "../types/vnext/state-transition-receipt";
 import type { StateTransitionReceiptBuilderInputV01 } from "../types/vnext/state-transition-receipt";
@@ -2281,6 +2285,7 @@ function runContextCompilerCoverage(
     { packet_id: string; fingerprint: string }
   > = {};
   try {
+    runSparseContextCompilerCoverage(openDatabase, projectAScenarios);
     const lookup = openDatabase("lookup-refusals");
     const lookupApplied = applyCreateScenario(
       lookup.database,
@@ -2381,7 +2386,7 @@ function runContextCompilerCoverage(
           { ...canonicalInput, prior_packet: boundedPrior },
         ),
       lookupBaseline,
-      /semantic_transition_full_chain_invalid/,
+      /task_context_mandatory_selection_budget_exceeded/,
       "bounded packet cannot silently drop required context",
     );
     const staleLocalPrior = rebuildPacketV01(
@@ -2493,31 +2498,58 @@ function runContextCompilerCoverage(
           opened.database,
           compilerInput(
             seedScenario,
-            projectAScenarios.prefix.prior_packet,
+            rebuildPacketV01(projectAScenarios.prefix.prior_packet, {}, {
+              max_selected_entries: projectAScenarios.prefix.prior_packet.selected_context.length + 1,
+            }),
             seed.committed.transition_receipt,
             DURABLE_LOCAL_LOOP_LATER_PACKET_GENERATED_AT,
           ),
         );
-      const followupPrepared = prepareAndAuthorizeGateScenario(
-        opened.database,
-        scenario,
-        false,
+      // The source-owned before-state remains usable when another task
+      // selected a different state into the sole semantic context slot.
+      const fillerProposal = buildSemanticReviewLoopProposalFixture(
+        projectAScenarios.prefix.project, projectAScenarios.prefix.prior_packet,
+        projectAScenarios.prefix.run_receipt, { candidate_namespace: `omitted-before-${operation}` },
       );
+      const fillerScenario: DurableLocalSemanticGateScenarioV01 = {
+        scenario_id: "create", proposal: fillerProposal,
+        decision: buildReviewDecisionV01(createSemanticTransitionDecisionInputV01(projectAScenarios.prefix.project, fillerProposal)),
+        expected_operations: ["create"], expected_target_count: 1,
+      };
+      const filler = applyCreateScenario(opened.database, fillerScenario);
+      const beforeOmitted = compileTaskContextPacketFromPersistedSemanticStateV01(
+        opened.database, compilerInput(fillerScenario, priorCompiled.later_packet,
+          filler.committed.transition_receipt, DURABLE_LOCAL_LOOP_LATER_PACKET_GENERATED_AT),
+      );
+      const beforeState = seed.committed.transition_receipt.effects[0]!.after_state;
+      assert(!beforeOmitted.later_packet.selected_context.some((entry) => entry.source_ref === beforeState.state_fingerprint));
+      assert(beforeOmitted.later_packet.excluded_context.some((entry) => entry.source_ref === beforeState.state_fingerprint &&
+        entry.why_excluded === "Excluded by the explicit selected-context budget."));
+      const followupPrepared = prepareAndAuthorizeGateScenario(opened.database, scenario, false);
       const followup = commitVNextSemanticTransitionV01(
-        opened.database,
-        writerCommitInput(scenario, followupPrepared.authorization),
+        opened.database, writerCommitInput(scenario, followupPrepared.authorization),
       );
       const compiled = compileTaskContextPacketFromPersistedSemanticStateV01(
         opened.database,
         compilerInput(
           scenario,
-          priorCompiled.later_packet,
+          beforeOmitted.later_packet,
           followup.transition_receipt,
           DURABLE_LOCAL_LOOP_FOLLOWUP_PACKET_GENERATED_AT,
         ),
       );
       assert.equal(compiled.status, "inserted");
       assert.equal(compiled.full_chain_relation.status, "valid");
+      assertCompilerRefusalNoWrite(opened, () =>
+        compileTaskContextPacketFromPersistedSemanticStateV01(opened.database,
+          compilerInput(seedScenario, compiled.later_packet, seed.committed.transition_receipt,
+            DURABLE_LOCAL_LOOP_FOLLOWUP_PACKET_GENERATED_AT)),
+        readDatabaseSnapshot(opened.database), /semantic_target_head_receipt_drift/,
+        `${operation} cannot reselect the retired source receipt's state`);
+      if (operation !== "replace") {
+        assert.notEqual(validateSemanticTransitionFullChainV01({ ...compiled.full_chain_input,
+          prior_state_transition_receipts: [] }).status, "valid", "omitted before-state still requires exact applied lineage");
+      }
       const priorAccepted = priorCompiled.later_packet.selected_context.find(
         (entry) => entry.entry_kind === "accepted_state_ref",
       );
@@ -2538,7 +2570,7 @@ function runContextCompilerCoverage(
           ...compiled.later_packet.selected_context,
           priorAccepted,
         ],
-      });
+      }, {}, [priorAccepted.entry_id]);
       const retainedRelation = validateSemanticTransitionFullChainV01({
         ...compiled.full_chain_input,
         later_packet: retainedBefore,
@@ -2565,7 +2597,7 @@ function runContextCompilerCoverage(
             ...compiled.later_packet.selected_context,
             invented,
           ],
-        });
+        }, {}, [invented.entry_id]);
         const inventedRelation = validateSemanticTransitionFullChainV01({
           ...compiled.full_chain_input,
           later_packet: inventedPacket,
@@ -2634,6 +2666,202 @@ function runContextCompilerCoverage(
       assert.equal(existsSync(path), false, `context compiler coverage removes ${path}`);
     }
   }
+}
+
+function runSparseContextCompilerCoverage(
+  openDatabase: (label: string) => WriterCoverageDatabaseV01,
+  scenarios: ReturnType<typeof buildDurableLocalSemanticGateScenariosV01>,
+) {
+  const opened = openDatabase("sparse-selection");
+  const { database } = opened;
+  const prefix = scenarios.prefix;
+  let packet = rebuildPacketV01({ ...prefix.prior_packet, gaps: [...prefix.prior_packet.gaps, {
+    code: "missing_selected_context",
+    summary: "No accepted semantic state exists before this disposable sequence.",
+    severity: "low", missing_fields: ["selected_context"], source_refs: [], external_refs: [],
+  }] }, { selected_context: [] });
+  const initialValidation = validateTaskContextPacketV01(packet, { evaluated_at: packet.generated_at });
+  assert.equal(initialValidation.status, "valid", JSON.stringify(initialValidation));
+  persistTaskContextPacketRecordV01(database, packet);
+  const packets = [packet];
+  const bytes = [JSON.stringify(packet)];
+  const readPacketBytes = (value: TaskContextPacketV01) => (database.prepare(
+    "SELECT payload_json FROM vnext_core_records WHERE record_id = ? AND record_kind = 'task_context_packet'",
+  ).get(value.packet_id) as { payload_json: string }).payload_json;
+  const durableBytes = [readPacketBytes(packet)];
+  const appliedStates: Array<{ scenario: DurableLocalSemanticGateScenarioV01; receipt: StateTransitionReceiptV01 }> = [];
+  let lastScenario = scenarios.create;
+  let lastReceipt: StateTransitionReceiptV01 | null = null;
+  let priorCompilation: ReturnType<typeof compileTaskContextPacketFromPersistedSemanticStateV01> | null = null;
+  for (let index = 1; index <= 4; index += 1) {
+    const proposal = buildSemanticReviewLoopProposalFixture(
+      prefix.project, prefix.prior_packet, prefix.run_receipt,
+      { candidate_namespace: `sparse-${index}` },
+    );
+    proposal.proposed_deltas[0]!.proposed_state_summary =
+      `Under condition X${index}, use the bounded fixture method; other conditions remain undecided.`;
+    proposal.proposal_id = deriveEpisodeDeltaProposalIdV01(proposal);
+    proposal.integrity.fingerprint = createEpisodeDeltaProposalFingerprintV01(proposal);
+    assert.equal(validateEpisodeDeltaProposalV01(proposal).status, "valid");
+    const scenario: DurableLocalSemanticGateScenarioV01 = {
+      scenario_id: "create",
+      proposal,
+      decision: buildReviewDecisionV01(createSemanticTransitionDecisionInputV01(prefix.project, proposal)),
+      expected_operations: ["create"],
+      expected_target_count: 1,
+    };
+    const applied = applyCreateScenario(database, scenario);
+    lastScenario = scenario;
+    lastReceipt = applied.committed.transition_receipt;
+    appliedStates.push({ scenario, receipt: lastReceipt });
+    if (index === 4) break;
+    priorCompilation = compileTaskContextPacketFromPersistedSemanticStateV01(
+      database, compilerInput(scenario, packet, lastReceipt, DURABLE_LOCAL_LOOP_LATER_PACKET_GENERATED_AT),
+    );
+    packet = priorCompilation.later_packet;
+    packets.push(packet);
+    bytes.push(JSON.stringify(packet));
+    durableBytes.push(readPacketBytes(packet));
+  }
+  assert(lastReceipt);
+  const control = compileTaskContextPacketFromPersistedSemanticStateV01(
+    database, compilerInput(lastScenario, packet, lastReceipt, DURABLE_LOCAL_LOOP_LATER_PACKET_GENERATED_AT),
+  );
+  assert.equal(control.full_chain_relation.status, "valid");
+  assert.equal(control.current_state_entries.length, 4);
+  assert.equal(control.later_packet.selected_context.length, 4);
+  assert(priorCompilation);
+  const requiredPriorEntry = packet.selected_context.find((entry) =>
+    entry.source_ref === priorCompilation!.transition.receipt.effects[0]!.after_state.state_fingerprint)!;
+  const sparsePrior = rebuildPacketV01(packet, {}, { max_selected_entries: 2 }, [requiredPriorEntry.entry_id]);
+  assert.deepEqual(rebuildPacketV01(packet, { selected_context: [...packet.selected_context].reverse() },
+    { max_selected_entries: 2 }, [requiredPriorEntry.entry_id]), sparsePrior, "input ordering does not choose a different packet");
+  assert.equal(validateSemanticTransitionFullChainV01({ ...priorCompilation.full_chain_input,
+    later_packet: sparsePrior }).status, "valid", "sparse prior also preserves its exact full-chain relation");
+  assert.equal(validateTaskContextPacketV01(sparsePrior, { evaluated_at: sparsePrior.generated_at }).status, "valid");
+  assert.equal(sparsePrior.selected_context.length, 2);
+  assert.equal(sparsePrior.excluded_context.length, 1);
+  assert.equal(sparsePrior.excluded_context[0]!.why_excluded, "Excluded by the explicit selected-context budget.");
+  const omitted = sparsePrior.excluded_context[0]!;
+  assert(control.current_state_entries.some((entry) => entry.state_fingerprint === omitted.source_ref));
+  const before = readNamedTablesSnapshot(database, ["vnext_semantic_state_entries", "vnext_semantic_target_heads"]);
+  const started = performance.now();
+  const sparseCompiled = compileTaskContextPacketFromPersistedSemanticStateV01(
+    database, compilerInput(lastScenario, sparsePrior, lastReceipt!, DURABLE_LOCAL_LOOP_LATER_PACKET_GENERATED_AT),
+  );
+  const compileMs = performance.now() - started;
+  assert.equal(sparseCompiled.full_chain_relation.status, "valid");
+  assert.equal(sparseCompiled.later_packet.selected_context.length, 2);
+  assert.equal(sparseCompiled.current_state_entries.length, 4);
+  assert.equal(sparseCompiled.later_packet.excluded_context.length, 2);
+  assert(sparseCompiled.later_packet.excluded_context.every((entry) =>
+    entry.why_excluded === "Excluded by the explicit selected-context budget." &&
+    sparseCompiled.current_state_entries.some((state) => state.state_fingerprint === entry.source_ref)));
+  assert(validateTaskContextPacketTransitionRelationV01(sparsePrior,
+    appliedStates[0]!.receipt, sparseCompiled.later_packet).errors.some(
+      (issue) => issue.code === "transition_receipt_not_new_packet_source"));
+  persistTaskContextPacketRecordV01(database, sparsePrior);
+  packets.push(sparsePrior, sparseCompiled.later_packet);
+  bytes.push(JSON.stringify(sparsePrior), JSON.stringify(sparseCompiled.later_packet));
+  durableBytes.push(readPacketBytes(sparsePrior), readPacketBytes(sparseCompiled.later_packet));
+  const missingExclusion = rebuildPacketV01(sparseCompiled.later_packet, {
+    excluded_context: [],
+  });
+  assert(validateSemanticTransitionFullChainV01({ ...sparseCompiled.full_chain_input,
+    later_packet: missingExclusion }).errors.some((issue) => issue.code === "budget_exclusion_missing_or_inexact"));
+
+  // Re-select a still-current state by its exact persisted Transition. No new
+  // state write or uninterrupted selection ancestry is needed for this read.
+  let repeatedPacket = sparseCompiled.later_packet;
+  const repeatedCounts: Array<{ boundary: number; selected: number; canonical: number; characters: number }> = [];
+  for (let boundary = 1; boundary <= 5; boundary += 1) {
+    const required = appliedStates.find(({ receipt }) => {
+      const state = receipt.effects[0]!.after_state;
+      return state.presence === "present" && !repeatedPacket.selected_context.some((entry) => entry.source_ref === state.state_fingerprint);
+    })!;
+    const state = required.receipt.effects[0]!.after_state;
+    assert.equal(state.presence, "present");
+    const prior = repeatedPacket;
+    const result = compileTaskContextPacketFromPersistedSemanticStateV01(database,
+      compilerInput(required.scenario, prior, required.receipt,
+        `2026-07-10T14:07:${String(boundary).padStart(2, "0")}.000Z`));
+    repeatedPacket = result.later_packet;
+    assert.equal(result.full_chain_relation.status, "valid");
+    assert.equal(repeatedPacket.selected_context.length, 2);
+    assert(repeatedPacket.selected_context.some((entry) => entry.source_ref === state.state_fingerprint));
+    assert(!repeatedPacket.excluded_context.some((entry) => entry.source_ref === state.state_fingerprint &&
+      entry.why_excluded === "Excluded by the explicit selected-context budget."));
+    assert(repeatedPacket.selected_context.every((entry) => entry.bounded_summary?.startsWith("Under condition X")));
+    assert.deepEqual(repeatedPacket.constraints.forbidden_actions, packet.constraints.forbidden_actions);
+    assert.deepEqual(repeatedPacket.task, packet.task);
+    assert.deepEqual(repeatedPacket.constraints.required_checks, packet.constraints.required_checks);
+    const probe = runLocalContextUseProbeV01(database,
+      localContextUseProbeInput(prior, repeatedPacket, required.receipt, DURABLE_LOCAL_LOOP_CONTEXT_USE_PROBE_RECORDED_AT));
+    assert.equal(probe.relation.status, "valid");
+    assert.equal(probe.resolved_states.length, 2);
+    packets.push(repeatedPacket);
+    bytes.push(JSON.stringify(repeatedPacket));
+    durableBytes.push(readPacketBytes(repeatedPacket));
+    if ([1, 3, 5].includes(boundary)) repeatedCounts.push({ boundary,
+      selected: repeatedPacket.selected_context.length, canonical: result.current_state_entries.length,
+      characters: canonicalizeProtocolValueV01(repeatedPacket).length });
+  }
+
+  const unselected = control.current_state_entries.find((entry) =>
+    entry.state_fingerprint === omitted.source_ref)!;
+  const negativeCases = [
+    { label: "omitted projection missing", sql: "DELETE FROM vnext_semantic_state_entries WHERE target_key = ?",
+      args: [unselected.target_key], error: /semantic_target_head_projection_presence_mismatch/ },
+    { label: "omitted projection and head missing", sql: "DELETE FROM vnext_semantic_state_entries WHERE target_key = ?",
+      remove_head: true, args: [unselected.target_key], error: /semantic_target_head_missing/ },
+    { label: "omitted revision drift", sql: "UPDATE vnext_semantic_state_entries SET revision = revision + 1 WHERE target_key = ?",
+      args: [unselected.target_key], error: /semantic_target_head_projection_drift/ },
+    { label: "omitted foreign projection", sql: "UPDATE vnext_semantic_state_entries SET project_id = 'project:foreign-fixture' WHERE target_key = ?",
+      args: [unselected.target_key], error: /semantic_target_head_projection_presence_mismatch/ },
+    { label: "omitted fingerprint conflict", sql: "UPDATE vnext_semantic_state_entries SET current_state_fingerprint = ? WHERE target_key = ?",
+      args: [createProtocolSha256V01("invalid omitted fingerprint"), unselected.target_key], error: /semantic_target_head_projection_drift/ },
+    { label: "omitted state record missing", sql: "DELETE FROM vnext_core_records WHERE record_id = ?",
+      args: [unselected.state_ref.external_id], error: /semantic_state.*missing/ },
+    { label: "omitted source gate missing", sql: "DELETE FROM vnext_core_records WHERE record_id = ?",
+      args: [appliedStates.find(({ receipt }) => receipt.transition_receipt_id === unselected.source_transition_receipt_id)!.receipt.semantic_commit_gate.evaluation_ref.external_id],
+      error: /persisted_semantic_commit_gate_missing/ },
+  ];
+  for (const negative of negativeCases) {
+    database.exec("SAVEPOINT sparse_negative");
+    try {
+      database.exec("DROP TRIGGER trg_vnext_core_records_immutable_delete");
+      if ("remove_head" in negative) {
+        database.prepare("DELETE FROM vnext_semantic_target_heads WHERE target_key = ?").run(unselected.target_key);
+      }
+      database.prepare(negative.sql).run(...negative.args);
+      ensureVNextDurableSemanticStoreSchemaV01(database);
+      assertCompilerRefusalNoWrite(opened,
+        () => compileTaskContextPacketFromPersistedSemanticStateInsideTransactionV01(database,
+          compilerInput(lastScenario, sparsePrior, lastReceipt!, DURABLE_LOCAL_LOOP_LATER_PACKET_GENERATED_AT)),
+        readDatabaseSnapshot(database), negative.error, negative.label);
+    } finally { database.exec("ROLLBACK TO sparse_negative; RELEASE sparse_negative"); }
+  }
+  const forgedSelection = clone(sparsePrior.selected_context);
+  forgedSelection[0]!.currentness.as_of = "2026-07-10T14:06:59.000Z";
+  assertCompilerRefusalNoWrite(opened, () => compileTaskContextPacketFromPersistedSemanticStateV01(database,
+    compilerInput(lastScenario, rebuildPacketV01(sparsePrior, { selected_context: forgedSelection }),
+      lastReceipt!, DURABLE_LOCAL_LOOP_LATER_PACKET_GENERATED_AT)), readDatabaseSnapshot(database),
+    /prior_packet_local_semantic_state_provenance_mismatch/, "selected provenance remains exact");
+  assert.deepEqual(readNamedTablesSnapshot(database, ["vnext_semantic_state_entries", "vnext_semantic_target_heads"]), before);
+  assert.deepEqual(packets.map((entry) => JSON.stringify(entry)), bytes);
+  assert.deepEqual(packets.map(readPacketBytes), durableBytes,
+    "historical durable packets remain byte-for-byte immutable");
+  console.log(JSON.stringify({ sparse_selection: {
+    normal_writer_states: 4, complete_control: "valid", prior_accepted_states: 3,
+    selected_budget: 2, selected: 2, budget_excluded_current: 1,
+    budget_excluded_current_after_compile: sparseCompiled.later_packet.excluded_context.length,
+    subsequent_unrelated_compile: sparseCompiled.full_chain_relation.status,
+    canonical_state_changes: 0, historical_packet_mutations: 0,
+    negative_cases: negativeCases.length + 3, repeated_reselection: repeatedCounts,
+    complete_packet_characters: canonicalizeProtocolValueV01(control.later_packet).length,
+    sparse_packet_characters: canonicalizeProtocolValueV01(sparseCompiled.later_packet).length,
+    sparse_compile_ms: Math.round(compileMs), provider_calls: 0, network_calls: 0,
+  } }));
 }
 
 function runLocalContextUseProbeCoverage(
@@ -4037,6 +4265,7 @@ function rebuildPacketV01(
   budgetOverrides: Partial<
     TaskContextPacketV01["constraints"]["context_budget"]
   > = {},
+  requiredSelectedEntryIds: readonly string[] = [],
 ): TaskContextPacketV01 {
   return buildTaskContextPacketV01({
     workspace_id: packet.workspace_id,
@@ -4063,7 +4292,7 @@ function rebuildPacketV01(
     source_status: packet.source_status,
     compatibility: overrides.compatibility ?? packet.compatibility,
     authority_notes: packet.authority_summary.notes,
-  });
+  }, { required_selected_entry_ids: requiredSelectedEntryIds });
 }
 
 function applyCreateScenario(

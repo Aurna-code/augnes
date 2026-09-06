@@ -4,6 +4,7 @@ import { VNEXT_LOCAL_CONTEXT_USE_PROBE_VERSION_V01 } from "@/lib/vnext/adapters/
 import {
   assertVNextCoreRecordMatchesProtocolPayloadBindingV01,
   assertVNextDurableSemanticStoreSchemaV01,
+  assertVNextSemanticProjectionPresenceV01,
   deriveVNextSemanticTargetKeyV01,
   iterateVNextCoreRecordsV01,
   listVNextSemanticStateEntriesV01,
@@ -832,6 +833,7 @@ function* loadTransitionReceipts(db: Database.Database, config: VNextLocalOperat
 }
 
 function validateCurrentSemanticState(db: Database.Database, config: VNextLocalOperatorPilotConfigV01) {
+  assertVNextSemanticProjectionPresenceV01(db, config);
   const entries = listVNextSemanticStateEntriesV01(db, config);
   if (entries.length > MAX_STATE_TARGETS) {
     throw continuityError("operator_pilot_semantic_state_bound_exceeded", 422);
@@ -1106,11 +1108,12 @@ function validateCompiledPacketLineage(
   const packetSelections = packet.selected_context.filter(
     (entry) => entry.entry_kind === "accepted_state_ref",
   );
-  const fullSelectionCurrent =
-    packetSelections.length === currentEntries.length &&
-    currentEntries.every((projection) =>
-      packetSelections.some(
-        (entry) =>
+  // Packet selection is bounded working context. Omitted canonical states do
+  // not make it stale; every state it actually selects must still be current.
+  const selectionCurrent =
+    packetSelections.every((entry) =>
+      currentEntries.some(
+        (projection) =>
           entry.source_ref === projection.state_fingerprint &&
           canonicalizeProtocolValueV01(entry.external_ref) ===
             canonicalizeProtocolValueV01(projection.state_ref),
@@ -1123,7 +1126,7 @@ function validateCompiledPacketLineage(
       packet_id: priorPacket.packet_id,
       packet_fingerprint: priorPacket.integrity.fingerprint,
     },
-    projection_current: affectedCurrent && fullSelectionCurrent,
+    projection_current: affectedCurrent && selectionCurrent,
     source_transition_receipt: {
       transition_receipt_id: transition.receipt.transition_receipt_id,
       transition_receipt_fingerprint: transition.receipt.integrity.fingerprint,

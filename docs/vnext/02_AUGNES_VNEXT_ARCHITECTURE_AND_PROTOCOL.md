@@ -1210,6 +1210,35 @@ receipt lineage와 current state resolution을 실제 local read로 확인하고
 context usefulness, outcome improvement, approval, Evidence acceptance 또는 work closure를
 증명하지 않는다.
 
+Canonical accepted state is complete independently of a task's selected context.
+The persisted compiler validates current projection/head presence, immutable state
+and exact applied Transition lineage even for an unselected state. Every selected
+local accepted-state reference must match its current persisted snapshot and source
+provenance. Omission from `selected_context` is neither retraction nor invalidity;
+`excluded_context` budget entries describe working-context selection only.
+
+For this compiler, present effects of the bound Transition and carried non-state
+context are mandatory selections. The task goal, required checks, forbidden
+actions, capability/authority, return contract and source bindings remain separate
+packet material and are preserved. Unrelated accepted-state selections are optional
+under the selected-entry budget: mandatory entries are reserved first, then the
+existing canonical ordering deterministically fills the remaining slots. Each drop
+retains exact budget-exclusion metadata. Mandatory selection overflow refuses with
+`task_context_mandatory_selection_budget_exceeded`; character/token overflow also
+refuses under the existing builder bounds. No budget is silently increased.
+
+The packet relation verifies that same bounded selection and exact exclusions.
+Before-state legitimacy comes from current-state observation and applied lineage in
+full-chain eligibility, not uninterrupted prior packet selection. An exact persisted
+Transition whose effects remain current can explicitly reselect its state for later
+context without applying it again. Newly bound Transition refs cannot be substituted
+with carried historical receipts. Historical packets remain immutable; obsolete
+budget exclusions are removed only from a newly built packet when their state is
+reselected or retired. Continuity checks the currentness of selected states and the
+bound Transition without treating sparse selection as a missing canonical snapshot.
+Current-work selection uses validated immediate packet succession to exclude old
+work candidates; disconnected current candidates remain ambiguous.
+
 이 local path는 explicit temporary database smoke에서 transaction, reopen, rollback, backup/restore,
 packet compilation과 context resolution을 관찰할 수 있다. Synthetic proposal, decision, actor와
 semantic task가 실제 사용자 authorization이나 product/user database transition으로 승격되지는
