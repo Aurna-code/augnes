@@ -7,6 +7,7 @@ import {
   deriveVNextSemanticTargetKeyV01,
   listRecentVNextSemanticStateEntriesV01,
   listVNextCoreRecordsV01,
+  iterateVNextCoreRecordsV01,
   readVNextCoreRecordV01,
   rebuildVNextPersistedSemanticStateV01,
   type VNextCoreRecordEnvelopeV01,
@@ -112,9 +113,7 @@ const ACCEPTED_STATE_LIMIT = 5;
 const ATTENTION_LIMIT = 5;
 const ACTIVITY_LIMIT = 5;
 const NEXT_MOVE_LIMIT = 3;
-const PROPOSAL_SCAN_LIMIT = 64;
-const DECISION_SCAN_LIMIT = 128;
-const TRANSITION_SCAN_LIMIT = 128;
+const ATTENTION_RELATION_CACHE_LIMIT = 128;
 const ACTIVITY_SCAN_LIMIT = 24;
 const SUMMARY_LIMIT = 320;
 const TASK_GOAL_LIMIT = 2_000;
@@ -893,87 +892,113 @@ function readPendingAttention(
   input: { workspace_id: string; project_id: string },
   evaluation: { timestamp: string; milliseconds: number },
 ): ProjectHomePendingAttentionV01 {
-  const proposalRecords = listVNextCoreRecordsV01(db, {
-    ...input,
-    record_kinds: ["episode_delta_proposal"],
-    limit: PROPOSAL_SCAN_LIMIT + 1,
-  });
-  if (proposalRecords.length > PROPOSAL_SCAN_LIMIT) {
-    throw new Error("project_home_proposal_scan_bound_exceeded");
-  }
-  const proposals = proposalRecords.map((record) =>
-    validatedProposal(record, input),
+  return db.transaction(() => readPendingAttentionSnapshot(db, input, evaluation))();
+}
+
+function readPendingAttentionSnapshot(
+  db: Database.Database,
+  input: { workspace_id: string; project_id: string },
+  evaluation: { timestamp: string; milliseconds: number },
+): ProjectHomePendingAttentionV01 {
+  const proposalsById = new Map<string, EpisodeDeltaProposalV01>();
+  const decisionsById = new Map<string, ReviewDecisionV01>();
+  const readDecision = (id: string): ReviewDecisionV01 => {
+    const cached = decisionsById.get(id);
+    if (cached) return cached;
+    const record = readVNextCoreRecordV01(db, {
+      ...input,
+      record_kind: "review_decision",
+      record_id: id,
+    });
+    if (!record) throw new Error("project_home_decision_lineage_invalid");
+    const decision = validatedDecision(record, input);
+    cacheAttentionRelation(decisionsById, id, decision);
+    return decision;
+  };
+  const readDecisions = function* () {
+    for (const record of iterateVNextCoreRecordsV01(db, {
+      ...input,
+      record_kind: "review_decision",
+    })) {
+      yield validatedDecision(record, input);
+    }
+  };
+  const transitionReadSession = createValidatedVNextSemanticTransitionRelationReadSessionV01(
+    db,
+    input,
   );
-  const proposalsById = new Map(
-    proposals.map((proposal) => [proposal.proposal_id, proposal]),
-  );
-  const decisionRecords = listVNextCoreRecordsV01(db, {
-    ...input,
-    record_kinds: ["review_decision"],
-    limit: DECISION_SCAN_LIMIT + 1,
-  });
-  if (decisionRecords.length > DECISION_SCAN_LIMIT) {
-    throw new Error("project_home_decision_scan_bound_exceeded");
-  }
-  const decisions = decisionRecords.map((record) => validatedDecision(record, input));
-  const transitionReadSession =
-    createValidatedVNextSemanticTransitionRelationReadSessionV01(db, input);
+  // Validate the whole scoped history, including relations on resolved and
+  // undisplayed proposals. Page boundaries are not lineage boundaries.
   validateDecisionLineageForProjection(
     db,
     input,
-    decisions,
+    readDecisions,
+    readDecision,
     proposalsById,
     transitionReadSession,
   );
-  const transitionRecords = listVNextCoreRecordsV01(db, {
+  for (const record of iterateVNextCoreRecordsV01(db, {
     ...input,
-    record_kinds: ["state_transition_receipt"],
-    limit: TRANSITION_SCAN_LIMIT + 1,
-  });
-  if (transitionRecords.length > TRANSITION_SCAN_LIMIT) {
-    throw new Error("project_home_transition_scan_bound_exceeded");
+    record_kind: "state_transition_receipt",
+  })) {
+    transitionReadSession({
+      transition_receipt_id: record.record_id,
+      transition_receipt_fingerprint: record.fingerprint,
+    });
   }
-  const appliedDecisionKeys = new Set(
-    transitionRecords.map((record) => {
+  const decisionApplied = (decision: ReviewDecisionV01): boolean => {
+    for (const record of iterateVNextCoreRecordsV01(db, {
+      ...input,
+      record_kind: "state_transition_receipt",
+      source_decision_id: decision.decision_id,
+    })) {
       const transition = transitionReadSession({
         transition_receipt_id: record.record_id,
         transition_receipt_fingerprint: record.fingerprint,
       });
-      return decisionIdentity(
-        transition.decision.decision_id,
-        transition.decision.integrity.fingerprint,
-      );
-    }),
-  );
-  const evaluated = proposals
-    .filter((proposal) => proposal.status === "pending_review")
-    .map((proposal) => {
-      const proposalDecisions = decisions.filter(
-        (decision) =>
-          decision.source_proposal.proposal_id === proposal.proposal_id,
-      );
-      for (const decision of proposalDecisions) {
-        if (
-          validateReviewDecisionAgainstEpisodeDeltaProposalV01(decision, proposal)
-            .status !== "valid"
-        ) {
-          throw new Error("project_home_decision_relation_invalid");
-        }
-      }
+      if (transition.decision.integrity.fingerprint === decision.integrity.fingerprint) return true;
+    }
+    return false;
+  };
+  let pendingCount = 0;
+  let deferredCandidateCount = 0;
+  let acceptedAwaitingTransitionCount = 0;
+  let pendingDecisionCount = 0;
+  const items: ProjectHomePendingAttentionItemV01[] = [];
+  for (const record of iterateVNextCoreRecordsV01(db, {
+    ...input,
+    record_kind: "episode_delta_proposal",
+  })) {
+    const proposal = validatedProposal(record, input);
+    if (proposal.status !== "pending_review") continue;
+    // Preserve the existing stable sort, including equal-time prior-reference
+    // precedence. A pairwise reduction is not equivalent for that comparator.
+    // Retain only this proposal's decision IDs; payloads use the bounded cache.
+    const decisionIdsByCandidate = new Map<string, string[]>();
+    for (const record of iterateVNextCoreRecordsV01(db, {
+      ...input,
+      record_kind: "review_decision",
+      source_proposal_id: proposal.proposal_id,
+    })) {
+      const decision = validatedDecision(record, input);
+      const ids = decisionIdsByCandidate.get(decision.candidate.candidate_id) ?? [];
+      ids.push(decision.decision_id);
+      decisionIdsByCandidate.set(decision.candidate.candidate_id, ids);
+    }
+    const evaluated = (() => {
       const candidateEvaluations = proposal.proposed_deltas.map((candidate) => {
+        const ids = decisionIdsByCandidate.get(candidate.candidate_id) ?? [];
+        ids.sort((left, right) => compareEffectiveDecisions(readDecision(left), readDecision(right)));
         const attention = resolveCandidateAttention(
-          proposalDecisions.filter(
-            (decision) => decision.candidate.candidate_id === candidate.candidate_id,
-          ),
+          ids[0] ? readDecision(ids[0]) : undefined,
           evaluation,
-          appliedDecisionKeys,
+          decisionApplied,
         );
         const admission = inspectVNextOperatorPilotCandidateAdmissionV01(db, {
           config: input,
           proposal,
           candidate,
-          candidate_fingerprint:
-            createEpisodeDeltaCandidateFingerprintV01(candidate),
+          candidate_fingerprint: createEpisodeDeltaCandidateFingerprintV01(candidate),
         });
         return { attention, admission };
       });
@@ -983,8 +1008,7 @@ function readPendingAttention(
           attention.state === "accepted_awaiting_transition",
       );
       const acceptedAwaitingTransition = candidateEvaluations.filter(
-        ({ attention }) =>
-          attention.state === "accepted_awaiting_transition",
+        ({ attention }) => attention.state === "accepted_awaiting_transition",
       );
       const transitionBlocked = acceptedAwaitingTransition.filter(
         ({ admission }) => !admission.decision_allowed.accept,
@@ -1005,65 +1029,49 @@ function readPendingAttention(
           requiringAttention.map(({ attention }) => attention),
         ),
       };
-    });
-  const pending = evaluated.filter((item) => item.pendingCandidateCount > 0);
-  const deferredCandidateCount = evaluated.reduce(
-    (total, item) => total + item.deferredCandidateCount,
-    0,
-  );
-  const acceptedAwaitingTransitionCount = evaluated.reduce(
-    (total, item) => total + item.acceptedAwaitingTransitionCount,
-    0,
-  );
-  const pendingDecisionCount = evaluated.reduce(
-    (total, item) =>
-      total + item.pendingCandidateCount - item.acceptedAwaitingTransitionCount,
-    0,
-  );
-  const items = pending.map(
-    ({
-      proposal,
-      origin,
-      pendingCandidateCount,
-      acceptedAwaitingTransitionCount: proposalTransitionDebt,
-      transitionBlockedCount,
-      transitionBlockedByDrift,
-      attentionReason,
-    }) => {
+    })();
+    deferredCandidateCount += evaluated.deferredCandidateCount;
+    acceptedAwaitingTransitionCount += evaluated.acceptedAwaitingTransitionCount;
+    pendingDecisionCount +=
+      evaluated.pendingCandidateCount - evaluated.acceptedAwaitingTransitionCount;
+    if (evaluated.pendingCandidateCount === 0) continue;
+    pendingCount += 1;
+    const item: ProjectHomePendingAttentionItemV01 = (() => {
+      const {
+        proposal,
+        origin,
+        pendingCandidateCount,
+        acceptedAwaitingTransitionCount: proposalTransitionDebt,
+        transitionBlockedCount,
+        transitionBlockedByDrift,
+        attentionReason,
+      } = evaluated;
       const strategic = Boolean(proposal.strategic_advantage_transfer);
-      const unresolvedDecisionCount =
-        pendingCandidateCount - proposalTransitionDebt;
-      const entryState = unresolvedDecisionCount > 0
-        ? "pending_proposal" as const
-        : transitionBlockedCount > 0
-          ? "transition_blocked" as const
-          : "decided_proposal" as const;
-      const reason = unresolvedDecisionCount > 0
-        ? `${attentionReason}${proposalTransitionDebt > 0 ? ` ${proposalTransitionDebt} accepted ${proposalTransitionDebt === 1 ? "decision is" : "decisions are"} also awaiting explicit Transition review.` : ""}`
-        : transitionBlockedCount > 0
-          ? `${transitionBlockedCount} accepted ${transitionBlockedCount === 1 ? "candidate is" : "candidates are"} currently blocked from Transition eligibility by exact server-side admission checks.`
-        : `${proposalTransitionDebt} accepted ${proposalTransitionDebt === 1 ? "decision is" : "decisions are"} awaiting an explicit Transition review.`;
+      const unresolvedDecisionCount = pendingCandidateCount - proposalTransitionDebt;
+      const entryState =
+        unresolvedDecisionCount > 0
+          ? ("pending_proposal" as const)
+          : transitionBlockedCount > 0
+            ? ("transition_blocked" as const)
+            : ("decided_proposal" as const);
+      const reason =
+        unresolvedDecisionCount > 0
+          ? `${attentionReason}${proposalTransitionDebt > 0 ? ` ${proposalTransitionDebt} accepted ${proposalTransitionDebt === 1 ? "decision is" : "decisions are"} also awaiting explicit Transition review.` : ""}`
+          : transitionBlockedCount > 0
+            ? `${transitionBlockedCount} accepted ${transitionBlockedCount === 1 ? "candidate is" : "candidates are"} currently blocked from Transition eligibility by exact server-side admission checks.`
+            : `${proposalTransitionDebt} accepted ${proposalTransitionDebt === 1 ? "decision is" : "decisions are"} awaiting an explicit Transition review.`;
       return {
         attention_id: `proposal:${proposal.proposal_id}`,
         proposal_id: proposal.proposal_id,
         summary: safeSummary(proposal.bounded_summary),
         created_at: proposal.created_at,
         pending_candidate_count: pendingCandidateCount,
-        priority: transitionBlockedCount > 0
-          ? 15
-          : proposalTransitionDebt > 0
-            ? 20
-            : strategic
-              ? 30
-              : 40,
+        priority:
+          transitionBlockedCount > 0 ? 15 : proposalTransitionDebt > 0 ? 20 : strategic ? 30 : 40,
         signals: [
-          ...(origin === "interactive" || origin === "policy_triggered"
-            ? [origin]
-            : []),
+          ...(origin === "interactive" || origin === "policy_triggered" ? [origin] : []),
           ...(strategic ? ["strategic" as const] : []),
-          ...(proposalTransitionDebt > 0
-            ? ["decision_debt" as const]
-            : []),
+          ...(proposalTransitionDebt > 0 ? ["decision_debt" as const] : []),
           ...(transitionBlockedCount > 0 ? ["blocked" as const] : []),
           ...(transitionBlockedByDrift ? ["conflict" as const] : []),
         ],
@@ -1076,13 +1084,14 @@ function readPendingAttention(
           reason,
         }),
         action_href: null,
-        action_label: transitionBlockedCount > 0
-          ? "Inspect Transition blockers"
-          : unresolvedDecisionCount === 0 && proposalTransitionDebt > 0
-            ? "Review consequence"
-          : strategic
-            ? "Review strategic candidate"
-            : "Review candidate",
+        action_label:
+          transitionBlockedCount > 0
+            ? "Inspect Transition blockers"
+            : unresolvedDecisionCount === 0 && proposalTransitionDebt > 0
+              ? "Review consequence"
+              : strategic
+                ? "Review strategic candidate"
+                : "Review candidate",
         lineage: [
           lineage(
             "episode_delta_proposal",
@@ -1092,42 +1101,45 @@ function readPendingAttention(
           ),
         ],
       };
-    },
-  );
-  items.sort(
-    (left, right) =>
-      left.priority - right.priority ||
-      requireStrictTimestamp(
-        right.created_at,
-        "project_home_attention_timestamp_invalid",
-      ) -
-        requireStrictTimestamp(
-          left.created_at,
-          "project_home_attention_timestamp_invalid",
-        ) ||
-      compareProtocolCodeUnitsV01(left.attention_id, right.attention_id),
-  );
+    })();
+    items.push(item);
+    items.sort(compareAttentionItems);
+    if (items.length > ATTENTION_LIMIT) items.pop();
+  }
   return {
     state: sectionState(
-      pending.length
-        ? "action_required"
-        : deferredCandidateCount > 0
-          ? "available"
-          : "empty",
-      pending.length
-        ? `${pending.length} proposal ${pending.length === 1 ? "needs" : "need"} review attention.${acceptedAwaitingTransitionCount > 0 ? ` ${acceptedAwaitingTransitionCount} accepted ${acceptedAwaitingTransitionCount === 1 ? "decision is" : "decisions are"} awaiting Transition review.` : ""}${deferredCandidateCount > 0 ? ` ${deferredCandidateCount} ${deferredCandidateCount === 1 ? "candidate remains" : "candidates remain"} deferred.` : ""}`
+      pendingCount ? "action_required" : deferredCandidateCount > 0 ? "available" : "empty",
+      pendingCount
+        ? `${pendingCount} proposal ${pendingCount === 1 ? "needs" : "need"} review attention.${acceptedAwaitingTransitionCount > 0 ? ` ${acceptedAwaitingTransitionCount} accepted ${acceptedAwaitingTransitionCount === 1 ? "decision is" : "decisions are"} awaiting Transition review.` : ""}${deferredCandidateCount > 0 ? ` ${deferredCandidateCount} ${deferredCandidateCount === 1 ? "candidate remains" : "candidates remain"} deferred.` : ""}`
         : deferredCandidateCount > 0
           ? `No immediate decisions need attention. ${deferredCandidateCount} ${deferredCandidateCount === 1 ? "candidate remains" : "candidates remain"} deferred under recorded revisit semantics.`
           : "No project-scoped decisions currently need attention.",
     ),
-    total_count: pending.length,
+    total_count: pendingCount,
     decision_debt: {
       pending_candidate_count: pendingDecisionCount,
       accepted_awaiting_transition_count: acceptedAwaitingTransitionCount,
       deferred_candidate_count: deferredCandidateCount,
     },
-    items: items.slice(0, ATTENTION_LIMIT),
+    items,
   };
+}
+
+function compareAttentionItems(
+  left: ProjectHomePendingAttentionItemV01,
+  right: ProjectHomePendingAttentionItemV01,
+): number {
+  return (
+    left.priority - right.priority ||
+    requireStrictTimestamp(right.created_at, "project_home_attention_timestamp_invalid") -
+      requireStrictTimestamp(left.created_at, "project_home_attention_timestamp_invalid") ||
+    compareProtocolCodeUnitsV01(left.attention_id, right.attention_id)
+  );
+}
+
+function cacheAttentionRelation<Value>(cache: Map<string, Value>, id: string, value: Value): void {
+  if (cache.size >= ATTENTION_RELATION_CACHE_LIMIT) cache.delete(cache.keys().next().value!);
+  cache.set(id, value);
 }
 
 type CandidateAttentionResolutionV01 = {
@@ -1147,18 +1159,15 @@ type CandidateAttentionResolutionV01 = {
 };
 
 function resolveCandidateAttention(
-  decisions: ReviewDecisionV01[],
+  effective: ReviewDecisionV01 | undefined,
   evaluation: { timestamp: string; milliseconds: number },
-  appliedDecisionKeys: ReadonlySet<string>,
+  decisionApplied: (decision: ReviewDecisionV01) => boolean,
 ): CandidateAttentionResolutionV01 {
-  if (decisions.length === 0) {
+  if (!effective) {
     return { state: "requires_attention", reason: "undecided" };
   }
-  const effective = [...decisions].sort(compareEffectiveDecisions)[0]!;
   if (effective.decision === "accept") {
-    return appliedDecisionKeys.has(
-      decisionIdentity(effective.decision_id, effective.integrity.fingerprint),
-    )
+    return decisionApplied(effective)
       ? { state: "terminal", reason: "terminal" }
       : {
           state: "accepted_awaiting_transition",
@@ -1209,34 +1218,30 @@ function compareEffectiveDecisions(
 function validateDecisionLineageForProjection(
   db: Database.Database,
   input: { workspace_id: string; project_id: string },
-  decisions: ReviewDecisionV01[],
+  readDecisions: () => Iterable<ReviewDecisionV01>,
+  readDecision: (id: string) => ReviewDecisionV01,
   proposalsById: Map<string, EpisodeDeltaProposalV01>,
   transitionReadSession: VNextSemanticTransitionRelationReadSessionV01,
 ): void {
-  const byId = new Map(decisions.map((decision) => [decision.decision_id, decision]));
-  for (const decision of decisions) {
+  for (const decision of readDecisions()) {
+    const proposal = resolveDecisionSourceProposalV01(db, input, decision, proposalsById);
+    if (
+      validateReviewDecisionAgainstEpisodeDeltaProposalV01(decision, proposal).status !== "valid"
+    ) {
+      throw new Error("project_home_decision_relation_invalid");
+    }
     const decidedAt = requireStrictTimestamp(
       decision.decided_at,
       "project_home_decision_timestamp_invalid",
     );
     for (const binding of decision.lineage.prior_decisions) {
-      const prior = byId.get(binding.decision_id);
+      const prior = readDecision(binding.decision_id);
       const priorTimestamp = prior
-        ? requireStrictTimestamp(
-            prior.decided_at,
-            "project_home_prior_decision_timestamp_invalid",
-          )
+        ? requireStrictTimestamp(prior.decided_at, "project_home_prior_decision_timestamp_invalid")
         : null;
       const sameCandidateLineage =
-        prior?.source_proposal.proposal_id ===
-          decision.source_proposal.proposal_id &&
+        prior?.source_proposal.proposal_id === decision.source_proposal.proposal_id &&
         prior?.candidate.candidate_id === decision.candidate.candidate_id;
-      const proposal = resolveDecisionSourceProposalV01(
-        db,
-        input,
-        decision,
-        proposalsById,
-      );
       const validLineage = proposal.project_verify_lifecycle
         ? prior !== undefined &&
           projectVerifyLifecycleDecisionReferencesPriorV01(
@@ -1258,21 +1263,33 @@ function validateDecisionLineageForProjection(
       }
     }
   }
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const visit = (decision: ReviewDecisionV01) => {
-    if (visiting.has(decision.decision_id)) {
-      throw new Error("project_home_decision_lineage_cycle");
+  // Every edge above is non-increasing in time, so a cycle can only use
+  // equal-time edges. Walk those iteratively; retain only the active path
+  // and a bounded cache, not every historical decision or a recursive stack.
+  const visited = new Map<string, true>();
+  for (const root of readDecisions()) {
+    if (visited.has(root.decision_id)) continue;
+    const visiting = new Set([root.decision_id]);
+    const stack = [{ id: root.decision_id, next: 0 }];
+    while (stack.length > 0) {
+      const frame = stack.at(-1)!;
+      const decision = readDecision(frame.id);
+      const binding = decision.lineage.prior_decisions[frame.next++];
+      if (!binding) {
+        stack.pop();
+        visiting.delete(frame.id);
+        cacheAttentionRelation(visited, frame.id, true);
+        continue;
+      }
+      const prior = readDecision(binding.decision_id);
+      if (Date.parse(prior.decided_at) !== Date.parse(decision.decided_at)) continue;
+      if (visiting.has(prior.decision_id)) throw new Error("project_home_decision_lineage_cycle");
+      if (!visited.has(prior.decision_id)) {
+        visiting.add(prior.decision_id);
+        stack.push({ id: prior.decision_id, next: 0 });
+      }
     }
-    if (visited.has(decision.decision_id)) return;
-    visiting.add(decision.decision_id);
-    for (const binding of decision.lineage.prior_decisions) {
-      visit(byId.get(binding.decision_id)!);
-    }
-    visiting.delete(decision.decision_id);
-    visited.add(decision.decision_id);
-  };
-  decisions.forEach(visit);
+  }
 }
 
 function resolveDecisionSourceProposalV01(
@@ -1290,7 +1307,7 @@ function resolveDecisionSourceProposalV01(
     });
     if (!record) throw new Error("project_home_decision_proposal_missing");
     const loaded = validatedProposal(record, input);
-    proposalsById.set(loaded.proposal_id, loaded);
+    cacheAttentionRelation(proposalsById, loaded.proposal_id, loaded);
     return loaded;
   })();
   if (
@@ -1373,10 +1390,6 @@ function decisionReferences(
       binding.decision_id === possiblePrior.decision_id &&
       binding.decision_fingerprint === possiblePrior.integrity.fingerprint,
   );
-}
-
-function decisionIdentity(decisionId: string, fingerprint: string): string {
-  return canonicalizeProtocolValueV01([decisionId, fingerprint]);
 }
 
 function summarizeAttentionReasons(

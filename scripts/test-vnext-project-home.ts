@@ -35,6 +35,7 @@ import {
   genericCliBuilderInputFixture,
 } from "../fixtures/vnext/protocol/task-context-packet-v0-1";
 import {
+  buildEpisodeDeltaProposalV01,
   createEpisodeDeltaProposalFingerprintV01,
   deriveEpisodeDeltaProposalIdV01,
   validateEpisodeDeltaProposalV01,
@@ -54,6 +55,8 @@ import {
   consumeVNextLocalOperatorBootstrapV01,
   issueVNextLocalOperatorBootstrapV01,
   issueVNextRepositoryDecisionChallengeV01,
+  readVNextLocalOperatorCredentialFromRequestV01,
+  VNEXT_LOCAL_OPERATOR_SESSION_COOKIE_V01,
 } from "../lib/vnext/runtime/local-operator-session";
 import {
   insertVNextCoreRecordV01,
@@ -71,7 +74,10 @@ import {
   type RunReceiptBuilderInputV01,
 } from "../lib/vnext/run-receipt";
 import {
+  getOrCreateCanonicalProjectForLocalRootV01,
+  getOrCreateDefaultWorkspaceIdentityV01,
   listProjectExternalRefsV01,
+  normalizeLocalProjectRootRefV01,
   readDefaultWorkspaceIdentityV01,
 } from "../lib/vnext/persistence/project-identity-registry";
 import {
@@ -80,6 +86,7 @@ import {
 import {
   readProjectHomeCapabilityStatusesV01,
   readProjectHomeEntryDestinationV01,
+  readProjectHomeDatabaseCompatibilityV01,
   readProjectHomeProjectionV01,
 } from "../lib/vnext/project-home/project-home-projection";
 import {
@@ -87,11 +94,13 @@ import {
 } from "../lib/vnext/guide-brief/project-guide-brief";
 import {
   buildReviewDecisionV01,
+  createEpisodeDeltaCandidateFingerprintV01,
   validateReviewDecisionAgainstEpisodeDeltaProposalV01,
   validateReviewDecisionV01,
 } from "../lib/vnext/review-decision";
 import {
   commitVNextSemanticTransitionV01,
+  commitVNextSemanticTransitionWithOperatorPilotCapabilityInsideTransactionV01,
   persistVNextSemanticReviewMaterialV01,
   prepareVNextSemanticCommitPreviewV01,
   recordVNextSemanticCommitAuthorizationV01,
@@ -106,6 +115,7 @@ import {
 } from "../types/vnext/project-identity";
 import type { ProjectHomeCapabilityStatusValueV01 } from "../types/vnext/project-home";
 import type { EpisodeDeltaProposalV01 } from "../types/vnext/episode-delta-proposal";
+import type { ReviewDecisionV01 } from "../types/vnext/review-decision";
 import type { TaskContextPacketBuilderInputV01 } from "../lib/vnext/task-context-packet";
 import type { ModelInvocationReceiptV02 } from "../types/vnext/model-invocation-receipt";
 import type { SemanticReviewLoopProjectFixtureV01 } from "../fixtures/vnext/protocol/semantic-review-loop-v0-1";
@@ -114,6 +124,18 @@ import {
   resolveLegacyProjectCompatibilityIdentityV01,
 } from "../lib/vnext/compat/project-identity";
 import { applyCanonicalDatabaseMigrations } from "./canonical-database-migrations.mjs";
+import { validateRecoveryCanonicalDatabaseV01 } from "./recovery-canonical-record-validator";
+import { readVNextOperatorPilotProposalDurableLineageV01 } from "../lib/vnext/runtime/operator-pilot-workbench-lineage";
+import { readSharedProjectInspectorV01 } from "../lib/vnext/runtime/shared-project-inspector";
+import { recordVNextOperatorPilotReviewDecisionV01 } from "../lib/vnext/runtime/operator-pilot-review-material";
+import {
+  prepareVNextOperatorPilotSemanticCommitPreviewV01,
+  confirmVNextOperatorPilotSemanticCommitV01,
+} from "../lib/vnext/runtime/operator-pilot-semantic-transition";
+import {
+  createVNextOperatorPilotReviewWindowCapabilityV01,
+  VNEXT_OPERATOR_PILOT_DEFAULT_REVIEW_WINDOW_CONFIG_V01,
+} from "../lib/vnext/runtime/operator-pilot-review-window-config-v0-1";
 
 const root = mkdtempSync(path.join(tmpdir(), "augnes-project-home-"));
 const dbPath = path.join(root, "project-home.db");
@@ -339,6 +361,8 @@ function buildDecision(
   proposal: EpisodeDeltaProposalV01,
   decision: "accept" | "reject" | "defer",
   options: {
+    candidate_index?: number;
+    prior_decision?: ReviewDecisionV01;
     decided_at?: string;
     revisit?: {
       revisit_at: string | null;
@@ -348,15 +372,30 @@ function buildDecision(
   } = {},
 ) {
   const input = createSemanticTransitionDecisionInputV01(project, proposal);
+  const candidate = proposal.proposed_deltas[options.candidate_index ?? 0]!;
+  input.candidate = {
+    candidate_id: candidate.candidate_id,
+    candidate_fingerprint: createEpisodeDeltaCandidateFingerprintV01(candidate),
+  };
+  input.decision_basis_material_ids = candidate.basis_material_ids;
+  input.requested_transition_intent!.target_refs = candidate.target_refs;
+  if (options.prior_decision)
+    input.lineage.prior_decisions = [
+      {
+        decision_id: options.prior_decision.decision_id,
+        decision_fingerprint: options.prior_decision.integrity.fingerprint,
+      },
+    ];
   input.decision = decision;
   if (options.decided_at) input.decided_at = options.decided_at;
   if (decision === "reject" || decision === "defer") {
-    input.rationale_summary = decision === "reject"
-      ? "The bounded synthetic proposal is rejected in the Project Home test."
-      : "The bounded synthetic proposal remains deferred under explicit revisit semantics.";
+    input.rationale_summary =
+      decision === "reject"
+        ? "The bounded synthetic proposal is rejected in the Project Home test."
+        : "The bounded synthetic proposal remains deferred under explicit revisit semantics.";
     input.requested_transition_intent = null;
   }
-  input.revisit = decision === "defer" ? options.revisit ?? null : null;
+  input.revisit = decision === "defer" ? (options.revisit ?? null) : null;
   const result = buildReviewDecisionV01(input);
   assert.equal(validateReviewDecisionV01(result).status, "valid");
   assert.equal(
@@ -735,6 +774,648 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+async function historyGrowthRegression() {
+  const observations: unknown[] = [];
+  const failures: string[] = [];
+  for (const kind of ["proposal", "decision", "transition"] as const) {
+    const database = new Database(":memory:");
+    let lastTransitionBranch: Database.Database | null = null;
+    try {
+      database.pragma("foreign_keys = ON");
+      applyCanonicalDatabaseMigrations(database);
+      const localRoot = path.join(root, `history-${kind}`);
+      mkdirSync(localRoot);
+      const workspace = getOrCreateDefaultWorkspaceIdentityV01(database);
+      const registration = getOrCreateCanonicalProjectForLocalRootV01(database, {
+        workspace_id: workspace.workspace_id,
+        local_root: normalizeLocalProjectRootRefV01(localRoot, { base_path: root }),
+        display_name: `History ${kind}`,
+      });
+      const project = projectFixture(
+        registration.project.project_id,
+        workspace.workspace_id,
+        `history-${kind}`,
+      );
+      const material = buildDurableLocalClosedLoopM3APrefixFixtureV01(project);
+      for (const [recordKind, payload, id, createdAt, key] of [
+        [
+          "task_context_packet",
+          material.prior_packet,
+          material.prior_packet.packet_id,
+          material.prior_packet.generated_at,
+          null,
+        ],
+        [
+          "run_receipt",
+          material.run_receipt,
+          material.run_receipt.receipt_id,
+          material.run_receipt.recorded_at,
+          material.run_receipt.idempotency_key,
+        ],
+      ] as const) {
+        insertVNextCoreRecordV01(database, {
+          ...project,
+          record_kind: recordKind,
+          record_id: id,
+          fingerprint: payload.integrity.fingerprint,
+          payload,
+          created_at: createdAt,
+          idempotency_key: key,
+        });
+      }
+      const singleProposal = rebuildProposal(project, "History candidate", "history");
+      if (kind === "decision") insertPendingProposal(database, singleProposal);
+      let transitionProposal = singleProposal;
+      let previousDecision: ReviewDecisionV01 | undefined;
+      const branchTables = [
+        "vnext_core_records",
+        "vnext_local_operator_sessions",
+        "vnext_semantic_state_entries",
+        "vnext_semantic_target_heads",
+      ] as const;
+      let branchStarts: number[] = [];
+      const boundaries = kind === "proposal" ? [1, 63, 64, 65] : [1, 127, 128, 129];
+      for (let count = 1; count <= boundaries.at(-1)!; count += 1) {
+        if (kind === "transition" && count % 3 === 1) {
+          const source = rebuildProposal(project, `Applied history ${count}`, `applied-${count}`);
+          source.proposed_deltas = Array.from({ length: 3 }, (_, index) => ({
+            ...clone(source.proposed_deltas[0]!),
+            candidate_id: `delta:history-${count}-${index}`,
+            target_refs: source.proposed_deltas[0]!.target_refs.map((ref) => ({
+              ...ref,
+              external_id: `${ref.external_id}:history-${count}-${index}`,
+            })),
+          }));
+          for (const item of [...source.missing_information, ...source.uncertainties]) {
+            item.related_delta_ids = source.proposed_deltas.map(
+              (candidate) => candidate.candidate_id,
+            );
+          }
+          transitionProposal = buildEpisodeDeltaProposalV01(source);
+        }
+        const proposal =
+          kind === "proposal"
+            ? rebuildProposal(project, `Resolved history ${count}`, `history-${count}`)
+            : kind === "transition"
+              ? transitionProposal
+              : singleProposal;
+        const decision = buildDecision(
+          project,
+          proposal,
+          kind === "transition" ? "accept" : "reject",
+          {
+            prior_decision: kind === "decision" ? previousDecision : undefined,
+            candidate_index: kind === "transition" ? (count - 1) % 3 : 0,
+            decided_at: new Date(Date.parse("2026-07-10T13:15:00.000Z") + count).toISOString(),
+          },
+        );
+        previousDecision = decision;
+        if (kind === "transition" && count === 129) {
+          // The operator writer has its own 128-decision admission bound.
+          // Assemble the two independently written, disjoint target effects
+          // from the same 127-record disposable snapshot; never invent a
+          // decision, gate, session provenance, receipt, or semantic state.
+          assert(lastTransitionBranch);
+          try {
+            for (const [index, table] of branchTables.entries()) {
+              const rows = lastTransitionBranch
+                .prepare(`SELECT * FROM ${table} WHERE rowid > ?`)
+                .all(branchStarts[index]) as Record<string, unknown>[];
+              for (const row of rows) {
+                const columns = Object.keys(row);
+                database
+                  .prepare(
+                    `INSERT INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`,
+                  )
+                  .run(...Object.values(row));
+              }
+            }
+          } finally {
+            lastTransitionBranch.close();
+            lastTransitionBranch = null;
+          }
+        } else if (kind === "transition")
+          persistHistoryOperatorTransition(database, project, proposal, (count - 1) % 3, count);
+        else persistVNextSemanticReviewMaterialV01(database, { proposal, decision });
+        if (kind === "transition" && count === 127) {
+          branchStarts = branchTables.map(
+            (table) =>
+              (
+                database.prepare(`SELECT COALESCE(MAX(rowid), 0) AS last FROM ${table}`).get() as {
+                  last: number;
+                }
+              ).last,
+          );
+          lastTransitionBranch = new Database(database.serialize());
+          try {
+            persistHistoryOperatorTransition(lastTransitionBranch, project, proposal, 2, 129);
+            assert.equal(
+              validateRecoveryCanonicalDatabaseV01(lastTransitionBranch).status,
+              "valid",
+              "the independent last Transition has complete writer provenance before assembly",
+            );
+          } catch (error) {
+            lastTransitionBranch.close();
+            lastTransitionBranch = null;
+            throw error;
+          }
+        }
+        if (!boundaries.includes(count)) continue;
+        const before = databaseSnapshot(database);
+        let strictError: string | null = null;
+        try {
+          readProjectHomeDatabaseCompatibilityV01(database, project, {
+            now: () => fixedGeneratedAt,
+          });
+        } catch (error) {
+          strictError = (error as Error).message;
+        }
+        const home = await readProjectHomeProjectionV01(database, project, {
+          now: () => fixedGeneratedAt,
+        });
+        const recovery = validateRecoveryCanonicalDatabaseV01(database);
+        if (count === 129 && kind !== "proposal") {
+          assert.equal(recovery.status, "invalid");
+          assert.equal(recovery.code, "database_reader_incompatible");
+          const config = {
+            ...project,
+            enabled: true as const,
+            operator_id: "operator:history",
+            database_path: ":memory:",
+          };
+          assert.throws(
+            () =>
+              kind === "transition"
+                ? readVNextOperatorPilotProposalDurableLineageV01(database, {
+                    config,
+                    proposal,
+                    clock: { now: () => fixedGeneratedAt },
+                  })
+                : readSharedProjectInspectorV01(database, {
+                    config,
+                    authenticated_session_id: "session:history",
+                    observed_at: fixedGeneratedAt,
+                    target: {
+                      target_kind: "episode_delta_proposal",
+                      record_id: proposal.proposal_id,
+                      expected_fingerprint: proposal.integrity.fingerprint,
+                    },
+                  }),
+            /history_bound_exceeded/,
+            "independent Workbench/Inspector bounds still block full recovery",
+          );
+        } else if (recovery.status !== "valid")
+          failures.push(`${kind}:${count}:recovery:${recovery.code}`);
+        const observation = {
+          kind,
+          count,
+          strict_error: strictError,
+          attention: home.attention.state.status,
+          debt: home.attention.decision_debt,
+          recovery,
+        };
+        observations.push(observation);
+        console.log(JSON.stringify(observation));
+        assert.deepEqual(
+          databaseSnapshot(database),
+          before,
+          "history readers do not mutate canonical or projection state",
+        );
+        if (strictError || home.attention.state.status === "error") {
+          failures.push(
+            `${kind}:${count}:${strictError}:${home.attention.state.status}:${recovery.code}`,
+          );
+        }
+      }
+      if (!process.argv.includes("--history-boundaries-only")) {
+        if (kind === "proposal") await longHistoryAttentionRegression(database, project);
+        if (kind === "decision") await invalidHistoryRegression(database, project);
+        if (kind === "transition") await invalidTransitionHistoryRegression(database, project);
+      }
+    } finally {
+      lastTransitionBranch?.close();
+      database.close();
+    }
+  }
+  console.log(JSON.stringify({ history_growth_boundaries: observations }));
+  assert.deepEqual(failures, [], "valid cumulative history remains readable");
+}
+
+async function longHistoryAttentionRegression(
+  database: Database.Database,
+  project: SemanticReviewLoopProjectFixtureV01,
+) {
+  const make = (marker: string, createdAt = "2026-07-10T11:59:59.000Z") =>
+    buildEpisodeDeltaProposalV01({
+      ...rebuildProposal(project, marker, marker),
+      created_at: createdAt,
+    });
+  const pending = make("Old unresolved candidate");
+  const accepted = make("Old accepted awaiting Transition");
+  insertPendingProposal(database, pending);
+  persistVNextSemanticReviewMaterialV01(database, {
+    proposal: accepted,
+    decision: buildDecision(project, accepted, "accept"),
+  });
+  for (const [marker, revisit] of [
+    [
+      "Old revisit",
+      { revisit_at: "2026-07-16T00:00:00.000Z", expires_at: null, condition_summary: null },
+    ],
+    [
+      "Old expiry",
+      { revisit_at: null, expires_at: "2026-07-17T00:00:00.000Z", condition_summary: null },
+    ],
+    [
+      "Old condition",
+      { revisit_at: null, expires_at: null, condition_summary: "Wait for the recorded condition." },
+    ],
+  ] as const) {
+    const proposal = make(marker);
+    persistVNextSemanticReviewMaterialV01(database, {
+      proposal,
+      decision: buildDecision(project, proposal, "defer", { revisit }),
+    });
+  }
+  for (const [at, pendingCount, deferredCount] of [
+    [fixedGeneratedAt, 1, 3],
+    ["2026-07-16T00:00:00.000Z", 2, 2],
+    ["2026-07-17T00:00:00.000Z", 3, 1],
+  ] as const) {
+    const before = databaseSnapshot(database);
+    const home = await readProjectHomeProjectionV01(database, project, { now: () => at });
+    assert.deepEqual(home.attention.decision_debt, {
+      pending_candidate_count: pendingCount,
+      accepted_awaiting_transition_count: 1,
+      deferred_candidate_count: deferredCount,
+    });
+    if (at === fixedGeneratedAt)
+      assert(
+        home.attention.items.some((item) => item.proposal_id === pending.proposal_id),
+        "the old unresolved item is outside the recent 64 proposals",
+      );
+    assert.equal(
+      readProjectHomeDatabaseCompatibilityV01(database, project, { now: () => at }).read_compatible,
+      true,
+    );
+    assert.equal(validateRecoveryCanonicalDatabaseV01(database).status, "valid");
+    assert.deepEqual(databaseSnapshot(database), before);
+  }
+  // Conversely, recent unresolved work must remain visible among old resolved
+  // history. Counts describe the complete queue even when only five are shown.
+  for (let index = 0; index < 8; index += 1)
+    insertPendingProposal(database, make(`Recent unresolved ${index}`, "2026-07-10T13:14:00.000Z"));
+  const home = await readProjectHomeProjectionV01(database, project, {
+    now: () => fixedGeneratedAt,
+  });
+  assert.equal(home.attention.decision_debt.pending_candidate_count, 9);
+  assert.equal(home.attention.decision_debt.accepted_awaiting_transition_count, 1);
+  assert.equal(home.attention.items.length, 5);
+  assert(home.attention.total_count >= 10);
+
+  await invalidHistoryRegression(database, project);
+  for (let count = 66; count <= 512; count += 1) {
+    const proposal = make(`Resolved larger history ${count}`, "2026-07-10T12:00:00.000Z");
+    persistVNextSemanticReviewMaterialV01(database, {
+      proposal,
+      decision: buildDecision(project, proposal, "reject"),
+    });
+  }
+  let recordsRead = 0;
+  let bytesRead = 0;
+  let maxBatch = 0;
+  const before = databaseSnapshot(database);
+  const prepare = database.prepare;
+  database.prepare = ((sql: string) => {
+    const statement = prepare.call(database, sql);
+    if (!/SELECT\s+\*\s+FROM\s+vnext_core_records/i.test(sql)) return statement;
+    return new Proxy(statement, {
+      get(target, key) {
+        if (key !== "get" && key !== "all") {
+          const value = Reflect.get(target, key);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (...args: unknown[]) => {
+          const result = Reflect.apply(target[key], target, args);
+          const rows =
+            key === "all"
+              ? (result as { payload_json: string }[])
+              : result
+                ? [result as { payload_json: string }]
+                : [];
+          recordsRead += rows.length;
+          bytesRead += rows.reduce((sum, row) => sum + Buffer.byteLength(row.payload_json), 0);
+          maxBatch = Math.max(maxBatch, rows.length);
+          return result;
+        };
+      },
+    });
+  }) as typeof database.prepare;
+  const started = performance.now();
+  try {
+    assert.equal(
+      readProjectHomeDatabaseCompatibilityV01(database, project, { now: () => fixedGeneratedAt })
+        .read_compatible,
+      true,
+    );
+  } finally {
+    database.prepare = prepare;
+  }
+  const elapsedMs = performance.now() - started;
+  assert(maxBatch <= 64, "history never materializes an unbounded record batch");
+  assert(
+    recordsRead > 512,
+    "measurement includes the complete history, not only its recent window",
+  );
+  assert.deepEqual(databaseSnapshot(database), before);
+  console.log(
+    JSON.stringify({
+      larger_history: {
+        proposals: 525,
+        decisions: 516,
+        records_read: recordsRead,
+        payload_bytes_read: bytesRead,
+        max_batch: maxBatch,
+        elapsed_ms: Math.round(elapsedMs),
+      },
+      full_recovery: "not_run_beyond_independently_reproduced_128_reader_bound",
+    }),
+  );
+}
+
+async function invalidHistoryRegression(
+  database: Database.Database,
+  project: SemanticReviewLoopProjectFixtureV01,
+) {
+  for (const mutation of [
+    "fingerprint",
+    "missing_proposal",
+    "foreign_proposal",
+    "missing_prior",
+    "conflicting_prior",
+  ] as const) {
+    const copy = new Database(database.serialize());
+    try {
+      copy.exec(
+        "DROP TRIGGER trg_vnext_core_records_immutable_update; DROP TRIGGER trg_vnext_core_records_immutable_delete;",
+      );
+      if (mutation === "fingerprint")
+        copy
+          .prepare(
+            "UPDATE vnext_core_records SET payload_json = json_set(payload_json, '$.bounded_summary', 'tampered') WHERE record_id = (SELECT record_id FROM vnext_core_records WHERE record_kind = 'episode_delta_proposal' ORDER BY created_at, record_id LIMIT 1)",
+          )
+          .run();
+      if (mutation === "missing_proposal")
+        copy
+          .prepare(
+            "DELETE FROM vnext_core_records WHERE record_id = (SELECT json_extract(payload_json, '$.source_proposal.proposal_id') FROM vnext_core_records WHERE record_kind = 'review_decision' LIMIT 1)",
+          )
+          .run();
+      if (mutation === "foreign_proposal") {
+        const foreignRoot = path.join(root, "foreign-history");
+        mkdirSync(foreignRoot, { recursive: true });
+        const registration = getOrCreateCanonicalProjectForLocalRootV01(copy, {
+          workspace_id: project.workspace_id,
+          local_root: normalizeLocalProjectRootRefV01(foreignRoot, { base_path: root }),
+          display_name: "Foreign history",
+        });
+        const foreign = projectFixture(
+          registration.project.project_id,
+          project.workspace_id,
+          "foreign-history",
+        );
+        const material = buildDurableLocalClosedLoopM3APrefixFixtureV01(foreign);
+        for (const [kind, payload, id, at, key] of [
+          [
+            "task_context_packet",
+            material.prior_packet,
+            material.prior_packet.packet_id,
+            material.prior_packet.generated_at,
+            null,
+          ],
+          [
+            "run_receipt",
+            material.run_receipt,
+            material.run_receipt.receipt_id,
+            material.run_receipt.recorded_at,
+            material.run_receipt.idempotency_key,
+          ],
+          [
+            "episode_delta_proposal",
+            material.proposal,
+            material.proposal.proposal_id,
+            material.proposal.created_at,
+            null,
+          ],
+        ] as const)
+          insertVNextCoreRecordV01(copy, {
+            ...foreign,
+            record_kind: kind,
+            record_id: id,
+            fingerprint: payload.integrity.fingerprint,
+            payload,
+            created_at: at,
+            idempotency_key: key,
+          });
+        const decision = buildReviewDecisionV01({
+          ...buildDecision(foreign, material.proposal, "reject"),
+          project_id: project.project_id,
+        });
+        assert.equal(validateReviewDecisionV01(decision).status, "valid");
+        assert.equal(
+          validateReviewDecisionAgainstEpisodeDeltaProposalV01(decision, material.proposal).status,
+          "blocked",
+        );
+        insertVNextCoreRecordV01(copy, {
+          ...project,
+          record_kind: "review_decision",
+          record_id: decision.decision_id,
+          fingerprint: decision.integrity.fingerprint,
+          payload: decision,
+          created_at: decision.decided_at,
+          idempotency_key: null,
+        });
+      }
+      if (mutation === "missing_prior" || mutation === "conflicting_prior") {
+        const record = copy
+          .prepare(
+            "SELECT payload_json FROM vnext_core_records WHERE record_kind = 'review_decision' ORDER BY created_at, record_id LIMIT 1",
+          )
+          .get() as { payload_json: string };
+        const prior = JSON.parse(record.payload_json) as ReviewDecisionV01;
+        const decision = buildReviewDecisionV01({
+          ...prior,
+          decided_at: "2026-07-11T00:00:00.000Z",
+          lineage: {
+            ...prior.lineage,
+            prior_decisions: [
+              {
+                decision_id:
+                  mutation === "missing_prior"
+                    ? `review-decision:${"f".repeat(64)}`
+                    : prior.decision_id,
+                decision_fingerprint:
+                  mutation === "missing_prior"
+                    ? prior.integrity.fingerprint
+                    : `sha256:${"f".repeat(64)}`,
+              },
+            ],
+          },
+        });
+        assert.equal(validateReviewDecisionV01(decision).status, "valid");
+        insertVNextCoreRecordV01(copy, {
+          record_kind: "review_decision",
+          record_id: decision.decision_id,
+          workspace_id: decision.workspace_id,
+          project_id: decision.project_id,
+          fingerprint: decision.integrity.fingerprint,
+          payload: decision,
+          created_at: decision.decided_at,
+          idempotency_key: null,
+        });
+      }
+      for (const row of database
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE name IN ('trg_vnext_core_records_immutable_update', 'trg_vnext_core_records_immutable_delete')",
+        )
+        .all() as { sql: string }[])
+        copy.exec(row.sql);
+      assert.throws(
+        () =>
+          readProjectHomeDatabaseCompatibilityV01(copy, project, { now: () => fixedGeneratedAt }),
+        /project_home_|binding/,
+      );
+      const home = await readProjectHomeProjectionV01(copy, project, {
+        now: () => fixedGeneratedAt,
+      });
+      assert.equal(
+        home.attention.state.status,
+        "error",
+        `${mutation} cannot become empty/complete attention`,
+      );
+      assert.equal(validateRecoveryCanonicalDatabaseV01(copy).status, "invalid");
+    } finally {
+      copy.close();
+    }
+  }
+}
+
+async function invalidTransitionHistoryRegression(
+  database: Database.Database,
+  project: SemanticReviewLoopProjectFixtureV01,
+) {
+  const copy = new Database(database.serialize());
+  try {
+    copy.exec("DROP TRIGGER trg_vnext_core_records_immutable_delete;");
+    copy
+      .prepare(
+        "DELETE FROM vnext_core_records WHERE record_kind = 'semantic_commit_gate' AND record_id = (SELECT record_id FROM vnext_core_records WHERE record_kind = 'semantic_commit_gate' ORDER BY created_at, record_id LIMIT 1)",
+      )
+      .run();
+    copy.exec(
+      (
+        database
+          .prepare(
+            "SELECT sql FROM sqlite_master WHERE name = 'trg_vnext_core_records_immutable_delete'",
+          )
+          .get() as { sql: string }
+      ).sql,
+    );
+    assert.throws(() =>
+      readProjectHomeDatabaseCompatibilityV01(copy, project, { now: () => fixedGeneratedAt }),
+    );
+    const home = await readProjectHomeProjectionV01(copy, project, { now: () => fixedGeneratedAt });
+    assert.equal(
+      home.attention.state.status,
+      "error",
+      "a missing historical authority gate is still refused outside the first page",
+    );
+  } finally {
+    copy.close();
+  }
+}
+
+function persistHistoryOperatorTransition(
+  database: Database.Database,
+  project: SemanticReviewLoopProjectFixtureV01,
+  proposal: EpisodeDeltaProposalV01,
+  candidateIndex: number,
+  count: number,
+) {
+  insertPendingProposal(database, proposal);
+  const config = {
+    ...project,
+    enabled: true as const,
+    operator_id: "operator:history",
+    database_path: ":memory:",
+  };
+  const clock = fixedClock(
+    new Date(Date.parse("2026-07-10T13:15:00.000Z") + count * 1000).toISOString(),
+  );
+  const bootstrap = issueVNextLocalOperatorBootstrapV01(database, { config, clock });
+  let credential = consumeVNextLocalOperatorBootstrapV01(database, {
+    config,
+    clock,
+    bootstrap_token: bootstrap.bootstrap_token,
+  }).credential;
+  const candidate = proposal.proposed_deltas[candidateIndex]!;
+  const recorded = recordVNextOperatorPilotReviewDecisionV01(database, {
+    config,
+    credential,
+    clock,
+    request: {
+      proposal_id: proposal.proposal_id,
+      proposal_fingerprint: proposal.integrity.fingerprint,
+      candidate_id: candidate.candidate_id,
+      candidate_fingerprint: createEpisodeDeltaCandidateFingerprintV01(candidate),
+      decision: "accept",
+      rationale_summary: "Apply an isolated history regression candidate.",
+      revisit: null,
+    },
+  });
+  credential = readVNextLocalOperatorCredentialFromRequestV01(
+    new Request("http://localhost/", {
+      headers: {
+        cookie: `${VNEXT_LOCAL_OPERATOR_SESSION_COOKIE_V01}=${recorded.session_cookie.value}`,
+      },
+    }),
+  );
+  const binding = {
+    proposal_id: proposal.proposal_id,
+    proposal_fingerprint: proposal.integrity.fingerprint,
+    decision_id: recorded.decision.decision_id,
+    decision_fingerprint: recorded.decision.integrity.fingerprint,
+  };
+  const preview = prepareVNextOperatorPilotSemanticCommitPreviewV01(database, {
+    config,
+    credential,
+    clock,
+    request: binding,
+  });
+  const confirmed = confirmVNextOperatorPilotSemanticCommitV01(database, {
+    config,
+    credential,
+    clock,
+    preview_binding_cookie: preview.preview_binding_cookie,
+    request: { ...binding, confirmation_digest: preview.preview.confirmation_digest },
+  });
+  const applied = database.transaction(() =>
+    commitVNextSemanticTransitionWithOperatorPilotCapabilityInsideTransactionV01(database, {
+      workspace_id: project.workspace_id,
+      project_id: project.project_id,
+      ...binding,
+      clock,
+      gate_record_id: confirmed.gate_record.gate_record_id,
+      gate_record_fingerprint: confirmed.gate_record.integrity.fingerprint,
+      review_window_capability: createVNextOperatorPilotReviewWindowCapabilityV01({
+        ...project,
+        config: VNEXT_OPERATOR_PILOT_DEFAULT_REVIEW_WINDOW_CONFIG_V01,
+      }),
+    }),
+  )();
+  assert.equal(applied.status, "applied");
+}
+
 async function main() {
   try {
     mkdirSync(emptyRoot);
@@ -757,6 +1438,9 @@ async function main() {
     process.env.AUGNES_CANONICAL_TEMP_ROOT = root;
     process.env.AUGNES_DB_PATH = dbPath;
     db = openDatabase();
+
+    await historyGrowthRegression();
+    if (process.argv.includes("--history-only") || process.argv.includes("--history-boundaries-only")) return;
 
     const pristineSnapshot = databaseSnapshot(db);
     assert.equal(readProjectHomeEntryDestinationV01(db), "/projects");
