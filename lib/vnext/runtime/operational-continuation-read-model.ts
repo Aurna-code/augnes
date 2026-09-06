@@ -234,6 +234,15 @@ export function rebuildOperationalContinuationFromDurableSourcesV01(
     proposal_id: canonical.proposal.proposal_id,
     authenticated_session_id: null,
   });
+  // Review history is a display window. This bounded compiler still requires
+  // every decision for provenance, cutoff and terminal-history validation;
+  // effective bindings alone cannot discharge those checks.
+  if (
+    reviewDetail.history_read?.decisions.complete !== true ||
+    reviewDetail.history_read?.transitions.complete !== true
+  ) {
+    refuseV01("operational_continuation_complete_review_history_required");
+  }
   if (
     reviewDetail.operational_friction_review?.status !==
       "canonical_admission_verified" ||

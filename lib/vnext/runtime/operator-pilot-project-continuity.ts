@@ -5,6 +5,7 @@ import {
   assertVNextCoreRecordMatchesProtocolPayloadBindingV01,
   assertVNextDurableSemanticStoreSchemaV01,
   deriveVNextSemanticTargetKeyV01,
+  iterateVNextCoreRecordsV01,
   listVNextSemanticStateEntriesV01,
   listVNextSemanticTargetHeadsV01,
   readVNextCoreRecordV01,
@@ -259,27 +260,69 @@ export function projectVNextOperatorPilotContinuityV01(
     clock?: VNextLocalRuntimeClockV01;
   },
 ): VNextOperatorPilotProjectContinuityV01 {
+  return db.transaction(() => projectContinuitySnapshotV01(db, input))();
+}
+
+function projectContinuitySnapshotV01(
+  db: Database.Database,
+  input: {
+    config: VNextLocalOperatorPilotConfigV01;
+    clock?: VNextLocalRuntimeClockV01;
+  },
+): VNextOperatorPilotProjectContinuityV01 {
   assertVNextDurableSemanticStoreSchemaV01(db);
   const now = readVNextLocalRuntimeClockNowV01(
     input.clock,
     "operator_pilot_continuity_observed_at",
   );
-  const proposals = loadProposals(db, input.config);
-  const proposalById = new Map(proposals.map((value) => [value.proposal_id, value]));
-  const decisions = loadDecisions(db, input.config, proposalById);
-  const receipts = loadTransitionReceipts(db, input.config);
-  const receiptDecisionKeys = new Set(
-    receipts.map((receipt) =>
+  // Full history contributes to these counts. Retain relation identities and
+  // bounded payload caches, rather than all historical protocol payloads.
+  const proposalCache = new Map<string, EpisodeDeltaProposalV01>();
+  const readProposal = (id: string): EpisodeDeltaProposalV01 | undefined => {
+    const cached = proposalCache.get(id);
+    if (cached) return cached;
+    const record = readVNextCoreRecordV01(db, {
+      ...input.config,
+      record_kind: "episode_delta_proposal",
+      record_id: id,
+    });
+    if (!record) return undefined;
+    const proposal = validateContinuityProposalV01(db, record);
+    if (proposalCache.size >= 128) proposalCache.delete(proposalCache.keys().next().value!);
+    proposalCache.set(id, proposal);
+    return proposal;
+  };
+  const receiptDecisionKeys = new Set<string>();
+  let latestReceipt: StateTransitionReceiptV01 | null = null;
+  for (const receipt of loadTransitionReceipts(db, input.config)) {
+    receiptDecisionKeys.add(
       `${receipt.source_decision.decision_id}\0${receipt.source_decision.decision_fingerprint}`,
-    ),
-  );
+    );
+    latestReceipt = receipt;
+  }
   const decisionsByProposal = new Map<string, Set<string>>();
-  for (const decision of decisions) {
+  let pendingAcceptedDecisionCount = 0;
+  for (const decision of loadDecisions(db, input.config, readProposal)) {
     const settled =
       decisionsByProposal.get(decision.source_proposal.proposal_id) ??
       new Set<string>();
     settled.add(decision.candidate.candidate_id);
     decisionsByProposal.set(decision.source_proposal.proposal_id, settled);
+    if (
+      decision.decision === "accept" &&
+      decision.requested_transition_intent !== null &&
+      !receiptDecisionKeys.has(`${decision.decision_id}\0${decision.integrity.fingerprint}`)
+    ) pendingAcceptedDecisionCount += 1;
+  }
+  let pendingProposalCount = 0;
+  for (const proposal of loadProposals(db, input.config)) {
+    if (
+      proposal.operational_friction_proposal
+        ? proposal.proposed_deltas.some(
+            (candidate) => !decisionsByProposal.get(proposal.proposal_id)?.has(candidate.candidate_id),
+          )
+        : !decisionsByProposal.has(proposal.proposal_id)
+    ) pendingProposalCount += 1;
   }
   const stateEntries = validateCurrentSemanticState(db, input.config);
   const targetHeads = listVNextSemanticTargetHeadsV01(db, {
@@ -339,31 +382,13 @@ export function projectVNextOperatorPilotContinuityV01(
         )
         .at(-1) ?? null
     : null;
-  const latestReceipt = receipts.at(-1) ?? null;
   const latestHead = targetHeads[0] ?? null;
   return {
     continuity_version: VNEXT_OPERATOR_PILOT_CONTINUITY_VERSION_V01,
     workspace_id: input.config.workspace_id,
     project_id: input.config.project_id,
-    pending_proposal_count: proposals.filter(
-      (proposal) =>
-        proposal.operational_friction_proposal
-          ? proposal.proposed_deltas.some(
-              (candidate) =>
-                !decisionsByProposal
-                  .get(proposal.proposal_id)
-                  ?.has(candidate.candidate_id),
-            )
-          : !decisionsByProposal.has(proposal.proposal_id),
-    ).length,
-    pending_accepted_decision_count: decisions.filter(
-      (decision) =>
-        decision.decision === "accept" &&
-        decision.requested_transition_intent !== null &&
-        !receiptDecisionKeys.has(
-          `${decision.decision_id}\0${decision.integrity.fingerprint}`,
-        ),
-    ).length,
+    pending_proposal_count: pendingProposalCount,
+    pending_accepted_decision_count: pendingAcceptedDecisionCount,
     latest_applied_transition: latestReceipt
       ? {
           transition_receipt_id: latestReceipt.transition_receipt_id,
@@ -668,73 +693,79 @@ function loadRecords(
   });
 }
 
-function loadProposals(db: Database.Database, config: VNextLocalOperatorPilotConfigV01) {
-  return loadRecords(db, config, "episode_delta_proposal").map((record) => {
-    if (validateEpisodeDeltaProposalV01(record.payload).status !== "valid") {
-      throw continuityError("operator_pilot_continuity_proposal_invalid", 422);
-    }
-    const proposal = record.payload as EpisodeDeltaProposalV01;
-    if (proposal.project_verify_lifecycle) {
-      assertPersistedProjectVerifyLifecycleProposalSourceBoundV01(db, proposal);
-    }
-    assertEnvelope(
-      record,
-      proposal.workspace_id,
-      proposal.project_id,
-      proposal.integrity.fingerprint,
-      proposal.proposal_id,
-      proposal.created_at,
-      proposal.operation_revision?.admission_idempotency_key ??
-        proposal.source_assessment?.admission_idempotency_key ??
-        (proposal.operational_friction_proposal
-          ? deriveOperationalFrictionProposalAdmissionIdentityV01({
-              workspace_id: proposal.workspace_id,
-              project_id: proposal.project_id,
-              proposal,
-            }).idempotency_key
-          : null) ??
-        (proposal.project_verify_lifecycle
-          ? deriveProjectVerifyLifecycleProposalAdmissionIdentityV01({
-              workspace_id:
-                proposal.project_verify_lifecycle.lifecycle_binding.workspace_id,
-              project_id:
-                proposal.project_verify_lifecycle.lifecycle_binding.project_id,
-              entity_kind:
-                proposal.project_verify_lifecycle.lifecycle_binding.entity_kind,
-              family_id:
-                proposal.project_verify_lifecycle.lifecycle_binding.family_id,
-              selected_record_ref:
-                proposal.project_verify_lifecycle.lifecycle_binding
-                  .selected_record_ref,
-            }).admission_idempotency_key
-          : null) ??
-        (proposal.strategic_advantage_transfer
-          ? createProtocolSha256V01(
-              canonicalizeProtocolValueV01({
-                purpose:
-                  STRATEGIC_ADVANTAGE_TRANSFER_PROFILE_VERSION_V01,
-                analysis_identity:
-                  proposal.strategic_advantage_transfer.analysis_identity,
-              }),
-            )
-          : null) ??
-        null,
-    );
-    return proposal;
-  });
+function* loadProposals(db: Database.Database, config: VNextLocalOperatorPilotConfigV01) {
+  for (const record of iterateVNextCoreRecordsV01(db, {
+    ...config, record_kind: "episode_delta_proposal", order: "oldest_first",
+  })) yield validateContinuityProposalV01(db, record);
 }
 
-function loadDecisions(
+function validateContinuityProposalV01(db: Database.Database, record: VNextCoreRecordEnvelopeV01) {
+  if (validateEpisodeDeltaProposalV01(record.payload).status !== "valid") {
+    throw continuityError("operator_pilot_continuity_proposal_invalid", 422);
+  }
+  const proposal = record.payload as EpisodeDeltaProposalV01;
+  if (proposal.project_verify_lifecycle) {
+    assertPersistedProjectVerifyLifecycleProposalSourceBoundV01(db, proposal);
+  }
+  assertEnvelope(
+    record,
+    proposal.workspace_id,
+    proposal.project_id,
+    proposal.integrity.fingerprint,
+    proposal.proposal_id,
+    proposal.created_at,
+    proposal.operation_revision?.admission_idempotency_key ??
+      proposal.source_assessment?.admission_idempotency_key ??
+      (proposal.operational_friction_proposal
+        ? deriveOperationalFrictionProposalAdmissionIdentityV01({
+            workspace_id: proposal.workspace_id,
+            project_id: proposal.project_id,
+            proposal,
+          }).idempotency_key
+        : null) ??
+      (proposal.project_verify_lifecycle
+        ? deriveProjectVerifyLifecycleProposalAdmissionIdentityV01({
+            workspace_id:
+              proposal.project_verify_lifecycle.lifecycle_binding.workspace_id,
+            project_id:
+              proposal.project_verify_lifecycle.lifecycle_binding.project_id,
+            entity_kind:
+              proposal.project_verify_lifecycle.lifecycle_binding.entity_kind,
+            family_id:
+              proposal.project_verify_lifecycle.lifecycle_binding.family_id,
+            selected_record_ref:
+              proposal.project_verify_lifecycle.lifecycle_binding
+                .selected_record_ref,
+          }).admission_idempotency_key
+        : null) ??
+      (proposal.strategic_advantage_transfer
+        ? createProtocolSha256V01(
+            canonicalizeProtocolValueV01({
+              purpose:
+                STRATEGIC_ADVANTAGE_TRANSFER_PROFILE_VERSION_V01,
+              analysis_identity:
+                proposal.strategic_advantage_transfer.analysis_identity,
+            }),
+          )
+        : null) ??
+      null,
+  );
+  return proposal;
+}
+
+function* loadDecisions(
   db: Database.Database,
   config: VNextLocalOperatorPilotConfigV01,
-  proposalById: Map<string, EpisodeDeltaProposalV01>,
+  readProposal: (id: string) => EpisodeDeltaProposalV01 | undefined,
 ) {
-  return loadRecords(db, config, "review_decision").flatMap((record) => {
+  for (const record of iterateVNextCoreRecordsV01(db, {
+    ...config, record_kind: "review_decision", order: "oldest_first",
+  })) {
     if (validateReviewDecisionV01(record.payload).status !== "valid") {
       throw continuityError("operator_pilot_continuity_decision_invalid", 422);
     }
     const decision = record.payload as ReviewDecisionV01;
-    const proposal = proposalById.get(decision.source_proposal.proposal_id);
+    const proposal = readProposal(decision.source_proposal.proposal_id);
     if (
       !proposal ||
       validateReviewDecisionAgainstEpisodeDeltaProposalV01(decision, proposal).status !== "valid"
@@ -751,12 +782,14 @@ function loadDecisions(
         authenticated_session_id: null,
       },
     );
-    return provenance.pilot_session_bound ? [decision] : [];
-  });
+    if (provenance.pilot_session_bound) yield decision;
+  }
 }
 
-function loadTransitionReceipts(db: Database.Database, config: VNextLocalOperatorPilotConfigV01) {
-  return loadRecords(db, config, "state_transition_receipt").map((record) => {
+function* loadTransitionReceipts(db: Database.Database, config: VNextLocalOperatorPilotConfigV01) {
+  for (const record of iterateVNextCoreRecordsV01(db, {
+    ...config, record_kind: "state_transition_receipt", order: "oldest_first",
+  })) {
     if (validateStateTransitionReceiptV01(record.payload).status !== "valid") {
       throw continuityError("operator_pilot_continuity_receipt_invalid", 422);
     }
@@ -794,8 +827,8 @@ function loadTransitionReceipts(db: Database.Database, config: VNextLocalOperato
       );
     }
     assertEnvelope(record, receipt.workspace_id, receipt.project_id, receipt.integrity.fingerprint, receipt.transition_receipt_id, receipt.recorded_at, receipt.idempotency_key);
-    return receipt;
-  });
+    yield receipt;
+  }
 }
 
 function validateCurrentSemanticState(db: Database.Database, config: VNextLocalOperatorPilotConfigV01) {

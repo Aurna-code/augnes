@@ -1656,6 +1656,39 @@ try {
     rejectedRead.decision_application_summary.status,
     "rejected",
   );
+  const partialHistoryRead: SemanticReviewProposalDetailV01 = {
+    ...currentSessionAcceptedRead,
+    decisions: [acceptedTimelineDecision, rejectedDecision],
+    decision_history: [historyFor(acceptedTimelineDecision), historyFor(rejectedDecision, false)],
+    history_read: {
+      decisions: { total_count: 193, returned_count: 2, complete: false },
+      transitions: { total_count: 0, returned_count: 0, complete: true },
+    },
+    effective_candidate_decisions: [{
+      candidate_id: timelineCandidate.candidate.candidate_id,
+      candidate_fingerprint: timelineCandidate.candidate_fingerprint,
+      decision_id: acceptedTimelineDecision.decision_id,
+      decision_fingerprint: acceptedTimelineDecision.integrity.fingerprint,
+    }],
+  };
+  assert.equal(selectSelectedCandidateActionableApplyingDecisionV01({
+    read: partialHistoryRead, selected_candidate: timelineCandidate,
+  })?.decision_id, acceptedTimelineDecision.decision_id,
+  "the display subset uses the full-history effective binding rather than electing another decision");
+  assert.equal(selectSelectedCandidateActionableApplyingDecisionV01({
+    read: {
+      ...partialHistoryRead,
+      effective_candidate_decisions: [{
+        ...partialHistoryRead.effective_candidate_decisions![0]!,
+        decision_fingerprint: `sha256:${"f".repeat(64)}`,
+      }],
+    }, selected_candidate: timelineCandidate,
+  }), null, "an invalid effective binding cannot fall back to a display decision");
+  assert.equal(selectSelectedCandidateActionableApplyingDecisionV01({
+    read: { ...partialHistoryRead, effective_candidate_decisions: [] },
+    selected_candidate: timelineCandidate,
+  }), null, "complete-history absence is not inferred from the display window");
+
   const rejectedTimeline = timelineFor(rejectedRead);
   assert.equal(rejectedTimeline.current_position.stage, "decision_recorded");
   assert.match(rejectedTimeline.current_position.title, /Rejected/u);

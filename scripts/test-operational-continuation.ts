@@ -34,19 +34,25 @@ import {
 } from "@/lib/vnext/review-decision";
 import {
   readOperationalContinuationV01,
+  rebuildOperationalContinuationFromDurableSourcesV01,
 } from "@/lib/vnext/runtime/operational-continuation-read-model";
 import {
   VNEXT_LOCAL_OPERATOR_SESSION_SCHEMA_SQL_V01,
   consumeVNextLocalOperatorBootstrapV01,
   issueVNextLocalOperatorBootstrapV01,
+  readVNextLocalOperatorSessionHistoryV01,
   type VNextLocalOperatorPilotConfigV01,
   type VNextLocalOperatorSecretSourceV01,
   type VNextLocalOperatorSessionCredentialV01,
 } from "@/lib/vnext/runtime/local-operator-session";
 import type { VNextLocalRuntimeClockV01 } from "@/lib/vnext/runtime/local-runtime-clock";
 import {
+  createVNextOperatorPilotDecisionRequestFingerprintV01,
+  createVNextOperatorPilotReviewDecisionSessionBasisRefV01,
   readVNextOperatorPilotSemanticReviewV01,
   recordVNextOperatorPilotReviewDecisionV01,
+  validateVNextOperatorPilotReviewDecisionProvenanceV01,
+  type VNextOperatorPilotDecisionRequestV01,
 } from "@/lib/vnext/runtime/operator-pilot-review-material";
 import { validateTaskContextPacketV01 } from "@/lib/vnext/task-context-packet";
 import type { ReviewDecisionV01 } from "@/types/vnext/review-decision";
@@ -95,6 +101,9 @@ interface TestFixtureV01 {
   >;
   config: VNextLocalOperatorPilotConfigV01;
   input: MaterializeSourceLinkedOperationalContinuationInputV01;
+  credential: VNextLocalOperatorSessionCredentialV01;
+  clock: MutableClockV01;
+  secret_source: DeterministicSecretSourceV01;
 }
 
 function main(): void {
@@ -107,6 +116,7 @@ function main(): void {
     assertPureMaterializationV01(fixture.input);
     assertDecisionAndSourceRefusalsV01(fixture.input);
     assertQueryOnlyAdapterAndReportV01(fixture, temporaryRoot);
+    assertDisplayHistoryConsumerBoundaryV01(temporaryRoot);
     assert.equal(fetchCalls, 0);
     console.log(
       JSON.stringify(
@@ -121,6 +131,8 @@ function main(): void {
           attachment_start_resume_firewall: true,
           query_only_consumer: true,
           table_counts_unchanged: true,
+          incomplete_review_history_refused: true,
+          omitted_invalid_session_history_refused: true,
           project_file_writes: 0,
           project_commands: 0,
           real_provider_calls: 0,
@@ -665,7 +677,177 @@ function assertQueryOnlyAdapterAndReportV01(
   assert.equal(db.serialize().equals(databaseImageBefore), true);
 }
 
-function createFixtureV01(databasePath: string): TestFixtureV01 {
+function assertDisplayHistoryConsumerBoundaryV01(temporaryRoot: string): void {
+  const fixture = createFixtureV01(path.join(temporaryRoot, "history-window.sqlite"), true);
+  const { db, config, input, clock, secret_source: secretSource } = fixture;
+  const proposal = input.canonical_admission.proposal;
+  const oldest = input.decision_history[0]!.decision;
+  const candidate = proposal.proposed_deltas[0]!;
+  const request = {
+    workspace_id: config.workspace_id,
+    project_id: config.project_id,
+    operator_id: config.operator_id,
+    frames: fixture.source_fixture.exact_source_records.map((source) => ({
+      review_id: source.context_use_review.review_id,
+      review_fingerprint: source.context_use_review.integrity.fingerprint,
+      context_shadow_projection: input.operational_friction_source.context_shadow_projection,
+    })),
+    window_kind: "recent_3" as const,
+    paired_evaluation: input.operational_friction_source.paired_evaluation,
+    decision_time_cutoff: input.decision_time_cutoff,
+    max_selected_candidates: input.max_selected_candidates,
+  };
+  const readDetail = () => readVNextOperatorPilotSemanticReviewV01(db, {
+    config, proposal_id: proposal.proposal_id, authenticated_session_id: null,
+  });
+  const readOnly = <T,>(action: () => T): T => {
+    db.pragma("query_only = ON");
+    const before = db.serialize();
+    try { return action(); } finally {
+      assert(db.serialize().equals(before), "continuation reads must not mutate the fixture");
+      db.pragma("query_only = OFF");
+    }
+  };
+  const observeConsumer = (action: () => unknown): string => {
+    try { action(); return "materialized"; } catch (error) {
+      assert(error instanceof Error);
+      return error.message;
+    }
+  };
+  try {
+    let credential = fixture.credential;
+    for (let count = 5; count <= 129; count += 1) {
+      clock.value = new Date(Date.parse("2026-07-19T00:00:00.000Z") + count * 1_000).toISOString();
+      const decisionRequest: VNextOperatorPilotDecisionRequestV01 = {
+        proposal_id: proposal.proposal_id,
+        proposal_fingerprint: proposal.integrity.fingerprint,
+        candidate_id: candidate.candidate_id,
+        candidate_fingerprint: createEpisodeDeltaCandidateFingerprintV01(candidate),
+        decision: count === 129 ? "accept" : "defer",
+        rationale_summary: `Disposable operational review ${count}.`,
+        revisit: count === 129 ? null : { condition_summary: `Revisit condition ${count}.` },
+      };
+      // The default consumer contract uses source-owned protocol/provenance
+      // builders. The slower focused mode separately proves the normal writer
+      // sequence without enlarging this owner's existing lifecycle timeout.
+      if (process.argv.includes("--normal-writer-history")) {
+        const recorded = recordVNextOperatorPilotReviewDecisionV01(db, {
+          config, credential, clock, secret_source: secretSource,
+          request: decisionRequest,
+        });
+        assert.equal(recorded.status, "inserted");
+        credential = credentialFromCookieV01(recorded.session_cookie.value);
+      } else {
+        persistSourceBoundFixtureDecisionV01(fixture, oldest, decisionRequest, clock.value, credential.session_id);
+      }
+      if (count === 5) {
+        // Negative fixture only: add a sealed, source-bound earlier terminal
+        // judgment to conflict with the later defer history.
+        db.exec("SAVEPOINT terminal_history_negative");
+        try {
+          persistSourceBoundFixtureDecisionV01(fixture, oldest, {
+            ...decisionRequest, decision: "accept", rationale_summary: oldest.rationale_summary, revisit: null,
+          }, oldest.decided_at, oldest.authorization_basis_refs[0]!.external_id);
+          readOnly(() => {
+            const detail = readDetail();
+            assert.equal(detail.history_read?.decisions.complete, true);
+            assert.deepEqual(detail.decision_history.flatMap((entry) => entry.errors), []);
+            assert.throws(() => readOperationalContinuationV01(db, request),
+              /operational_continuation_terminal_decision_conflict/u);
+          });
+        } finally { db.exec("ROLLBACK TO terminal_history_negative; RELEASE terminal_history_negative"); }
+        readOnly(() => {
+          assert.throws(() => readOperationalContinuationV01(db, {
+            ...request, decision_time_cutoff: "2026-07-19T00:00:04.500Z",
+          }), /operational_continuation_post_cutoff_decision_refused/u);
+          assert.throws(() => readOperationalContinuationV01(db, {
+            ...request, frames: request.frames.map((frame) => ({ ...frame, review_fingerprint: `sha256:${"f".repeat(64)}` })),
+          }), /context_use_attribution_review_fingerprint_mismatch/u);
+        });
+        db.exec("SAVEPOINT missing_session_negative");
+        try {
+          db.prepare("DELETE FROM vnext_local_operator_sessions WHERE session_id = ?")
+            .run(oldest.authorization_basis_refs[0]!.external_id);
+          readOnly(() => assert.throws(() => readOperationalContinuationV01(db, request),
+            /operational_continuation_decision_provenance_invalid/u));
+        } finally { db.exec("ROLLBACK TO missing_session_negative; RELEASE missing_session_negative"); }
+      }
+      if (count === 128) {
+        readOnly(() => {
+          const detail = readDetail();
+          assert.deepEqual(detail.history_read?.decisions, { total_count: 128, returned_count: 128, complete: true });
+          const expected = materializeSourceLinkedOperationalContinuationV01({ ...input, decision_history: detail.decision_history });
+          assert.deepEqual(readOperationalContinuationV01(db, request).continuation, expected);
+        });
+      }
+    }
+    const observePartial = () => readOnly(() => {
+      const detail = readDetail();
+      assert.deepEqual(detail.history_read?.decisions, { total_count: 129, returned_count: 128, complete: false });
+      assert(detail.decision_history.every((entry) => entry.status === "valid" && entry.pilot_session_bound && entry.errors.length === 0));
+      assert(!detail.decision_history.some((entry) => entry.decision.decision_id === oldest.decision_id));
+      // The pure compiler cannot discover omitted rows from an array alone.
+      const displayOnly = materializeSourceLinkedOperationalContinuationV01({ ...input, decision_history: detail.decision_history });
+      assert.equal(displayOnly.selection.selected_rows.length, 1);
+      return {
+        history: detail.history_read!.decisions,
+        query_only: observeConsumer(() => readOperationalContinuationV01(db, request)),
+        admission_rebuild: observeConsumer(() => rebuildOperationalContinuationFromDurableSourcesV01(db, request)),
+      };
+    });
+    const validHistory = observePartial();
+    db.prepare("DELETE FROM vnext_local_operator_sessions WHERE session_id = ?")
+      .run(oldest.authorization_basis_refs[0]!.external_id);
+    const provenance = validateVNextOperatorPilotReviewDecisionProvenanceV01(db, {
+      config, proposal, decision: oldest, authenticated_session_id: null,
+    });
+    assert.equal(provenance.status, "invalid");
+    assert(provenance.errors.includes("operator_pilot_decision_session_missing"));
+    const missingOldestSession = observePartial();
+    console.log(JSON.stringify({ operational_history_consumer: {
+      normal_writer_history: process.argv.includes("--normal-writer-history"), validHistory, missingOldestSession,
+    } }));
+    for (const observation of [validHistory, missingOldestSession]) {
+      assert.equal(observation.query_only, "operational_continuation_complete_review_history_required");
+      assert.equal(observation.admission_rebuild, "operational_continuation_complete_review_history_required");
+    }
+  } finally { db.close(); }
+}
+
+function persistSourceBoundFixtureDecisionV01(
+  fixture: TestFixtureV01,
+  reference: ReviewDecisionV01,
+  request: VNextOperatorPilotDecisionRequestV01,
+  decidedAt: string,
+  sessionId: string,
+): void {
+  const { db, config } = fixture;
+  const session = readVNextLocalOperatorSessionHistoryV01(db, { session_id: sessionId });
+  assert(session);
+  assert.equal(request.candidate_id, reference.candidate.candidate_id);
+  const basis = createVNextOperatorPilotReviewDecisionSessionBasisRefV01(config, session, request, decidedAt);
+  const shift = Date.parse(decidedAt) - Date.parse(reference.decided_at);
+  const decision = rebuildDecisionV01(reference, {
+    decision: request.decision, rationale_summary: request.rationale_summary, decided_at: decidedAt,
+    revisit: request.revisit ? {
+      revisit_at: new Date(Date.parse(reference.revisit!.revisit_at!) + shift).toISOString(),
+      expires_at: new Date(Date.parse(reference.revisit!.expires_at!) + shift).toISOString(),
+      condition_summary: request.revisit.condition_summary,
+    } : null,
+    authorization_basis_refs: [basis],
+    actor_ref: { ...reference.actor_ref, source_ref: basis.source_ref, observed_at: decidedAt },
+    compatibility: { ...reference.compatibility, external_refs: [basis] },
+  });
+  insertVNextCoreRecordV01(db, {
+    record_kind: "review_decision", record_id: decision.decision_id,
+    workspace_id: config.workspace_id, project_id: config.project_id,
+    fingerprint: decision.integrity.fingerprint,
+    idempotency_key: createVNextOperatorPilotDecisionRequestFingerprintV01(config, sessionId, request),
+    payload: decision, created_at: decision.decided_at,
+  });
+}
+
+function createFixtureV01(databasePath: string, growingHistory = false): TestFixtureV01 {
   const db = new Database(databasePath);
   ensureVNextDurableSemanticStoreSchemaV01(db);
   db.exec(VNEXT_LOCAL_OPERATOR_SESSION_SCHEMA_SQL_V01);
@@ -704,9 +886,15 @@ function createFixtureV01(databasePath: string): TestFixtureV01 {
     secret_source: secretSource,
   });
   let credential = consumed.credential;
-  const dispositions = ["accept", "reject", "defer", "accept"] as const;
+  const dispositions = [growingHistory ? "defer" : "accept", "reject", "defer", "accept"] as const;
   for (const [index, disposition] of dispositions.entries()) {
     clock.value = `2026-07-19T00:00:0${index + 1}.000Z`;
+    if (growingHistory && index === 1) {
+      const next = issueVNextLocalOperatorBootstrapV01(db, { config, clock, secret_source: secretSource });
+      credential = consumeVNextLocalOperatorBootstrapV01(db, {
+        config, clock, secret_source: secretSource, bootstrap_token: next.bootstrap_token,
+      }).credential;
+    }
     const candidate = admission.proposal.proposed_deltas[index]!;
     const recorded = recordVNextOperatorPilotReviewDecisionV01(db, {
       config,
@@ -758,6 +946,9 @@ function createFixtureV01(databasePath: string): TestFixtureV01 {
     database_path: databasePath,
     source_fixture: sourceFixture,
     config,
+    credential,
+    clock,
+    secret_source: secretSource,
     input: {
       workspace_id: config.workspace_id,
       project_id: config.project_id,
