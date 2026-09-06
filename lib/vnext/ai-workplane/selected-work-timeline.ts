@@ -745,7 +745,18 @@ function selectedDecisionLineageV01(
     (left, right) =>
       compareEffectiveReviewDecisionsV01(left.decision, right.decision),
   );
-  const effective = orderedNewestFirst[0];
+  const binding = read.effective_candidate_decisions?.find((entry) =>
+    entry.candidate_id === selected.candidate.candidate_id &&
+    entry.candidate_fingerprint === selected.candidate_fingerprint,
+  );
+  // The server selects over complete history. Re-sorting a display subset can
+  // choose a different winner when direct prior references affect ordering.
+  const effective = read.effective_candidate_decisions
+    ? orderedNewestFirst.find((entry) =>
+        entry.decision.decision_id === binding?.decision_id &&
+        entry.decision.integrity.fingerprint === binding.decision_fingerprint,
+      )
+    : orderedNewestFirst[0];
   if (!effective) return [];
   const byKey = new Map(
     orderedNewestFirst.map((entry) => [
@@ -767,11 +778,14 @@ function selectedDecisionLineageV01(
     }
   };
   visit(effective);
-  return [...lineage.values()]
+  const orderedLineage = [...lineage.values()]
     .sort((left, right) =>
       compareEffectiveReviewDecisionsV01(left.decision, right.decision),
     )
     .reverse();
+  return read.effective_candidate_decisions
+    ? [...orderedLineage.filter((entry) => entry !== effective), effective]
+    : orderedLineage;
 }
 
 function exactTransitionReceiptV01(

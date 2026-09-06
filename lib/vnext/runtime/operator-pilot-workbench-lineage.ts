@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import {
   assertVNextCoreRecordMatchesProtocolPayloadBindingV01,
   assertVNextDurableSemanticStoreSchemaV01,
+  iterateVNextCoreRecordsV01,
   readVNextCoreRecordV01,
   type VNextCoreRecordEnvelopeV01,
   type VNextCoreRecordKindV01,
@@ -121,7 +122,7 @@ export function readVNextOperatorPilotProposalDurableLineageV01(
   },
 ): VNextOperatorPilotProposalDurableLineageV01 {
   try {
-    return readProposalDurableLineage(db, input);
+    return db.transaction(() => readProposalDurableLineage(db, input))();
   } catch (error) {
     if (error instanceof VNextOperatorPilotWorkbenchLineageErrorV01) {
       throw error;
@@ -163,13 +164,14 @@ function readProposalDurableLineage(
     input.proposal,
   );
   const compiledPackets = loadValidatedCompiledPackets(db, input.config);
-  const chains = transitions.map((transition) =>
-    buildLineageChain({
+  const chains: VNextOperatorPilotProposalDurableLineageChainV01[] = [];
+  for (const transition of transitions) {
+    chains.push(buildLineageChain({
       transition,
       compiled_packets: compiledPackets,
       observed_at: observedAt,
-    }),
-  );
+    }));
+  }
   return {
     lineage_version: VNEXT_OPERATOR_PILOT_WORKBENCH_LINEAGE_VERSION_V01,
     workspace_id: input.config.workspace_id,
@@ -183,17 +185,14 @@ function readProposalDurableLineage(
   };
 }
 
-function loadValidatedTransitions(
+function* loadValidatedTransitions(
   db: Database.Database,
   config: VNextLocalOperatorPilotConfigV01,
   proposal: EpisodeDeltaProposalV01,
-): ValidatedVNextSemanticTransitionRelationV01[] {
-  const matches: ValidatedVNextSemanticTransitionRelationV01[] = [];
-  for (const record of listScopedRecords(
-    db,
-    config,
-    "state_transition_receipt",
-  )) {
+): Generator<ValidatedVNextSemanticTransitionRelationV01> {
+  for (const record of iterateVNextCoreRecordsV01(db, {
+    ...config, record_kind: "state_transition_receipt", order: "oldest_first",
+  })) {
     if (validateStateTransitionReceiptV01(record.payload).status !== "valid") {
       throw lineageError(
         "operator_pilot_workbench_lineage_transition_invalid",
@@ -258,9 +257,8 @@ function loadValidatedTransitions(
         "operator_pilot_workbench_lineage_proposal_relation_mismatch",
       );
     }
-    matches.push(transition);
+    yield transition;
   }
-  return matches;
 }
 
 function loadValidatedCompiledPackets(

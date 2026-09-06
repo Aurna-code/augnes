@@ -127,7 +127,12 @@ import { applyCanonicalDatabaseMigrations } from "./canonical-database-migration
 import { validateRecoveryCanonicalDatabaseV01 } from "./recovery-canonical-record-validator";
 import { readVNextOperatorPilotProposalDurableLineageV01 } from "../lib/vnext/runtime/operator-pilot-workbench-lineage";
 import { readSharedProjectInspectorV01 } from "../lib/vnext/runtime/shared-project-inspector";
-import { recordVNextOperatorPilotReviewDecisionV01 } from "../lib/vnext/runtime/operator-pilot-review-material";
+import {
+  recordVNextOperatorPilotReviewDecisionV01,
+  readVNextOperatorPilotSemanticReviewV01,
+  readVNextOperatorPilotReviewDecisionV01,
+  deriveVNextOperatorPilotProposalDecisionApplicationSummaryV01,
+} from "../lib/vnext/runtime/operator-pilot-review-material";
 import {
   prepareVNextOperatorPilotSemanticCommitPreviewV01,
   confirmVNextOperatorPilotSemanticCommitV01,
@@ -136,6 +141,12 @@ import {
   createVNextOperatorPilotReviewWindowCapabilityV01,
   VNEXT_OPERATOR_PILOT_DEFAULT_REVIEW_WINDOW_CONFIG_V01,
 } from "../lib/vnext/runtime/operator-pilot-review-window-config-v0-1";
+
+import { projectVNextOperatorPilotContinuityV01 } from "../lib/vnext/runtime/operator-pilot-project-continuity";
+import { buildClaimRecordV01, claimRecordReferenceV01, createClaimApplicabilityScopeV01 } from "../lib/vnext/project-verify-material";
+import { admitClaimRecordV01 } from "../lib/vnext/persistence/project-verify-material-store";
+import { admitProjectVerifyLifecycleProposalV01, materializeProjectVerifyClaimLifecycleProposalV01 } from "../lib/vnext/persistence/project-verify-lifecycle-admission";
+import type { ClaimRecordV01 } from "../types/vnext/project-verify-material";
 
 const root = mkdtempSync(path.join(tmpdir(), "augnes-project-home-"));
 const dbPath = path.join(root, "project-home.db");
@@ -777,9 +788,10 @@ function clone<T>(value: T): T {
 async function historyGrowthRegression() {
   const observations: unknown[] = [];
   const failures: string[] = [];
-  for (const kind of ["proposal", "decision", "transition"] as const) {
+  const kinds = process.argv.includes("--history-writer-cost-only")
+    ? ["decision"] as const : ["proposal", "decision", "transition"] as const;
+  for (const kind of kinds) {
     const database = new Database(":memory:");
-    let lastTransitionBranch: Database.Database | null = null;
     try {
       database.pragma("foreign_keys = ON");
       applyCanonicalDatabaseMigrations(database);
@@ -826,17 +838,12 @@ async function historyGrowthRegression() {
       const singleProposal = rebuildProposal(project, "History candidate", "history");
       if (kind === "decision") insertPendingProposal(database, singleProposal);
       let transitionProposal = singleProposal;
-      let previousDecision: ReviewDecisionV01 | undefined;
-      const branchTables = [
-        "vnext_core_records",
-        "vnext_local_operator_sessions",
-        "vnext_semantic_state_entries",
-        "vnext_semantic_target_heads",
-      ] as const;
-      let branchStarts: number[] = [];
+      let firstClaim: ClaimRecordV01 | undefined;
+      let firstApplied: ReturnType<typeof persistHistoryOperatorTransition> | undefined;
+      let latestWritten: ReturnType<typeof persistHistoryOperatorDecision> | undefined;
       const boundaries = kind === "proposal" ? [1, 63, 64, 65] : [1, 127, 128, 129];
       for (let count = 1; count <= boundaries.at(-1)!; count += 1) {
-        if (kind === "transition" && count % 3 === 1) {
+        if (kind === "transition" && count % 3 === 2) {
           const source = rebuildProposal(project, `Applied history ${count}`, `applied-${count}`);
           source.proposed_deltas = Array.from({ length: 3 }, (_, index) => ({
             ...clone(source.proposed_deltas[0]!),
@@ -853,75 +860,51 @@ async function historyGrowthRegression() {
           }
           transitionProposal = buildEpisodeDeltaProposalV01(source);
         }
-        const proposal =
+        let proposal =
           kind === "proposal"
             ? rebuildProposal(project, `Resolved history ${count}`, `history-${count}`)
             : kind === "transition"
               ? transitionProposal
               : singleProposal;
-        const decision = buildDecision(
-          project,
-          proposal,
-          kind === "transition" ? "accept" : "reject",
-          {
-            prior_decision: kind === "decision" ? previousDecision : undefined,
-            candidate_index: kind === "transition" ? (count - 1) % 3 : 0,
-            decided_at: new Date(Date.parse("2026-07-10T13:15:00.000Z") + count).toISOString(),
-          },
-        );
-        previousDecision = decision;
-        if (kind === "transition" && count === 129) {
-          // The operator writer has its own 128-decision admission bound.
-          // Assemble the two independently written, disjoint target effects
-          // from the same 127-record disposable snapshot; never invent a
-          // decision, gate, session provenance, receipt, or semantic state.
-          assert(lastTransitionBranch);
-          try {
-            for (const [index, table] of branchTables.entries()) {
-              const rows = lastTransitionBranch
-                .prepare(`SELECT * FROM ${table} WHERE rowid > ?`)
-                .all(branchStarts[index]) as Record<string, unknown>[];
-              for (const row of rows) {
-                const columns = Object.keys(row);
-                database
-                  .prepare(
-                    `INSERT INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`,
-                  )
-                  .run(...Object.values(row));
-              }
-            }
-          } finally {
-            lastTransitionBranch.close();
-            lastTransitionBranch = null;
+        if (kind === "transition") {
+          let candidateIndex = (count - 2) % 3;
+          if (count === 1 || count === 129) {
+            const claim = historyClaim(project, count === 129 ? firstClaim : undefined);
+            if (count === 1) firstClaim = claim;
+            admitClaimRecordV01(database, { ...project, claim });
+            const lifecycle = materializeProjectVerifyClaimLifecycleProposalV01(database, {
+              ...project, claim_id: claim.claim_id,
+              observed_at: historyWrittenAt(count),
+            });
+            proposal = admitProjectVerifyLifecycleProposalV01(database, lifecycle).proposal;
+            candidateIndex = 0;
           }
-        } else if (kind === "transition")
-          persistHistoryOperatorTransition(database, project, proposal, (count - 1) % 3, count);
-        else persistVNextSemanticReviewMaterialV01(database, { proposal, decision });
-        if (kind === "transition" && count === 127) {
-          branchStarts = branchTables.map(
-            (table) =>
-              (
-                database.prepare(`SELECT COALESCE(MAX(rowid), 0) AS last FROM ${table}`).get() as {
-                  last: number;
-                }
-              ).last,
-          );
-          lastTransitionBranch = new Database(database.serialize());
-          try {
-            persistHistoryOperatorTransition(lastTransitionBranch, project, proposal, 2, 129);
-            assert.equal(
-              validateRecoveryCanonicalDatabaseV01(lastTransitionBranch).status,
-              "valid",
-              "the independent last Transition has complete writer provenance before assembly",
-            );
-          } catch (error) {
-            lastTransitionBranch.close();
-            lastTransitionBranch = null;
-            throw error;
+          const written = persistHistoryOperatorTransition(database, project, proposal, candidateIndex, count);
+          latestWritten = written;
+          if (count === 1) firstApplied = written;
+          if (count === 129) {
+            assert.deepEqual(written.recorded.decision.lineage.prior_decisions, [{
+              decision_id: firstApplied!.recorded.decision.decision_id,
+              decision_fingerprint: firstApplied!.recorded.decision.integrity.fingerprint,
+            }], "normal lifecycle writer resolves the first applied decision across pages");
+            assert.equal(written.applied.status, "applied");
+            const beforeStale = historyReadSnapshot(database);
+            assert.throws(() => prepareVNextOperatorPilotSemanticCommitPreviewV01(database, {
+              config: firstApplied!.config, credential: firstApplied!.credential,
+              clock: fixedClock(historyWrittenAt(129)), request: firstApplied!.binding,
+            }), /pilot_add_requires_observed_absent_state/,
+            "the old create decision cannot reapply after a normal revision");
+            assert.deepEqual(historyReadSnapshot(database), beforeStale);
           }
+        } else if (kind === "decision") {
+          latestWritten = persistHistoryOperatorDecision(database, project, proposal, 0, count, "reject");
+        } else {
+          persistVNextSemanticReviewMaterialV01(database, {
+            proposal, decision: buildDecision(project, proposal, "reject"),
+          });
         }
         if (!boundaries.includes(count)) continue;
-        const before = databaseSnapshot(database);
+        const before = historyReadSnapshot(database);
         let strictError: string | null = null;
         try {
           readProjectHomeDatabaseCompatibilityV01(database, project, {
@@ -933,42 +916,60 @@ async function historyGrowthRegression() {
         const home = await readProjectHomeProjectionV01(database, project, {
           now: () => fixedGeneratedAt,
         });
-        const recovery = validateRecoveryCanonicalDatabaseV01(database);
-        if (count === 129 && kind !== "proposal") {
-          assert.equal(recovery.status, "invalid");
-          assert.equal(recovery.code, "database_reader_incompatible");
-          const config = {
-            ...project,
-            enabled: true as const,
-            operator_id: "operator:history",
-            database_path: ":memory:",
-          };
-          assert.throws(
-            () =>
-              kind === "transition"
-                ? readVNextOperatorPilotProposalDurableLineageV01(database, {
-                    config,
-                    proposal,
-                    clock: { now: () => fixedGeneratedAt },
-                  })
-                : readSharedProjectInspectorV01(database, {
-                    config,
-                    authenticated_session_id: "session:history",
-                    observed_at: fixedGeneratedAt,
-                    target: {
-                      target_kind: "episode_delta_proposal",
-                      record_id: proposal.proposal_id,
-                      expected_fingerprint: proposal.integrity.fingerprint,
-                    },
-                  }),
-            /history_bound_exceeded/,
-            "independent Workbench/Inspector bounds still block full recovery",
-          );
-        } else if (recovery.status !== "valid")
-          failures.push(`${kind}:${count}:recovery:${recovery.code}`);
+        const recovery = kind === "transition" && count !== 129
+          ? null : validateRecoveryCanonicalDatabaseV01(database);
+        if (recovery) assert.equal(recovery.status, "valid", `${kind}:${count}:${recovery.code}`);
+        let inspectorCompleteness: string | null = null;
+        let workbenchChains: number | null = null;
+        // Full consumer agreement is checked at 129. The intermediate applied
+        // boundaries retain strict Home readback without repeating every owner.
+        if (kind !== "transition" || count === 129) {
+          const config = historyConfig(project);
+          const detail = readVNextOperatorPilotSemanticReviewV01(database, {
+            config, proposal_id: proposal.proposal_id,
+            authenticated_session_id: latestWritten?.credential.session_id ?? null,
+          });
+          const continuity = projectVNextOperatorPilotContinuityV01(database, {
+            config, clock: { now: () => fixedGeneratedAt },
+          });
+          const workbench = readVNextOperatorPilotProposalDurableLineageV01(database, {
+            config, proposal, clock: { now: () => fixedGeneratedAt },
+          });
+          const inspector = readSharedProjectInspectorV01(database, {
+            config, authenticated_session_id: latestWritten?.credential.session_id ?? "session:history",
+            observed_at: fixedGeneratedAt,
+            target: { target_kind: "episode_delta_proposal", record_id: proposal.proposal_id,
+              expected_fingerprint: proposal.integrity.fingerprint },
+          });
+          inspectorCompleteness = inspector.completeness;
+          workbenchChains = workbench.chains.length;
+          assert.equal(inspector.authority.read_only, true);
+          assert.equal(workbench.read_only, true);
+          assert.notEqual(inspector.target_status, "conflict");
+          if (kind === "decision") {
+            assert.equal(detail.decision_count, count);
+            assert.equal(detail.history_read!.decisions.complete, count <= 128);
+            assert.equal(detail.decision_application_summary.status, "rejected");
+            assert.equal(detail.decision_application_summary.effective_decision?.decision_id, latestWritten!.recorded.decision.decision_id);
+            assert.equal(continuity.pending_accepted_decision_count, 0);
+            assert.equal(workbench.chains.length, 0);
+            assert.equal(home.attention.decision_debt.pending_candidate_count, 0);
+          }
+          if (kind === "transition") {
+            assert.equal(detail.decision_application_summary.status, "project_updated");
+            assert.equal(continuity.latest_applied_transition?.decision_id, latestWritten!.recorded.decision.decision_id);
+            assert.equal(continuity.pending_accepted_decision_count, 0);
+            assert(workbench.chains.some((chain) => chain.transition.decision_id === latestWritten!.recorded.decision.decision_id));
+            assert.equal(home.attention.decision_debt.accepted_awaiting_transition_count, 0);
+          }
+        }
         const observation = {
           kind,
           count,
+          normal_decision_writer: kind !== "proposal",
+          normal_transition_writer: kind === "transition",
+          inspector: inspectorCompleteness,
+          workbench_chains: workbenchChains,
           strict_error: strictError,
           attention: home.attention.state.status,
           debt: home.attention.decision_debt,
@@ -977,23 +978,25 @@ async function historyGrowthRegression() {
         observations.push(observation);
         console.log(JSON.stringify(observation));
         assert.deepEqual(
-          databaseSnapshot(database),
+          historyReadSnapshot(database),
           before,
           "history readers do not mutate canonical or projection state",
         );
         if (strictError || home.attention.state.status === "error") {
           failures.push(
-            `${kind}:${count}:${strictError}:${home.attention.state.status}:${recovery.code}`,
+            `${kind}:${count}:${strictError}:${home.attention.state.status}:${recovery?.code}`,
           );
         }
       }
       if (!process.argv.includes("--history-boundaries-only")) {
         if (kind === "proposal") await longHistoryAttentionRegression(database, project);
-        if (kind === "decision") await invalidHistoryRegression(database, project);
+        if (kind === "decision") {
+          await invalidHistoryRegression(database, project);
+          await normalWriterLargerHistoryRegression(database, project, singleProposal, latestWritten!);
+        }
         if (kind === "transition") await invalidTransitionHistoryRegression(database, project);
       }
     } finally {
-      lastTransitionBranch?.close();
       database.close();
     }
   }
@@ -1138,7 +1141,7 @@ async function longHistoryAttentionRegression(
         max_batch: maxBatch,
         elapsed_ms: Math.round(elapsedMs),
       },
-      full_recovery: "not_run_beyond_independently_reproduced_128_reader_bound",
+      full_recovery: "larger_home_cost_sample_only; normal_writer_recovery_verified_at_129",
     }),
   );
 }
@@ -1330,28 +1333,168 @@ async function invalidTransitionHistoryRegression(
       "error",
       "a missing historical authority gate is still refused outside the first page",
     );
+    assert.equal(validateRecoveryCanonicalDatabaseV01(copy).status, "invalid");
+    const config = historyConfig(project);
+    assert.throws(() => projectVNextOperatorPilotContinuityV01(copy, { config, clock: fixedClock(fixedGeneratedAt) }));
+    const row = copy.prepare("SELECT payload_json FROM vnext_core_records WHERE record_kind = 'episode_delta_proposal' ORDER BY created_at DESC LIMIT 1").get() as { payload_json: string };
+    const proposal = JSON.parse(row.payload_json) as EpisodeDeltaProposalV01;
+    assert.throws(() => readVNextOperatorPilotProposalDurableLineageV01(copy, { config, proposal, clock: fixedClock(fixedGeneratedAt) }));
+    assert.throws(() => readSharedProjectInspectorV01(copy, {
+      config, authenticated_session_id: "session:history", observed_at: fixedGeneratedAt,
+      target: { target_kind: "episode_delta_proposal", record_id: proposal.proposal_id, expected_fingerprint: proposal.integrity.fingerprint },
+    }));
   } finally {
     copy.close();
   }
 }
 
-function persistHistoryOperatorTransition(
+async function normalWriterLargerHistoryRegression(
+  database: Database.Database,
+  project: SemanticReviewLoopProjectFixtureV01,
+  proposal: EpisodeDeltaProposalV01,
+  latest: ReturnType<typeof persistHistoryOperatorDecision>,
+) {
+  const request = {
+    proposal_id: proposal.proposal_id, proposal_fingerprint: proposal.integrity.fingerprint,
+    candidate_id: latest.recorded.decision.candidate.candidate_id,
+    candidate_fingerprint: latest.recorded.decision.candidate.candidate_fingerprint,
+    decision: "reject", rationale_summary: latest.recorded.decision.rationale_summary, revisit: null,
+  };
+  const before = databaseSnapshot(database);
+  const sessionsBefore = database.prepare("SELECT * FROM vnext_local_operator_sessions ORDER BY session_id").all();
+  for (const attempt of [
+    { ...latest, request: { ...request, proposal_fingerprint: `sha256:${"f".repeat(64)}` } },
+    { ...latest, request: { ...request, candidate_fingerprint: `sha256:${"f".repeat(64)}` } },
+    { ...latest, request, config: { ...latest.config, project_id: "foreign-history" } },
+    { ...latest, request, clock: fixedClock("2026-07-20T00:00:00.000Z") },
+  ]) {
+    assert.throws(() => recordVNextOperatorPilotReviewDecisionV01(database, attempt));
+  }
+  assert.deepEqual(databaseSnapshot(database), before);
+  assert.deepEqual(database.prepare("SELECT * FROM vnext_local_operator_sessions ORDER BY session_id").all(), sessionsBefore,
+    "invalid scope, fingerprint and expired authority do not consume a nonce");
+  const replay = recordVNextOperatorPilotReviewDecisionV01(database, { ...latest, request });
+  assert.equal(replay.status, "exact_replay");
+  assert.equal(replay.decision.decision_id, latest.recorded.decision.decision_id);
+  assert.deepEqual(databaseSnapshot(database), before);
+  assert.throws(() => recordVNextOperatorPilotReviewDecisionV01(database, { ...latest, request }), /nonce|session/,
+    "a consumed action nonce cannot be reused");
+
+  // The default owner retains every required 127/128/129 and negative case.
+  // The additional normal-writer cost sample is a focused mode of this same
+  // disposable fixture, keeping Canonical within its existing lifecycle budget.
+  const finalCount = process.argv.includes("--history-writer-cost-only") ? 193 : 129;
+  for (let count = 130; count <= finalCount; count += 1) {
+    latest = persistHistoryOperatorDecision(database, project, proposal, 0, count, "reject");
+  }
+  const config = historyConfig(project);
+  const snapshot = historyReadSnapshot(database);
+  let rowsRead = 0;
+  let maxBatch = 0;
+  const prepare = database.prepare;
+  database.prepare = ((sql: string) => {
+    const statement = prepare.call(database, sql);
+    if (!/SELECT\s+\*\s+FROM\s+vnext_core_records/i.test(sql)) return statement;
+    return new Proxy(statement, {
+      get(target, key) {
+        if (key !== "get" && key !== "all") {
+          const value = Reflect.get(target, key);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (...args: unknown[]) => {
+          const result = Reflect.apply(target[key], target, args);
+          const count = key === "all" ? (result as unknown[]).length : result ? 1 : 0;
+          rowsRead += count;
+          maxBatch = Math.max(maxBatch, count);
+          return result;
+        };
+      },
+    });
+  }) as typeof database.prepare;
+  const started = performance.now();
+  try {
+    const detail = readVNextOperatorPilotSemanticReviewV01(database, {
+      config, proposal_id: proposal.proposal_id, authenticated_session_id: latest.credential.session_id,
+    });
+    assert.equal(detail.decision_count, finalCount);
+    assert.equal(detail.history_read!.decisions.complete, false);
+    assert.equal(detail.decisions.length, 128);
+    const first = database.prepare("SELECT record_id FROM vnext_core_records WHERE record_kind = 'review_decision' ORDER BY created_at, record_id LIMIT 1").get() as { record_id: string };
+    assert(!detail.decisions.some((entry) => entry.decision_id === first.record_id));
+    const exactOldDecision = readVNextOperatorPilotReviewDecisionV01(database, config, proposal, first.record_id);
+    assert.equal(exactOldDecision?.decision_id, first.record_id, "exact bindings remain readable outside the display window");
+    assert.equal(detail.decision_application_summary.effective_decision?.decision_id, latest.recorded.decision.decision_id);
+    assert.deepEqual(detail.decision_application_summary, deriveVNextOperatorPilotProposalDecisionApplicationSummaryV01({
+      source_currentness: detail.source_currentness, candidate_admissions: detail.candidate_admissions,
+      decision_history: detail.decision_history, transition_receipts: detail.transition_receipts,
+    }));
+    projectVNextOperatorPilotContinuityV01(database, { config, clock: fixedClock(fixedGeneratedAt) });
+  } finally {
+    database.prepare = prepare;
+  }
+  assert(maxBatch <= 64);
+  assert(rowsRead > finalCount);
+  const elapsedMs = performance.now() - started;
+  assert.deepEqual(historyReadSnapshot(database), snapshot);
+  assert.equal(validateRecoveryCanonicalDatabaseV01(database).status, "valid");
+  console.log(JSON.stringify({ normal_writer_larger_history: {
+    decisions: finalCount, reader_rows: rowsRead, max_batch: maxBatch,
+    review_and_continuity_ms: Math.round(elapsedMs),
+  } }));
+}
+
+function historyReadSnapshot(database: Database.Database) {
+  return {
+    ...databaseSnapshot(database),
+    sessions: database.prepare("SELECT * FROM vnext_local_operator_sessions ORDER BY session_id").all(),
+  };
+}
+
+function historyConfig(project: SemanticReviewLoopProjectFixtureV01) {
+  return { ...project, enabled: true as const, operator_id: "operator:history", database_path: ":memory:" };
+}
+
+function historyWrittenAt(count: number) {
+  return new Date(Date.parse("2026-07-10T13:15:00.000Z") + count * 1000).toISOString();
+}
+
+function historyClaim(project: SemanticReviewLoopProjectFixtureV01, prior?: ClaimRecordV01) {
+  const subject = {
+    ref_version: "external_ref.v0.1" as const, ref_type: "project_verify_subject",
+    external_id: "subject:history", trust_class: "user_declaration" as const,
+    observed_at: "2026-07-10T13:00:00.000Z",
+  };
+  return buildClaimRecordV01({
+    ...project,
+    family_origin: { origin_namespace: "augnes.test.history.v0.1", origin_seed: "history",
+      origin_profile: "history-user-candidate.v0.1", origin_producer_kind: "user" },
+    revision: prior ? 2 : 1,
+    prior_claim_ref: prior ? claimRecordReferenceV01(prior) : null,
+    operation_intent: prior ? "revise" : "create",
+    operation_target_claim_ref: null,
+    proposition: prior ? "Revised history candidate." : "Initial history candidate.",
+    subject_refs: [subject],
+    applicability_scope: createClaimApplicabilityScopeV01({
+      subject_refs: [subject], environment_refs: [subject],
+      condition: { kind: "exact_context", value: "applicable", context_refs: [subject] },
+    }),
+    source_refs: [subject], limitations: ["Candidate material only."], uncertainty: ["Truth is not established."],
+    producer: { producer_kind: "user", producer_profile: "history-user-candidate.v0.1" },
+    created_at: prior ? historyWrittenAt(128) : subject.observed_at,
+  });
+}
+
+function persistHistoryOperatorDecision(
   database: Database.Database,
   project: SemanticReviewLoopProjectFixtureV01,
   proposal: EpisodeDeltaProposalV01,
   candidateIndex: number,
   count: number,
+  decision: "accept" | "reject" = "accept",
 ) {
-  insertPendingProposal(database, proposal);
-  const config = {
-    ...project,
-    enabled: true as const,
-    operator_id: "operator:history",
-    database_path: ":memory:",
-  };
-  const clock = fixedClock(
-    new Date(Date.parse("2026-07-10T13:15:00.000Z") + count * 1000).toISOString(),
-  );
+  if (!proposal.project_verify_lifecycle) insertPendingProposal(database, proposal);
+  const config = historyConfig(project);
+  const clock = fixedClock(historyWrittenAt(count));
   const bootstrap = issueVNextLocalOperatorBootstrapV01(database, { config, clock });
   let credential = consumeVNextLocalOperatorBootstrapV01(database, {
     config,
@@ -1368,8 +1511,8 @@ function persistHistoryOperatorTransition(
       proposal_fingerprint: proposal.integrity.fingerprint,
       candidate_id: candidate.candidate_id,
       candidate_fingerprint: createEpisodeDeltaCandidateFingerprintV01(candidate),
-      decision: "accept",
-      rationale_summary: "Apply an isolated history regression candidate.",
+      decision,
+      rationale_summary: `Review isolated history candidate ${count}.`,
       revisit: null,
     },
   });
@@ -1386,6 +1529,20 @@ function persistHistoryOperatorTransition(
     decision_id: recorded.decision.decision_id,
     decision_fingerprint: recorded.decision.integrity.fingerprint,
   };
+  assert.equal(recorded.status, "inserted");
+  return { config, clock, credential, binding, recorded };
+}
+
+function persistHistoryOperatorTransition(
+  database: Database.Database,
+  project: SemanticReviewLoopProjectFixtureV01,
+  proposal: EpisodeDeltaProposalV01,
+  candidateIndex: number,
+  count: number,
+) {
+  const written = persistHistoryOperatorDecision(database, project, proposal, candidateIndex, count);
+  const { config, clock, credential, binding } = written;
+  if (count >= 127) console.log(JSON.stringify({ normal_writer_decision_inserted: count }));
   const preview = prepareVNextOperatorPilotSemanticCommitPreviewV01(database, {
     config,
     credential,
@@ -1414,6 +1571,12 @@ function persistHistoryOperatorTransition(
     }),
   )();
   assert.equal(applied.status, "applied");
+  return {
+    ...written, applied,
+    credential: readVNextLocalOperatorCredentialFromRequestV01(new Request("http://localhost/", {
+      headers: { cookie: `${VNEXT_LOCAL_OPERATOR_SESSION_COOKIE_V01}=${confirmed.session_admission.cookie_value}` },
+    })),
+  };
 }
 
 async function main() {
@@ -1440,7 +1603,7 @@ async function main() {
     db = openDatabase();
 
     await historyGrowthRegression();
-    if (process.argv.includes("--history-only") || process.argv.includes("--history-boundaries-only")) return;
+    if (process.argv.includes("--history-only") || process.argv.includes("--history-boundaries-only") || process.argv.includes("--history-writer-cost-only")) return;
 
     const pristineSnapshot = databaseSnapshot(db);
     assert.equal(readProjectHomeEntryDestinationV01(db), "/projects");

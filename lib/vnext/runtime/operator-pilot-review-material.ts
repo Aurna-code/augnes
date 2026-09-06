@@ -4,8 +4,10 @@ import {
   assertVNextCoreRecordMatchesProtocolPayloadBindingV01,
   assertVNextDurableSemanticStoreSchemaV01,
   insertVNextCoreRecordV01,
+  iterateVNextCoreRecordsV01,
   readVNextCoreRecordV01,
   readVNextCoreRecordByIdempotencyKeyV01,
+  type VNextCoreRecordEnvelopeV01,
 } from "@/lib/vnext/persistence/durable-semantic-store";
 import {
   assertPersistedRunAssessmentProposalSourceBoundV01,
@@ -33,7 +35,10 @@ import {
   validateReviewDecisionV01,
 } from "@/lib/vnext/review-decision";
 import { validateRunReceiptV01 } from "@/lib/vnext/run-receipt";
-import { compareEffectiveReviewDecisionsV01 } from "@/lib/vnext/review-decision-lineage";
+import {
+  compareEffectiveReviewDecisionsV01,
+  type ReviewDecisionLineageComparableV01,
+} from "@/lib/vnext/review-decision-lineage";
 import { validateStateTransitionReceiptV01 } from "@/lib/vnext/state-transition-receipt";
 import {
   readVNextOperatorStrategicAdvantageTransferV01,
@@ -87,7 +92,9 @@ export const VNEXT_OPERATOR_PILOT_DEFAULT_DEFER_REVISIT_MS_V01 =
   24 * 60 * 60 * 1000;
 export const VNEXT_OPERATOR_PILOT_DEFAULT_DEFER_EXPIRY_MS_V01 =
   7 * 24 * 60 * 60 * 1000;
+// Retained for the separately owned compiled-packet reader.
 export const VNEXT_OPERATOR_PILOT_MAX_REVIEW_RECORDS_V01 = 128;
+const REVIEW_HISTORY_DISPLAY_SIZE = 128;
 export const VNEXT_OPERATOR_PILOT_DECISION_REQUEST_VERSION_V01 =
   "vnext_operator_pilot_decision_request.v0.1" as const;
 
@@ -190,6 +197,18 @@ export interface VNextOperatorPilotReviewDetailV01
   decisions: ReviewDecisionV01[];
   decision_history: VNextOperatorPilotDecisionHistoryItemV01[];
   transition_receipts: StateTransitionReceiptV01[];
+  // Projection metadata, not persisted authority. Readers validate full history;
+  // payloads include the recent window and exact effective candidate bindings.
+  history_read?: {
+    decisions: { total_count: number; returned_count: number; complete: boolean };
+    transitions: { total_count: number; returned_count: number; complete: boolean };
+  };
+  effective_candidate_decisions?: Array<{
+    candidate_id: string;
+    candidate_fingerprint: string;
+    decision_id: string;
+    decision_fingerprint: string;
+  }>;
   transition: {
     status: "not_applied" | "applied";
     transition_receipt_id: string | null;
@@ -341,48 +360,38 @@ export function listVNextOperatorPilotSemanticReviewsV01(
     strategic_cost_availability?: VNextOperatorStrategicCostAvailabilityV01;
   },
 ): VNextOperatorPilotReviewListItemV01[] {
-  assertVNextDurableSemanticStoreSchemaV01(db);
-  const rows = db.prepare(
-    `SELECT record_id FROM vnext_core_records
-     WHERE workspace_id = ? AND project_id = ?
-       AND record_kind = 'episode_delta_proposal'
-     ORDER BY created_at DESC, record_id
-     LIMIT ?`,
-  ).all(
-    input.config.workspace_id,
-    input.config.project_id,
-    VNEXT_OPERATOR_PILOT_MAX_REVIEW_RECORDS_V01 + 1,
-  ) as Array<{
-    record_id: string;
-  }>;
-  if (rows.length > VNEXT_OPERATOR_PILOT_MAX_REVIEW_RECORDS_V01) {
-    throw reviewError("operator_pilot_proposal_history_bound_exceeded", 422);
-  }
-  return rows.map((row) => {
-    const detail = readVNextOperatorPilotSemanticReviewV01(db, {
-      config: input.config,
-      proposal_id: row.record_id,
-      authenticated_session_id: input.authenticated_session_id,
-      model_capability: input.model_capability,
-      strategic_cost_availability: input.strategic_cost_availability,
-    });
-    return {
-      proposal_id: detail.proposal_id,
-      proposal_fingerprint: detail.proposal_fingerprint,
-      created_at: detail.created_at,
-      status: detail.status,
-      bounded_summary: detail.bounded_summary,
-      source_currentness: detail.source_currentness,
-      source_receipts: detail.source_receipts,
-      candidate_count: detail.candidate_count,
-      current_state_status: detail.current_state_status,
-      candidate_admissions: detail.candidate_admissions,
-      decision_count: detail.decision_count,
-      transition_status: detail.transition_status,
-      decision_application_summary: detail.decision_application_summary,
-      operational_friction_review: detail.operational_friction_review,
-    };
-  });
+  return db.transaction(() => {
+    assertVNextDurableSemanticStoreSchemaV01(db);
+    const items: VNextOperatorPilotReviewListItemV01[] = [];
+    for (const record of iterateVNextCoreRecordsV01(db, {
+      ...input.config, record_kind: "episode_delta_proposal",
+    })) {
+      const detail = readVNextOperatorPilotSemanticReviewV01(db, {
+        config: input.config,
+        proposal_id: record.record_id,
+        authenticated_session_id: input.authenticated_session_id,
+        model_capability: input.model_capability,
+        strategic_cost_availability: input.strategic_cost_availability,
+      });
+      items.push({
+        proposal_id: detail.proposal_id,
+        proposal_fingerprint: detail.proposal_fingerprint,
+        created_at: detail.created_at,
+        status: detail.status,
+        bounded_summary: detail.bounded_summary,
+        source_currentness: detail.source_currentness,
+        source_receipts: detail.source_receipts,
+        candidate_count: detail.candidate_count,
+        current_state_status: detail.current_state_status,
+        candidate_admissions: detail.candidate_admissions,
+        decision_count: detail.decision_count,
+        transition_status: detail.transition_status,
+        decision_application_summary: detail.decision_application_summary,
+        operational_friction_review: detail.operational_friction_review,
+      });
+    }
+    return items;
+  })();
 }
 
 export function readVNextOperatorPilotSemanticReviewV01(
@@ -394,6 +403,13 @@ export function readVNextOperatorPilotSemanticReviewV01(
     model_capability?: ReturnType<typeof readDefaultModelGatewayLocalCapabilityV01>;
     strategic_cost_availability?: VNextOperatorStrategicCostAvailabilityV01;
   },
+): VNextOperatorPilotReviewDetailV01 {
+  return db.transaction(() => readSemanticReviewSnapshotV01(db, input))();
+}
+
+function readSemanticReviewSnapshotV01(
+  db: Database.Database,
+  input: Parameters<typeof readVNextOperatorPilotSemanticReviewV01>[1],
 ): VNextOperatorPilotReviewDetailV01 {
   assertVNextDurableSemanticStoreSchemaV01(db);
   const proposalId = requiredText(input.proposal_id, "proposal_id");
@@ -496,32 +512,6 @@ export function readVNextOperatorPilotSemanticReviewV01(
     input.config,
     proposal,
   );
-  const decisions = loadProposalDecisions(db, input.config, proposal);
-  const decisionHistory = decisions.map((decision) => ({
-    decision,
-    ...validateVNextOperatorPilotReviewDecisionProvenanceV01(db, {
-      config: input.config,
-      proposal,
-      decision,
-      authenticated_session_id: input.authenticated_session_id,
-    }),
-  }));
-  if (operationalFrictionReview) {
-    assertNoOperationalTransitionReceiptClaimV01(
-      db,
-      input.config,
-      proposal,
-      decisions,
-    );
-  }
-  const transitionReceipts = loadProposalTransitionReceipts(
-    db,
-    input.config,
-    proposal,
-  );
-  if (operationalFrictionReview && transitionReceipts.length > 0) {
-    throw reviewError("operator_pilot_operational_transition_conflict", 422);
-  }
   const candidateAdmissions = proposal.proposed_deltas.map((candidate) =>
     inspectVNextOperatorPilotCandidateAdmissionV01(db, {
       config: input.config,
@@ -532,13 +522,16 @@ export function readVNextOperatorPilotSemanticReviewV01(
     }),
   );
   const currentStateStatus = aggregateAdmissionState(candidateAdmissions);
-  const decisionApplicationSummary =
-    deriveVNextOperatorPilotProposalDecisionApplicationSummaryV01({
-      source_currentness: proposal.source_status.currentness,
-      candidate_admissions: candidateAdmissions,
-      decision_history: decisionHistory,
-      transition_receipts: transitionReceipts,
-    });
+  const history = readProposalHistoryV01(db, input, proposal, candidateAdmissions);
+  const { decisions, decision_history: decisionHistory, transition_receipts: transitionReceipts } = history;
+  const decisionApplicationSummary = deriveDecisionApplicationSummaryV01({
+    source_currentness: proposal.source_status.currentness,
+    candidate_admissions: candidateAdmissions,
+    decision_count: history.history_read.decisions.total_count,
+    transition_receipts: transitionReceipts,
+    effective: history.effective,
+    effective_by_candidate: history.effective_by_candidate,
+  });
   return {
     proposal_id: proposal.proposal_id,
     proposal_fingerprint: proposal.integrity.fingerprint,
@@ -553,7 +546,7 @@ export function readVNextOperatorPilotSemanticReviewV01(
     candidate_count: proposal.proposed_deltas.length,
     current_state_status: currentStateStatus,
     candidate_admissions: candidateAdmissions,
-    decision_count: decisions.length,
+    decision_count: history.history_read.decisions.total_count,
     transition_status:
       transitionReceipts.length > 0 ? "applied" : "not_applied",
     decision_application_summary: decisionApplicationSummary,
@@ -575,6 +568,8 @@ export function readVNextOperatorPilotSemanticReviewV01(
     },
     decisions,
     decision_history: decisionHistory,
+    history_read: history.history_read,
+    effective_candidate_decisions: history.effective_candidate_decisions,
     transition_receipts: transitionReceipts,
     transition: {
       status: transitionReceipts.length > 0 ? "applied" : "not_applied",
@@ -604,6 +599,35 @@ export function deriveVNextOperatorPilotProposalDecisionApplicationSummaryV01(
     transition_receipts: StateTransitionReceiptV01[];
   },
 ): VNextOperatorPilotProposalDecisionApplicationSummaryV01 {
+  const exact = input.decision_history.filter((entry) =>
+    entry.status === "valid" && entry.pilot_session_bound &&
+    input.candidate_admissions.some((candidate) =>
+      candidate.candidate_id === entry.decision.candidate.candidate_id &&
+      candidate.candidate_fingerprint === entry.decision.candidate.candidate_fingerprint,
+    ),
+  );
+  const effectiveByCandidate = new Map<string, VNextOperatorPilotDecisionHistoryItemV01>();
+  for (const candidate of input.candidate_admissions) {
+    const entry = exact.filter((item) => item.decision.candidate.candidate_id === candidate.candidate_id)
+      .sort((left, right) => compareEffectiveReviewDecisionsV01(left.decision, right.decision))[0];
+    if (entry) effectiveByCandidate.set(candidate.candidate_id, entry);
+  }
+  return deriveDecisionApplicationSummaryV01({
+    ...input,
+    decision_count: input.decision_history.length,
+    effective: [...exact].sort((left, right) => compareEffectiveReviewDecisionsV01(left.decision, right.decision))[0] ?? null,
+    effective_by_candidate: effectiveByCandidate,
+  });
+}
+
+function deriveDecisionApplicationSummaryV01(input: {
+  source_currentness: EpisodeDeltaProposalV01["source_status"]["currentness"];
+  candidate_admissions: VNextOperatorPilotCandidateAdmissionV01[];
+  decision_count: number;
+  transition_receipts: StateTransitionReceiptV01[];
+  effective: VNextOperatorPilotDecisionHistoryItemV01 | null;
+  effective_by_candidate: Map<string, VNextOperatorPilotDecisionHistoryItemV01>;
+}): VNextOperatorPilotProposalDecisionApplicationSummaryV01 {
   const proposalOnlyAdmissions = input.candidate_admissions.filter(
     (candidate) => candidate.review_mode === "proposal_only_no_activation",
   );
@@ -613,29 +637,11 @@ export function deriveVNextOperatorPilotProposalDecisionApplicationSummaryV01(
     }
     return deriveProposalOnlyDecisionApplicationSummaryV01({
       candidate_admissions: proposalOnlyAdmissions,
-      decision_history: input.decision_history,
+      effective_by_candidate: input.effective_by_candidate,
       transition_receipts: input.transition_receipts,
     });
   }
-  const exactDecisions = input.decision_history
-    .filter(
-      (entry) =>
-        entry.status === "valid" &&
-        entry.pilot_session_bound &&
-        input.candidate_admissions.some(
-          (candidate) =>
-            candidate.candidate_id === entry.decision.candidate.candidate_id &&
-            candidate.candidate_fingerprint ===
-              entry.decision.candidate.candidate_fingerprint,
-        ),
-    )
-    .sort((left, right) =>
-      compareEffectiveReviewDecisionsV01(
-        left.decision,
-        right.decision,
-      ),
-    );
-  const effective = exactDecisions[0] ?? null;
+  const effective = input.effective;
   if (effective) {
     const matchingReceipt =
       findExactDecisionCandidateTransitionReceiptV01(
@@ -668,7 +674,7 @@ export function deriveVNextOperatorPilotProposalDecisionApplicationSummaryV01(
     return decisionApplicationSummaryV01("continue_review", effective, null);
   }
 
-  if (input.decision_history.length > 0) {
+  if (input.decision_count > 0) {
     return unresolvedDecisionApplicationSummaryV01(
       "continue_review",
       input.candidate_admissions[0] ?? null,
@@ -694,28 +700,10 @@ export function deriveVNextOperatorPilotProposalDecisionApplicationSummaryV01(
 
 function deriveProposalOnlyDecisionApplicationSummaryV01(input: {
   candidate_admissions: VNextOperatorPilotCandidateAdmissionV01[];
-  decision_history: VNextOperatorPilotDecisionHistoryItemV01[];
+  effective_by_candidate: Map<string, VNextOperatorPilotDecisionHistoryItemV01>;
   transition_receipts: StateTransitionReceiptV01[];
 }): VNextOperatorPilotProposalDecisionApplicationSummaryV01 {
-  const effectiveByCandidate = new Map<
-    string,
-    VNextOperatorPilotDecisionHistoryItemV01
-  >();
-  for (const admission of input.candidate_admissions) {
-    const effective = input.decision_history
-      .filter(
-        (entry) =>
-          entry.status === "valid" &&
-          entry.pilot_session_bound &&
-          entry.decision.candidate.candidate_id === admission.candidate_id &&
-          entry.decision.candidate.candidate_fingerprint ===
-            admission.candidate_fingerprint,
-      )
-      .sort((left, right) =>
-        compareEffectiveReviewDecisionsV01(left.decision, right.decision),
-      )[0];
-    if (effective) effectiveByCandidate.set(admission.candidate_id, effective);
-  }
+  const effectiveByCandidate = input.effective_by_candidate;
   for (const entry of effectiveByCandidate.values()) {
     if (
       findExactDecisionCandidateTransitionReceiptV01(
@@ -1122,19 +1110,14 @@ function assertDecisionRequestAllowedBeforeNonceV01(
     material.candidate,
   );
   if (material.admission.review_mode === "proposal_only_no_activation") {
-    const effective = material.detail.decision_history
-      .filter(
-        (entry) =>
-          entry.status === "valid" &&
-          entry.pilot_session_bound &&
-          entry.decision.candidate.candidate_id ===
-            material.candidate.candidate_id &&
-          entry.decision.candidate.candidate_fingerprint ===
-            material.candidate_fingerprint,
-      )
-      .sort((left, right) =>
-        compareEffectiveReviewDecisionsV01(left.decision, right.decision),
-      )[0];
+    const effectiveBinding = material.detail.effective_candidate_decisions?.find(
+      (entry) => entry.candidate_id === material.candidate.candidate_id &&
+        entry.candidate_fingerprint === material.candidate_fingerprint,
+    );
+    const effective = material.detail.decision_history.find((entry) =>
+      entry.decision.decision_id === effectiveBinding?.decision_id &&
+      entry.decision.integrity.fingerprint === effectiveBinding.decision_fingerprint,
+    );
     if (
       effective &&
       (effective.decision.decision === "accept" ||
@@ -1296,78 +1279,6 @@ function admissionCookie(
   };
 }
 
-function assertNoOperationalTransitionReceiptClaimV01(
-  db: Database.Database,
-  config: VNextLocalOperatorPilotConfigV01,
-  proposal: EpisodeDeltaProposalV01,
-  decisions: ReviewDecisionV01[],
-): void {
-  const exactCandidates = new Set(
-    proposal.proposed_deltas.map((candidate) =>
-      [
-        candidate.candidate_id,
-        createEpisodeDeltaCandidateFingerprintV01(candidate),
-      ].join("\0"),
-    ),
-  );
-  const exactDecisions = new Set(
-    decisions.map((decision) =>
-      [decision.decision_id, decision.integrity.fingerprint].join("\0"),
-    ),
-  );
-  const rows = db
-    .prepare(
-      `SELECT payload_json FROM vnext_core_records
-       WHERE workspace_id = ? AND project_id = ?
-         AND record_kind = 'state_transition_receipt'
-       ORDER BY created_at, record_id
-       LIMIT ?`,
-    )
-    .all(
-      config.workspace_id,
-      config.project_id,
-      VNEXT_OPERATOR_PILOT_MAX_REVIEW_RECORDS_V01 + 1,
-    ) as Array<{ payload_json: string }>;
-  if (rows.length > VNEXT_OPERATOR_PILOT_MAX_REVIEW_RECORDS_V01) {
-    throw reviewError("operator_pilot_transition_history_bound_exceeded", 422);
-  }
-  for (const row of rows) {
-    let value: Record<string, unknown>;
-    try {
-      value = JSON.parse(row.payload_json) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    const sourceProposal = value.source_proposal as
-      | Record<string, unknown>
-      | undefined;
-    const sourceCandidate = value.source_candidate as
-      | Record<string, unknown>
-      | undefined;
-    const sourceDecision = value.source_decision as
-      | Record<string, unknown>
-      | undefined;
-    if (
-      sourceProposal?.proposal_id === proposal.proposal_id &&
-      sourceProposal.proposal_fingerprint === proposal.integrity.fingerprint &&
-      exactCandidates.has(
-        [
-          sourceCandidate?.candidate_id,
-          sourceCandidate?.candidate_fingerprint,
-        ].join("\0"),
-      ) &&
-      exactDecisions.has(
-        [
-          sourceDecision?.decision_id,
-          sourceDecision?.decision_fingerprint,
-        ].join("\0"),
-      )
-    ) {
-      throw reviewError("operator_pilot_operational_transition_conflict", 422);
-    }
-  }
-}
-
 function loadSourceRunReceipts(
   db: Database.Database,
   config: VNextLocalOperatorPilotConfigV01,
@@ -1407,140 +1318,201 @@ function loadSourceRunReceipts(
   });
 }
 
-function loadProposalDecisions(
-  db: Database.Database,
-  config: VNextLocalOperatorPilotConfigV01,
-  proposal: EpisodeDeltaProposalV01,
-): ReviewDecisionV01[] {
-  const rows = db.prepare(
-    `SELECT record_id FROM vnext_core_records
-     WHERE workspace_id = ? AND project_id = ?
-       AND record_kind = 'review_decision'
-     ORDER BY created_at, record_id
-     LIMIT ?`,
-  ).all(
-    config.workspace_id,
-    config.project_id,
-    VNEXT_OPERATOR_PILOT_MAX_REVIEW_RECORDS_V01 + 1,
-  ) as Array<{
-    record_id: string;
-  }>;
-  if (rows.length > VNEXT_OPERATOR_PILOT_MAX_REVIEW_RECORDS_V01) {
-    throw reviewError("operator_pilot_decision_history_bound_exceeded", 422);
+function validatePersistedDecisionV01(record: VNextCoreRecordEnvelopeV01): ReviewDecisionV01 {
+  if (validateReviewDecisionV01(record.payload).status !== "valid") {
+    throw reviewError("operator_pilot_persisted_decision_invalid", 422);
   }
-  return rows
-    .map((row) => {
-      const record = readVNextCoreRecordV01(db, {
-        record_kind: "review_decision",
-        record_id: row.record_id,
-        workspace_id: config.workspace_id,
-        project_id: config.project_id,
-      });
-      if (!record) {
-        throw reviewError("operator_pilot_persisted_decision_missing", 422);
-      }
-      if (validateReviewDecisionV01(record.payload).status !== "valid") {
-        throw reviewError("operator_pilot_persisted_decision_invalid", 422);
-      }
-      const decision = record.payload as ReviewDecisionV01;
-      assertVNextCoreRecordMatchesProtocolPayloadBindingV01(record, {
-        workspace_id: decision.workspace_id,
-        project_id: decision.project_id,
-        fingerprint: decision.integrity.fingerprint,
-      });
-      if (
-        record.record_id !== decision.decision_id ||
-        record.fingerprint !== decision.integrity.fingerprint ||
-        record.created_at !== decision.decided_at
-      ) {
-        throw reviewError(
-          "operator_pilot_persisted_decision_envelope_mismatch",
-          422,
-        );
-      }
-      return decision;
-    })
-    .filter(
-      (value): value is ReviewDecisionV01 =>
-        typeof value === "object" &&
-        value !== null &&
-        (value as ReviewDecisionV01).source_proposal?.proposal_id ===
-          proposal.proposal_id,
-    )
-    .map((decision) => {
-      if (
-        validateReviewDecisionAgainstEpisodeDeltaProposalV01(
-          decision,
-          proposal,
-        ).status !== "valid"
-      ) {
-        throw reviewError("operator_pilot_persisted_decision_invalid", 422);
-      }
-      return decision;
-    });
+  const decision = record.payload as ReviewDecisionV01;
+  assertVNextCoreRecordMatchesProtocolPayloadBindingV01(record, {
+    workspace_id: decision.workspace_id,
+    project_id: decision.project_id,
+    fingerprint: decision.integrity.fingerprint,
+  });
+  if (
+    record.record_id !== decision.decision_id ||
+    record.fingerprint !== decision.integrity.fingerprint ||
+    record.created_at !== decision.decided_at
+  ) {
+    throw reviewError("operator_pilot_persisted_decision_envelope_mismatch", 422);
+  }
+  return decision;
 }
 
-function loadProposalTransitionReceipts(
+function assertDecisionProposalRelationV01(decision: ReviewDecisionV01, proposal: EpisodeDeltaProposalV01) {
+  if (validateReviewDecisionAgainstEpisodeDeltaProposalV01(decision, proposal).status !== "valid") {
+    throw reviewError("operator_pilot_persisted_decision_invalid", 422);
+  }
+}
+
+// An exact writer binding must remain readable even outside the display window.
+export function readVNextOperatorPilotReviewDecisionV01(
   db: Database.Database,
   config: VNextLocalOperatorPilotConfigV01,
   proposal: EpisodeDeltaProposalV01,
-): StateTransitionReceiptV01[] {
-  const rows = db.prepare(
-    `SELECT record_id, fingerprint, payload_json FROM vnext_core_records
-     WHERE workspace_id = ? AND project_id = ?
-       AND record_kind = 'state_transition_receipt'
-     ORDER BY created_at, record_id
-     LIMIT ?`,
-  ).all(
-    config.workspace_id,
-    config.project_id,
-    VNEXT_OPERATOR_PILOT_MAX_REVIEW_RECORDS_V01 + 1,
-  ) as Array<{
-    record_id: string;
-    fingerprint: string;
-    payload_json: string;
-  }>;
-  if (rows.length > VNEXT_OPERATOR_PILOT_MAX_REVIEW_RECORDS_V01) {
-    throw reviewError("operator_pilot_transition_history_bound_exceeded", 422);
+  decisionId: string,
+): ReviewDecisionV01 | null {
+  const record = readVNextCoreRecordV01(db, {
+    ...config, record_kind: "review_decision", record_id: decisionId,
+  });
+  if (!record) return null;
+  const decision = validatePersistedDecisionV01(record);
+  assertDecisionProposalRelationV01(decision, proposal);
+  return decision;
+}
+
+function* loadProposalDecisions(
+  db: Database.Database,
+  config: VNextLocalOperatorPilotConfigV01,
+  proposal: EpisodeDeltaProposalV01,
+): Generator<ReviewDecisionV01> {
+  for (const record of iterateVNextCoreRecordsV01(db, {
+    ...config, record_kind: "review_decision", order: "oldest_first",
+  })) {
+    const decision = validatePersistedDecisionV01(record);
+    if (decision.source_proposal.proposal_id !== proposal.proposal_id) continue;
+    assertDecisionProposalRelationV01(decision, proposal);
+    yield decision;
   }
-  return rows
-    .map((row) => ({ row, value: JSON.parse(row.payload_json) as unknown }))
-    .filter(
-      (entry): entry is { row: typeof rows[number]; value: StateTransitionReceiptV01 } =>
-        typeof entry.value === "object" &&
-        entry.value !== null &&
-        (entry.value as StateTransitionReceiptV01).source_proposal?.proposal_id ===
-          proposal.proposal_id,
-    )
-    .map(({ row, value }) => {
-      if (
-        validateStateTransitionReceiptV01(value).status !== "valid" ||
-        value.source_proposal.proposal_fingerprint !==
-          proposal.integrity.fingerprint
-      ) {
-        throw reviewError("operator_pilot_transition_receipt_invalid", 422);
-      }
-      const transition = loadValidatedVNextSemanticTransitionRelationV01(db, {
-        workspace_id: config.workspace_id,
-        project_id: config.project_id,
-        transition_receipt_id: row.record_id,
-        transition_receipt_fingerprint: row.fingerprint,
-      });
-      if (
-        validateVNextOperatorPilotReviewDecisionProvenanceV01(db, {
-          config,
-          proposal: transition.proposal,
-          decision: transition.decision,
-          authenticated_session_id: null,
-        }).status !== "valid"
-      ) {
-        throw reviewError(
-          "operator_pilot_transition_decision_provenance_invalid",
-          422,
-        );
-      }
-      return value;
+}
+
+function* loadProposalTransitionReceipts(
+  db: Database.Database,
+  config: VNextLocalOperatorPilotConfigV01,
+  proposal: EpisodeDeltaProposalV01,
+  exactDecisionKeys: Set<string>,
+): Generator<StateTransitionReceiptV01> {
+  const exactCandidateKeys = new Set(proposal.proposed_deltas.map((candidate) =>
+    `${candidate.candidate_id}\0${createEpisodeDeltaCandidateFingerprintV01(candidate)}`,
+  ));
+  for (const record of iterateVNextCoreRecordsV01(db, {
+    ...config, record_kind: "state_transition_receipt", order: "oldest_first",
+  })) {
+    const value = record.payload as StateTransitionReceiptV01 | null;
+    if (!value || value.source_proposal?.proposal_id !== proposal.proposal_id) continue;
+    if (
+      proposal.operational_friction_proposal &&
+      value.source_proposal.proposal_fingerprint === proposal.integrity.fingerprint &&
+      exactCandidateKeys.has(`${value.source_candidate?.candidate_id}\0${value.source_candidate?.candidate_fingerprint}`) &&
+      exactDecisionKeys.has(`${value.source_decision?.decision_id}\0${value.source_decision?.decision_fingerprint}`)
+    ) {
+      throw reviewError("operator_pilot_operational_transition_conflict", 422);
+    }
+    if (
+      validateStateTransitionReceiptV01(value).status !== "valid" ||
+      value.source_proposal.proposal_fingerprint !== proposal.integrity.fingerprint
+    ) {
+      throw reviewError("operator_pilot_transition_receipt_invalid", 422);
+    }
+    const transition = loadValidatedVNextSemanticTransitionRelationV01(db, {
+      workspace_id: config.workspace_id,
+      project_id: config.project_id,
+      transition_receipt_id: record.record_id,
+      transition_receipt_fingerprint: record.fingerprint,
     });
+    if (
+      validateVNextOperatorPilotReviewDecisionProvenanceV01(db, {
+        config, proposal: transition.proposal, decision: transition.decision,
+        authenticated_session_id: null,
+      }).status !== "valid"
+    ) {
+      throw reviewError("operator_pilot_transition_decision_provenance_invalid", 422);
+    }
+    if (proposal.operational_friction_proposal) {
+      throw reviewError("operator_pilot_operational_transition_conflict", 422);
+    }
+    yield value;
+  }
+}
+
+function readProposalHistoryV01(
+  db: Database.Database,
+  input: Parameters<typeof readVNextOperatorPilotSemanticReviewV01>[1],
+  proposal: EpisodeDeltaProposalV01,
+  admissions: VNextOperatorPilotCandidateAdmissionV01[],
+) {
+  // Keep the complete ordered comparison index, not complete protocol payloads.
+  // The lineage comparator is not a pairwise maximum: preserve its stable sort
+  // over the same oldest-first input, including priors on other pages.
+  const index: Array<ReviewDecisionLineageComparableV01 & {
+    candidate: ReviewDecisionV01["candidate"];
+    eligible: boolean;
+  }> = [];
+  for (const decision of loadProposalDecisions(db, input.config, proposal)) {
+    const provenance = validateVNextOperatorPilotReviewDecisionProvenanceV01(db, {
+      ...input, proposal, decision,
+    });
+    index.push({
+      decision_id: decision.decision_id,
+      decided_at: decision.decided_at,
+      integrity: { fingerprint: decision.integrity.fingerprint },
+      lineage: { prior_decisions: decision.lineage.prior_decisions },
+      candidate: decision.candidate,
+      eligible: provenance.status === "valid" && provenance.pilot_session_bound &&
+        admissions.some((candidate) =>
+          candidate.candidate_id === decision.candidate.candidate_id &&
+          candidate.candidate_fingerprint === decision.candidate.candidate_fingerprint,
+        ),
+    });
+  }
+  const exact = index.filter((entry) => entry.eligible);
+  const effectiveIndex = [...exact].sort(compareEffectiveReviewDecisionsV01)[0];
+  const effectiveCandidateIndexes = admissions.flatMap((candidate) => {
+    const entry = exact.filter((item) => item.candidate.candidate_id === candidate.candidate_id)
+      .sort(compareEffectiveReviewDecisionsV01)[0];
+    return entry ? [entry] : [];
+  });
+  const selectedIds = new Set([
+    ...index.slice(-REVIEW_HISTORY_DISPLAY_SIZE),
+    ...effectiveCandidateIndexes,
+    ...(effectiveIndex ? [effectiveIndex] : []),
+  ].map((entry) => entry.decision_id));
+  const decisionHistory = index.filter((entry) => selectedIds.has(entry.decision_id)).map((entry) => {
+    const decision = readVNextOperatorPilotReviewDecisionV01(db, input.config, proposal, entry.decision_id);
+    if (!decision) throw reviewError("operator_pilot_persisted_decision_missing", 422);
+    return { decision, ...validateVNextOperatorPilotReviewDecisionProvenanceV01(db, { ...input, proposal, decision }) };
+  });
+  const byId = new Map(decisionHistory.map((entry) => [entry.decision.decision_id, entry]));
+  const effectiveByCandidate = new Map(effectiveCandidateIndexes.map((entry) =>
+    [entry.candidate.candidate_id, byId.get(entry.decision_id)!],
+  ));
+  const exactDecisionKeys = new Set(index.map((entry) => `${entry.decision_id}\0${entry.integrity.fingerprint}`));
+  const displayedDecisions = new Map(decisionHistory.map((entry) =>
+    [`${entry.decision.decision_id}\0${entry.decision.integrity.fingerprint}`, entry.decision],
+  ));
+  type PositionedReceipt = { position: number; receipt: StateTransitionReceiptV01 };
+  const recentReceipts: PositionedReceipt[] = [];
+  const firstMatchingReceipts = new Map<string, PositionedReceipt>();
+  let transitionCount = 0;
+  for (const receipt of loadProposalTransitionReceipts(db, input.config, proposal, exactDecisionKeys)) {
+    const positioned = { position: transitionCount++, receipt };
+    recentReceipts.push(positioned);
+    if (recentReceipts.length > REVIEW_HISTORY_DISPLAY_SIZE) recentReceipts.shift();
+    const key = `${receipt.source_decision.decision_id}\0${receipt.source_decision.decision_fingerprint}`;
+    const decision = displayedDecisions.get(key);
+    if (decision && !firstMatchingReceipts.has(key) && findExactDecisionCandidateTransitionReceiptV01([receipt], decision)) {
+      firstMatchingReceipts.set(key, positioned);
+    }
+  }
+  const receipts = [...new Map([...firstMatchingReceipts.values(), ...recentReceipts]
+    .map((entry) => [entry.receipt.transition_receipt_id, entry])).values()]
+    .sort((left, right) => left.position - right.position).map((entry) => entry.receipt);
+  return {
+    decisions: decisionHistory.map((entry) => entry.decision),
+    decision_history: decisionHistory,
+    transition_receipts: receipts,
+    effective: effectiveIndex ? byId.get(effectiveIndex.decision_id)! : null,
+    effective_by_candidate: effectiveByCandidate,
+    effective_candidate_decisions: effectiveCandidateIndexes.map((entry) => ({
+      candidate_id: entry.candidate.candidate_id,
+      candidate_fingerprint: entry.candidate.candidate_fingerprint,
+      decision_id: entry.decision_id,
+      decision_fingerprint: entry.integrity.fingerprint,
+    })),
+    history_read: {
+      decisions: { total_count: index.length, returned_count: decisionHistory.length, complete: index.length === decisionHistory.length },
+      transitions: { total_count: transitionCount, returned_count: receipts.length, complete: transitionCount === receipts.length },
+    },
+  };
 }
 
 function parseDecisionRequest(value: unknown): VNextOperatorPilotDecisionRequestV01 {

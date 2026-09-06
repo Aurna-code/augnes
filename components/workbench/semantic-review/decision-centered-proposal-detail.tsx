@@ -584,7 +584,7 @@ export function DecisionCenteredProposalDetail({
           packetRef={proposal.task_context_packet_ref}
         />
         <SelectedLifecycle lifecycle={lifecycle} />
-        <DecisionHistory decisions={selectedDecisions} />
+        <DecisionHistory decisions={selectedDecisions} historyRead={read.history_read} />
         <section className={styles.panel} data-shared-inspector-handoff="true">
           <div className={styles.panelHeader}>
             <p className={styles.kicker}>Exact detail</p>
@@ -1961,12 +1961,22 @@ function SelectedLifecycle({ lifecycle }: { lifecycle: ProjectVerifyRevisionLife
   );
 }
 
-function DecisionHistory({ decisions }: { decisions: SemanticReviewProposalDetailV01["decision_history"] }) {
+function DecisionHistory({ decisions, historyRead }: {
+  decisions: SemanticReviewProposalDetailV01["decision_history"];
+  historyRead: SemanticReviewProposalDetailV01["history_read"];
+}) {
   return (
     <section className={styles.materialCard} data-selected-decision-history="true" data-vnext-decision-history="v0.1">
       <h3>Exact ReviewDecision history</h3>
+      {historyRead && (!historyRead.decisions.complete || !historyRead.transitions.complete) && (
+        <p className={styles.empty}>
+          Showing recent history and current decision bindings. Older saved decisions and project updates are omitted from this view; current status uses the complete history.
+        </p>
+      )}
       {decisions.length === 0 ? (
-        <p className={styles.empty}>No exact decision is saved for this change option.</p>
+        <p className={styles.empty}>{historyRead?.decisions.complete === false
+          ? "No exact decision for this change option is included in this view."
+          : "No exact decision is saved for this change option."}</p>
       ) : (
         <ol className={styles.plainList}>
           {decisions.map((entry) => (

@@ -62,6 +62,7 @@ import {
 } from "@/lib/vnext/runtime/local-runtime-clock";
 import {
   readVNextOperatorPilotSemanticReviewV01,
+  readVNextOperatorPilotReviewDecisionV01,
   resolveVNextOperatorPilotApplyingDecisionV01,
   validateVNextOperatorPilotReviewDecisionProvenanceV01,
   type VNextOperatorPilotReviewDetailV01,
@@ -727,12 +728,12 @@ function requirePilotAcceptedOperationMaterial(
       409,
     );
   }
-  const decision = detail.decisions.find(
-    (item) =>
-      item.decision_id === binding.decision_id &&
-      item.integrity.fingerprint === binding.decision_fingerprint,
+  const decision = readVNextOperatorPilotReviewDecisionV01(
+    db, config, detail.proposal, binding.decision_id,
   );
-  if (!decision) throw transitionError("operator_pilot_decision_missing", 404);
+  if (!decision || decision.integrity.fingerprint !== binding.decision_fingerprint) {
+    throw transitionError("operator_pilot_decision_missing", 404);
+  }
   const provenance = validateVNextOperatorPilotReviewDecisionProvenanceV01(
     db,
     {

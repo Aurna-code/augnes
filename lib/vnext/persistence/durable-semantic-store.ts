@@ -638,6 +638,7 @@ export function* iterateVNextCoreRecordsV01(
     record_kind: VNextCoreRecordKindV01;
     source_proposal_id?: string;
     source_decision_id?: string;
+    order?: "oldest_first" | "newest_first";
   },
 ): Generator<VNextCoreRecordEnvelopeV01> {
   const scope = [
@@ -657,14 +658,15 @@ export function* iterateVNextCoreRecordsV01(
   }
   let cursor: { created_at: string; record_id: string } | undefined;
   const pageSize = 64;
+  const oldestFirst = input.order === "oldest_first";
   for (;;) {
     const rows = db
       .prepare(
         `SELECT * FROM vnext_core_records
        WHERE workspace_id = ? AND project_id = ? AND record_kind = ?
          ${filters.map((filter) => `AND ${filter}`).join(" ")}
-         ${cursor ? "AND (created_at < ? OR (created_at = ? AND record_id > ?))" : ""}
-       ORDER BY created_at DESC, record_id ASC LIMIT ?`,
+         ${cursor ? `AND (created_at ${oldestFirst ? ">" : "<"} ? OR (created_at = ? AND record_id > ?))` : ""}
+       ORDER BY created_at ${oldestFirst ? "ASC" : "DESC"}, record_id ASC LIMIT ?`,
       )
       .all(
         ...scope,

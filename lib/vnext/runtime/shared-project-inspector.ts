@@ -1228,6 +1228,7 @@ function decisionSectionV01(
     competingAuthorization
       ? "conflict"
       : input.gate_history.bounded_incomplete ||
+          proposal?.history_read?.decisions.complete === false ||
           decisions.length + gates.length > MAX_SECTION_ITEMS_V01
         ? "bounded_incomplete"
         : decisions.length || gates.length
@@ -1235,7 +1236,7 @@ function decisionSectionV01(
           : "pending",
     "ReviewDecision, gate authorization, and Transition application remain separate: the decision itself applies no state, and authorization is not application. Applying values are shown exactly; reject and defer are non-applying.",
     [
-      factV01("Decision attempts", String(decisions.length)),
+      factV01("Decision attempts", String(proposal?.decision_count ?? 0)),
       factV01("Gate history", String(gates.length)),
       factV01("Authorized, unapplied", String(authorizedUnapplied.length), authorizedUnapplied.length ? "attention" : "neutral"),
       factV01("Expired, unapplied", String(gates.filter((entry) => entry.expired && !appliedGateIds.has(entry.relation.gate_record.gate_record_id)).length)),
