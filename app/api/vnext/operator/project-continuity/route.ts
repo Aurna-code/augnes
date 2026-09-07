@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { NextResponse } from "next/server";
 import { buildSelectedWorkSourceEntry, compareSelectedWorkSources, SelectedWorkSourceError } from "@/lib/intake/selected-work-source-comparison";
+import { recallRetainedWorkSources, resolveRetainedWorkSources } from "@/lib/intake/retained-work-source-recall";
 
 import {
   VNextLocalOperatorSessionErrorV01,
@@ -31,6 +32,7 @@ import {
 import {
   ProjectWorkRevisionErrorV01,
   revisePreExecutionProjectWorkV01,
+  readProjectWorkRevisionEligibilityStrictV01,
 } from "@/lib/vnext/runtime/project-work-revision";
 import { PreExecutionProjectWorkRevisionErrorV01, inspectPreExecutionProjectWorkRevisionChainV01 } from "@/lib/vnext/runtime/pre-execution-project-work-revision";
 
@@ -129,22 +131,37 @@ export function createVNextOperatorContextUseReviewHandlerV01(
       const credential = readVNextLocalOperatorCredentialFromRequestV01(request);
       db = (options.open_database ?? openVNextLocalOperatorDatabaseV01)(config);
       const body = await readBoundedVNextLocalOperatorBodyV01(request);
-      if (body.action === "compare_selected_work_sources") {
+      if (body.action === "compare_selected_work_sources" || body.action === "lookup_retained_work_sources") {
         authenticateVNextLocalOperatorSessionV01(db, { config, credential, clock: options.clock });
-        if (Object.keys(body).sort().join(",") !== "action,expected_current_packet_fingerprint,expected_current_packet_id,notes" ||
-          !Array.isArray(body.notes) || body.notes.length > 8) {
+        const lookup = body.action === "lookup_retained_work_sources";
+        const retained = lookup || body.retained_source_refs !== undefined;
+        const keys = ["action", "expected_current_packet_fingerprint", "expected_current_packet_id",
+          ...(lookup ? ["query"] : ["notes"]),
+          ...(retained ? ["expected_active_project_id", "expected_active_selection_revision"] : []),
+          ...(!lookup && retained ? ["retained_source_refs"] : [])];
+        if (Object.keys(body).sort().join(",") !== keys.sort().join(",") ||
+          (!lookup && (!Array.isArray(body.notes) || body.notes.length > 8))) {
           throw new ProjectWorkRevisionErrorV01("selected_source_context_invalid", 400);
         }
-        const comparison = db.transaction(() => {
+        const result = db.transaction(() => {
+          if (retained) {
+            const eligibility = readProjectWorkRevisionEligibilityStrictV01(db!, config);
+            if (!eligibility.eligible || eligibility.active_project_id !== body.expected_active_project_id ||
+              eligibility.active_selection_revision !== body.expected_active_selection_revision) {
+              throw new ProjectWorkRevisionErrorV01("retained_source_work_selection_changed_or_unavailable", 409);
+            }
+          }
           const chain = inspectPreExecutionProjectWorkRevisionChainV01(db!, config);
           if (!chain.projection_current || chain.tip_packet.packet_id !== body.expected_current_packet_id ||
             chain.tip_packet.integrity.fingerprint !== body.expected_current_packet_fingerprint) {
             throw new ProjectWorkRevisionErrorV01("work_revision_current_packet_changed", 409);
           }
-          return compareSelectedWorkSources(chain.tip_packet,
-            (body.notes as unknown[]).map((note) => buildSelectedWorkSourceEntry(config, note)));
+          if (lookup) return { recall: recallRetainedWorkSources(chain, body.query) };
+          const sources = resolveRetainedWorkSources(chain, body.retained_source_refs ?? []);
+          return { comparison: compareSelectedWorkSources(chain.tip_packet,
+            [...(body.notes as unknown[]).map((note) => buildSelectedWorkSourceEntry(config, note)), ...sources.entries], sources.refs) };
         })();
-        return jsonResponse({ ok: true, status: "selected_source_comparison", comparison, projection_is_read_only: true });
+        return jsonResponse({ ok: true, status: lookup ? "retained_source_recall" : "selected_source_comparison", ...result, projection_is_read_only: true });
       }
       if (body.action === "define_initial_project_work") {
         const result = defineInitialProjectWorkV01(db, {

@@ -6,6 +6,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { buildSelectedWorkSourceEntry, compareSelectedWorkSources, normalizeSelectedWorkSources, readSelectedWorkSources } from "../lib/intake/selected-work-source-comparison";
 import { SELECTED_WORK_SOURCE_LABELS } from "../types/vnext/project-work-revision";
+import { recallRetainedWorkSources, resolveRetainedWorkSources } from "../lib/intake/retained-work-source-recall";
 
 import {
   insertVNextCoreRecordV01,
@@ -112,6 +113,7 @@ async function main(): Promise<void> {
     assertInitialWorkPortabilityV01();
     assertRevisionPortabilityAndRecoveryV01();
     await assertSelectedSourceNextWorkV01();
+    await assertRetainedSourceRecallV01();
     await assertSeparateNativeHostStartV01();
     await assertRevisedNativeHostStartV01();
     console.log(JSON.stringify({
@@ -142,6 +144,255 @@ async function main(): Promise<void> {
   } finally {
     rmSync(ROOT, { recursive: true, force: true });
   }
+}
+
+async function assertRetainedSourceRecallV01(): Promise<void> {
+  const preparationStarted = performance.now();
+  const fixture = createFixtureV01("retained-source-recall");
+  const sizes = (value: unknown) => {
+    const text = canonicalizeProtocolValueV01(value);
+    return { characters: [...text].length, utf8_bytes: Buffer.byteLength(text, "utf8") };
+  };
+  const packetRows = (db: Database.Database) => db.prepare("SELECT record_id, payload_json FROM vnext_core_records WHERE record_kind = 'task_context_packet' ORDER BY record_id").all() as { record_id: string; payload_json: string }[];
+  try {
+    const initial = defineInitialProjectWorkV01(fixture.db, {
+      config: fixture.config, credential: authenticatedSessionV01(fixture, "recall"),
+      request: requestV01(fixture, { goal: "Investigate valve leakage under X and Y", success_criteria: ["Preserve test conditions and unresolved anomalies"], non_goals: [] }), clock: fixedClock(T2),
+    });
+    let credential = credentialFromCookieV01(initial.session_admission.cookie_value);
+    let packet = initial.packet;
+    let tick = 3;
+    const notes = [
+      { text: "Observation: A leaked under cold-start condition X. Y was not tested. The pressure anomaly remains unexplained.", provenance: "imported_unverified", label: "Unclassified / needs review" },
+      { text: "Rejected explanation: A always fails. That generalization goes beyond the X observation; Y and exception Z remain untested.", provenance: "derived_interpretation", label: "Rejection reason" },
+      { text: "User correction: reject A only under X. Y is untested, not forbidden. The original leak observation must remain.", provenance: "user_declaration", label: "Changed assumption / user correction" },
+      { text: "Unresolved anomaly: does pressure Z explain the leak? There is no answer yet.", provenance: "user_declaration", label: "Open question" },
+      { text: "Defer Y until fixture B is available; revisit when B arrives. Next check: compare cold start X and Y with B.", provenance: "user_declaration", label: "Deferred item / revisit condition" },
+    ].map((note, index) => buildSelectedWorkSourceEntry(fixture, { ...note,
+      source: "Valve bench leak investigation, revision 1", observed_at: `2026-07-31T12:00:0${index}.000Z` }));
+    function write(entries: typeof notes, goal: string) {
+      const comparison = compareSelectedWorkSources(packet, entries);
+      const result = revisePreExecutionProjectWorkV01(fixture.db, { config: fixture.config, credential,
+        request: { ...revisionRequestV01(fixture, packet, packet === initial.packet ? "initial_user_defined" : "pre_execution_user_revision", { ...packet.task, goal }),
+          selected_source_context: comparison.entries, expected_source_comparison: comparison.fingerprint },
+        clock: fixedClock(`2026-08-01T00:00:${String(tick++).padStart(2, "0")}.000Z`) });
+      credential = credentialFromCookieV01(result.session_admission.cookie_value);
+      packet = result.packet;
+      return result;
+    }
+    write(notes, packet.task.goal);
+    const original = packet;
+    write(notes, "Review the valve leak conditions before changing task selection");
+    const preparedMs = performance.now() - preparationStarted;
+    const preparationBytes = packetRows(fixture.db);
+    const observations: unknown[] = [];
+    let handoffPreparationMs = 0;
+    for (let boundary = 1; boundary <= 5; boundary += 1) {
+      const handoffStarted = performance.now();
+      // New task selection deliberately omits the original notes. This is not
+      // source retirement, semantic rejection, automatic cooling or deletion.
+      const unrelated = buildSelectedWorkSourceEntry(fixture, {
+        source: `Valve display layout note ${boundary}`, observed_at: null, provenance: "user_declaration",
+        label: "New candidate", text: `Bulk display spacing ${boundary}: ${"한".repeat(1_800)}`,
+      });
+      const changedCondition = buildSelectedWorkSourceEntry(fixture, {
+        source: "Valve bench leak investigation, revision 2", observed_at: "2026-07-31T12:01:00.000Z", provenance: "user_declaration",
+        label: "Changed assumption / user correction", text: "User correction: X now includes warm-up W. Y is still untested; compare this changed condition with the earlier cold-start observation.",
+      });
+      const smallUnrelated = buildSelectedWorkSourceEntry(fixture, {
+        source: `Valve display alignment ${boundary}`, observed_at: `2026-08-01T00:00:0${boundary}.000Z`, provenance: "user_declaration",
+        label: "Next check", text: `Check display alignment ${boundary}; this says nothing about fluid behavior.`,
+      });
+      write(boundary === 2 ? [unrelated, smallUnrelated, changedCondition] : [unrelated, smallUnrelated], `Review display spacing at handoff ${boundary}`);
+      handoffPreparationMs += performance.now() - handoffStarted;
+      assert(readSelectedWorkSources(packet).every((entry) => !notes.some((note) => note.entry_id === entry.entry_id)));
+      if (![1, 3, 5].includes(boundary)) continue;
+      const connectionStarted = performance.now();
+      const cold = new Database(fixture.db.serialize());
+      const coldConnectionMs = performance.now() - connectionStarted;
+      try {
+        const snapshot = cold.serialize();
+        const lookupStarted = performance.now();
+        const chain = inspectPreExecutionProjectWorkRevisionChainV01(cold, fixture);
+        const lookup = recallRetainedWorkSources(chain, "valve leak");
+        const lookupMs = performance.now() - lookupStarted;
+        assert.deepEqual(lookup, recallRetainedWorkSources(chain, "LEAK valve valve"));
+        assert.equal(lookup.returned_entries, boundary === 1 ? 5 : 6);
+        assert.equal(lookup.truncated, false);
+        assert(lookup.results.every((hit) => hit.selection === "historical_not_selected"));
+        for (const note of notes) {
+          const hit = lookup.results.find((hit) => hit.entry.entry_id === note.entry_id)!;
+          assert.deepEqual(hit.entry, note);
+          assert.equal(hit.source.packet_id, original.packet_id);
+          assert.equal(hit.source.packet_fingerprint, original.integrity.fingerprint);
+          assert.equal(hit.first_recorded_at, original.generated_at);
+          assert.equal(hit.packet_occurrences, 2, "Two carried copies are one exact excerpt");
+          assert.equal(hit.entry.currentness.status, "unknown");
+        }
+        assert.deepEqual(lookup.results.slice(0, 5).map((hit) => hit.entry), notes);
+        const noMatch = recallRetainedWorkSources(chain, "unobserved acoustic measurement");
+        assert.equal(noMatch.matching_entries, 0);
+        assert.equal(noMatch.scanned_packets, chain.packets.length);
+        assert.throws(() => recallRetainedWorkSources(chain, ""), /retained_source_query_invalid/u);
+        assert.throws(() => recallRetainedWorkSources(chain, "x".repeat(161)), /retained_source_query_invalid/u);
+        assert.throws(() => recallRetainedWorkSources(chain, "a b c d e f g h i"), /retained_source_query_invalid/u);
+        assert.throws(() => resolveRetainedWorkSources(chain, [{ ...lookup.results[0]!.source, packet_id: "packet:foreign" }]), /retained_source_changed_or_unavailable/u);
+        assert.throws(() => resolveRetainedWorkSources(chain, [{ ...lookup.results[0]!.source, source_fingerprint: `sha256:${"0".repeat(64)}` }]), /retained_source_changed_or_unavailable/u);
+        assert.throws(() => resolveRetainedWorkSources(chain, [{ ...lookup.results[0]!.source, entry_id: "malformed" }]), /selected_source_context_invalid/u);
+        const comparisonStarted = performance.now();
+        const selected = resolveRetainedWorkSources(chain, lookup.results.map((hit) => hit.source));
+        const comparison = compareSelectedWorkSources(packet, selected.entries, selected.refs);
+        const comparisonMs = performance.now() - comparisonStarted;
+        assert.deepEqual(comparison, compareSelectedWorkSources(packet, [...selected.entries].reverse(), [...selected.refs].reverse()));
+        assert(comparison.rows.every((row) => row.comparison === "new_source_material_review_needed"));
+        assert(snapshot.equals(cold.serialize()), "Cold lookup, comparison and refusals write nothing");
+
+        // Matched direct-read/good-note baseline: same retained chain and cutoff,
+        // with no answer ID supplied. Manual selection cost is not simulated.
+        const baselineStarted = performance.now();
+        const baselineDb = new Database(fixture.db.serialize());
+        let directNotes: ReturnType<typeof readSelectedWorkSources>;
+        let directInput: unknown;
+        try {
+          const directChain = inspectPreExecutionProjectWorkRevisionChainV01(baselineDb, fixture);
+          directInput = directChain.packets;
+          const byId = new Map(directChain.packets.flatMap(readSelectedWorkSources).map((entry) => [entry.entry_id, entry]));
+          directNotes = [...byId.values()].filter((entry) => `${entry.compatibility_source_ref!.external_id} ${entry.bounded_summary}`.toLowerCase().includes("leak"));
+        } finally { baselineDb.close(); }
+        const baselineReadMs = performance.now() - baselineStarted;
+        const goodNoteStarted = performance.now();
+        const goodNote = { current_work: packet.task, notes: directNotes! };
+        const goodNoteSize = sizes(goodNote);
+        const goodNoteMs = performance.now() - goodNoteStarted;
+        assert.deepEqual(new Set(directNotes!.map((entry) => entry.entry_id)), new Set(comparison.entries.map((entry) => entry.entry_id)));
+
+        const request = { ...revisionRequestV01(fixture, packet, "pre_execution_user_revision", { ...packet.task, goal: "Return to valve leak conditions before choosing the next check" }),
+          selected_source_context: comparison.entries, expected_source_comparison: comparison.fingerprint, retained_source_refs: comparison.retained_source_refs };
+        assert.throws(() => revisePreExecutionProjectWorkV01(cold, { config: fixture.config, credential,
+          request: { ...request, selected_source_context: [] }, clock: fixedClock("2026-08-01T00:00:20.000Z") }), /retained_source_selection_changed/u);
+        assert.throws(() => revisePreExecutionProjectWorkV01(cold, { config: fixture.config, credential,
+          request: { ...request, expected_active_selection_revision: 999 }, clock: fixedClock("2026-08-01T00:00:20.000Z") }), /work_revision_active_selection_conflict/u);
+        assert(snapshot.equals(cold.serialize()));
+        const retainedBytes = packetRows(cold);
+        const writeStarted = performance.now();
+        const saved = revisePreExecutionProjectWorkV01(cold, { config: fixture.config, credential, request, clock: fixedClock("2026-08-01T00:00:20.000Z") });
+        const writerMs = performance.now() - writeStarted;
+        const replay = revisePreExecutionProjectWorkV01(cold, { config: fixture.config, credential: credentialFromCookieV01(saved.session_admission.cookie_value), request, clock: fixedClock("2026-08-01T00:00:20.000Z") });
+        assert.equal(replay.status, "exact_replay");
+        assert.equal(packetRows(cold).length, retainedBytes.length + 1);
+        const historicalIds = new Set(retainedBytes.map((row) => row.record_id));
+        assert.deepEqual(packetRows(cold).filter((row) => historicalIds.has(row.record_id)), retainedBytes);
+        assert.equal(saved.transition_created, false);
+        assert.equal(saved.review_decision_created, false);
+        assert.equal(saved.execution_started, false);
+        const fresh = new Database(cold.serialize());
+        let consumerMs = 0;
+        try {
+          const before = fresh.serialize();
+          const consumerStarted = performance.now();
+          const admission = await admitPersistedHostTaskContextPacketV01(fresh, { config: fixture.config,
+            packet_id: saved.packet.packet_id, packet_fingerprint: saved.packet.integrity.fingerprint, evaluated_at: "2026-08-01T00:00:21.000Z" });
+          consumerMs = performance.now() - consumerStarted;
+          assert.deepEqual(readSelectedWorkSources(admission.packet), comparison.entries);
+          assert(before.equals(fresh.serialize()));
+          await assert.rejects(() => admitPersistedHostTaskContextPacketV01(fresh, { config: fixture.config,
+            packet_id: original.packet_id, packet_fingerprint: original.integrity.fingerprint, evaluated_at: "2026-08-01T00:00:21.000Z" }), /direct_host_packet_stale/u);
+          if (boundary === 5) {
+            const requests: NativeHostRequestV01[] = [];
+            const run = await runDirectNativeHostRoundTripV01(fresh, { config: fixture.config, mode: "interactive",
+              operator_mutation: { credential: credentialFromCookieV01(replay.session_admission.cookie_value), clock: fixedClock("2026-08-01T00:00:21.000Z") } },
+            { now: timestampSequenceV01("2026-08-01T00:00:21.000Z"), on_invocation_admitted: (observed) => requests.push(observed.request) });
+            assert.equal(run.status, "inserted");
+            assert.equal(requests.length, 1);
+            assert.deepEqual(readSelectedWorkSources(requests[0]!.packet), comparison.entries);
+            for (const entry of comparison.entries) assert(requests[0]!.packet_lineage.selected_context_refs.some((ref) => canonicalizeProtocolValueV01(ref) === canonicalizeProtocolValueV01(entry.external_ref)));
+            const recovery = validateRecoveryCanonicalDatabaseV01(fresh);
+            assert.equal(recovery.status, "valid", recovery.code);
+          }
+        } finally { fresh.close(); }
+        observations.push({ boundary, handoff_preparation_cumulative_ms: handoffPreparationMs, cold_connection_ms: coldConnectionMs,
+          retained_packets: retainedBytes.length, active_notes_before: readSelectedWorkSources(packet).length,
+          recalled_notes_absent_before: comparison.entries.length, query: sizes("valve leak"), lookup_ms: lookupMs, comparison_ms: comparisonMs,
+          writer_ms: writerMs, consumer_ms: consumerMs, direct_read_ms: baselineReadMs, direct_read_input: sizes(directInput),
+          good_note_preparation_ms: goodNoteMs, good_note: goodNoteSize, lookup_results: sizes(lookup.results),
+          retained_entry_occurrences: lookup.scanned_entry_occurrences, retained_entry_utf8_bytes: lookup.scanned_entry_utf8_bytes,
+          active_material: sizes(readSelectedWorkSources(packet)), next_consumer: sizes(saved.packet),
+          next_consumer_estimated_tokens: saved.packet.constraints.context_budget.estimated_tokens,
+          next_consumer_selected_entries: saved.packet.selected_context.length, writer_core_records_added: 1 });
+      } finally { cold.close(); }
+    }
+    const chain = inspectPreExecutionProjectWorkRevisionChainV01(fixture.db, fixture);
+    const countLimited = recallRetainedWorkSources(chain, "valve");
+    assert.equal(countLimited.returned_entries, 8);
+    assert(countLimited.omitted_matching_entries > 0);
+    const byteLimited = recallRetainedWorkSources(chain, "bulk");
+    assert.equal(byteLimited.matching_entries, 5);
+    assert(byteLimited.returned_entries < 5 && byteLimited.truncated);
+    assert.equal(byteLimited.result_utf8_bytes, sizes(byteLimited.results).utf8_bytes);
+    assert(byteLimited.results.every((hit) => hit.entry.bounded_summary!.endsWith("한".repeat(1_800))));
+    const result = recallRetainedWorkSources(chain, "valve leak");
+    const selection = resolveRetainedWorkSources(chain, result.results.map((hit) => hit.source));
+    const comparison = compareSelectedWorkSources(packet, selection.entries, selection.refs);
+    const staleRequest = { ...revisionRequestV01(fixture, packet, "pre_execution_user_revision", packet.task),
+      selected_source_context: comparison.entries, expected_source_comparison: comparison.fingerprint, retained_source_refs: selection.refs };
+    const historicalBytes = packetRows(fixture.db);
+    for (const sql of [
+      "DELETE FROM vnext_core_records WHERE record_id = ?",
+      "UPDATE vnext_core_records SET payload_json = '{}' WHERE record_id = ?",
+      `UPDATE vnext_core_records SET fingerprint = 'sha256:${"0".repeat(64)}' WHERE record_id = ?`,
+      "UPDATE vnext_core_records SET project_id = 'project:foreign' WHERE record_id = ?",
+    ]) {
+      fixture.db.exec("SAVEPOINT retained_source_fault");
+      assert.throws(() => fixture.db.prepare(sql).run(original.packet_id), /vnext_core_records_immutable/u);
+      // Fault injection only in this disposable savepoint. Restore the exact
+      // owner triggers before readers run, so refusal tests exercise source
+      // integrity rather than missing-schema checks.
+      const triggers = fixture.db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN ('trg_vnext_core_records_immutable_update', 'trg_vnext_core_records_immutable_delete')").all() as { name: string; sql: string }[];
+      assert.equal(triggers.length, 2);
+      for (const trigger of triggers) fixture.db.exec(`DROP TRIGGER ${trigger.name}`);
+      fixture.db.prepare(sql).run(original.packet_id);
+      for (const trigger of triggers) fixture.db.exec(trigger.sql);
+      const broken = fixture.db.serialize();
+      assert.throws(() => inspectPreExecutionProjectWorkRevisionChainV01(fixture.db, fixture));
+      // A fresh connection verifies writer refusal after the lookup, outside the
+      // fault-injection savepoint; the refusal itself leaves it byte-identical.
+      const missing = new Database(broken);
+      try {
+        assert.throws(() => revisePreExecutionProjectWorkV01(missing, { config: fixture.config, credential, request: staleRequest, clock: fixedClock("2026-08-01T00:00:20.000Z") }));
+        assert(broken.equals(missing.serialize()));
+      } finally { missing.close(); }
+      assert(broken.equals(fixture.db.serialize()));
+      fixture.db.exec("ROLLBACK TO retained_source_fault; RELEASE retained_source_fault");
+    }
+    assert.deepEqual(packetRows(fixture.db), historicalBytes);
+    write(readSelectedWorkSources(packet), "A changed current question requires a fresh historical comparison");
+    const beforeStale = fixture.db.serialize();
+    assert.throws(() => revisePreExecutionProjectWorkV01(fixture.db, { config: fixture.config, credential, request: staleRequest, clock: fixedClock("2026-08-01T00:00:20.000Z") }), /work_revision_current_packet_changed/u);
+    assert(beforeStale.equals(fixture.db.serialize()));
+    assert.deepEqual(packetRows(fixture.db).filter((row) => preparationBytes.some((prior) => prior.record_id === row.record_id)), preparationBytes);
+    // The boundary-5 actual-request branch above owns the representative full
+    // recovery check. This branch exercises the normal portable end path.
+    const exported = exportActivePortableProjectV01(fixture.db, { include_personal_perspective: false, exported_at: "2026-08-01T00:00:25.000Z" });
+    const portable = parseAndValidatePortableProjectV01(exported.bytes);
+    assert.equal(portable.records.length, packetRows(fixture.db).length);
+    const importedDb = new Database(":memory:");
+    try {
+      importedDb.pragma("foreign_keys = ON");
+      applyCanonicalDatabaseMigrations(importedDb);
+      const destinationRoot = path.join(ROOT, "recall-portable");
+      mkdirSync(destinationRoot, { recursive: true });
+      const imported = importPortableProjectV01(importedDb, { bytes: exported.bytes, destination_root_base: destinationRoot, imported_at: "2026-08-01T00:00:26.000Z" });
+      assert.equal(imported.status, "imported");
+      assert.deepEqual(packetRows(importedDb), packetRows(fixture.db));
+      const importedChain = inspectPreExecutionProjectWorkRevisionChainV01(importedDb, fixture);
+      assert.deepEqual(recallRetainedWorkSources(importedChain, "valve leak"), recallRetainedWorkSources(inspectPreExecutionProjectWorkRevisionChainV01(fixture.db, fixture), "valve leak"));
+    } finally { importedDb.close(); }
+    console.log(JSON.stringify({ fixture: "retained_source_recall", fixture_preparation_ms: preparedMs, observations,
+      result_bounds: { count_limited: countLimited.omitted_matching_entries, byte_limited: byteLimited.omitted_matching_entries },
+      manual_actions: { recall: ["enter source/query words", "search", "select returned notes", "compare", "save revision"],
+        direct_read_good_note: ["inspect permitted historical packets", "find applicable notes and source bindings", "copy good notes", "compare", "save revision"] },
+      live_provider_calls: 0, billed_tokens: 0, disk_io_measured: false, human_burden_measured: false, live_utility_measured: false }));
+  } finally { fixture.db.close(); }
 }
 
 async function assertSelectedSourceNextWorkV01(): Promise<void> {

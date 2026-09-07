@@ -18,6 +18,15 @@ export interface SelectedWorkSourceInput {
 export interface SelectedWorkSourceSelection {
   selected_source_context: TaskContextPacketSelectedEntryV01[];
   expected_source_comparison: string;
+  retained_source_refs?: RetainedWorkSourceRef[];
+}
+
+/** Request-only lookup binding. The original packet entry is persisted unchanged. */
+export interface RetainedWorkSourceRef {
+  packet_id: string;
+  packet_fingerprint: string;
+  entry_id: string;
+  source_fingerprint: string;
 }
 
 export const PROJECT_WORK_REVISION_ELIGIBILITY_VERSION_V01 =
@@ -87,6 +96,7 @@ export interface RevisePreExecutionProjectWorkRequestV01 {
   /** Optional selected excerpts, encoded using the existing packet source-entry shape. */
   selected_source_context?: TaskContextPacketSelectedEntryV01[];
   expected_source_comparison?: string;
+  retained_source_refs?: RetainedWorkSourceRef[];
 }
 
 export interface RevisePreExecutionProjectWorkResultV01 {

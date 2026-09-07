@@ -108,7 +108,9 @@ const PROFILE_CONTRACTS = Object.freeze({
     core_insert_counts: Object.freeze({
       automation_work_item: 4,
       capability_grant: 1,
-      task_context_packet: 4,
+      // P1.5 adds exactly two explicit first-work revisions: exclude a note,
+      // then reselect it from retained history. All other effects stay exact.
+      task_context_packet: 6,
       run_receipt: 4,
       episode_delta_proposal: 4,
       context_use_review: 1,
@@ -128,7 +130,7 @@ const PROFILE_CONTRACTS = Object.freeze({
         autonomy_run_events: 52,
         autonomy_run_steps: 4,
         autonomy_runs: 4,
-        vnext_core_records: 18,
+        vnext_core_records: 20,
         vnext_local_operator_sessions: 4,
       }),
       updated: Object.freeze({ vnext_active_project_selections: 1 }),

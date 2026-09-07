@@ -5,7 +5,7 @@ import {
   normalizeExternalRefPrimitiveV01,
 } from "@/lib/vnext/protocol-primitives";
 import type { TaskContextPacketSelectedEntryV01, TaskContextPacketV01 } from "@/types/vnext/task-context-packet";
-import { SELECTED_WORK_SOURCE_LABELS, type SelectedWorkSourceInput } from "@/types/vnext/project-work-revision";
+import { SELECTED_WORK_SOURCE_LABELS, type SelectedWorkSourceInput, type RetainedWorkSourceRef } from "@/types/vnext/project-work-revision";
 
 /** Bounded presentation over existing packet source entries; never a writer. */
 export const SELECTED_WORK_SOURCE_NAMESPACE = "augnes.selected-source-excerpt.v0.1";
@@ -108,8 +108,24 @@ export function normalizeSelectedWorkSources(scope: Scope, value: unknown): Task
   return entries;
 }
 
-export function compareSelectedWorkSources(packet: TaskContextPacketV01, selected: unknown) {
+export function normalizeRetainedWorkSourceRefs(value: unknown): RetainedWorkSourceRef[] {
+  if (!Array.isArray(value) || value.length > SELECTED_WORK_SOURCE_LIMITS.entries) fail();
+  const refs = new Map<string, RetainedWorkSourceRef>();
+  for (const ref of value) {
+    if (!ref || typeof ref !== "object" || Array.isArray(ref) ||
+      Object.keys(ref).sort().join(",") !== "entry_id,packet_fingerprint,packet_id,source_fingerprint" ||
+      typeof ref.packet_id !== "string" || !ref.packet_id || ref.packet_id.length > 256 ||
+      typeof ref.entry_id !== "string" || !/^selected-source:[a-f0-9]{64}$/u.test(ref.entry_id) ||
+      typeof ref.packet_fingerprint !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(ref.packet_fingerprint) ||
+      typeof ref.source_fingerprint !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(ref.source_fingerprint)) fail();
+    refs.set(canonicalizeProtocolValueV01(ref), { ...ref });
+  }
+  return [...refs.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, ref]) => ref);
+}
+
+export function compareSelectedWorkSources(packet: TaskContextPacketV01, selected: unknown, retainedRefs: unknown = []) {
   const entries = normalizeSelectedWorkSources(packet, selected);
+  const retained_source_refs = normalizeRetainedWorkSourceRefs(retainedRefs);
   const previous = readSelectedWorkSources(packet);
   const currentTexts = [packet.task.goal, ...packet.task.success_criteria, ...packet.task.non_goals];
   const rows = entries.map((entry) => ({
@@ -129,7 +145,9 @@ export function compareSelectedWorkSources(packet: TaskContextPacketV01, selecte
     fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01({
       workspace_id: packet.workspace_id, project_id: packet.project_id,
       packet_id: packet.packet_id, packet_fingerprint: packet.integrity.fingerprint, entries,
+      ...(retained_source_refs.length ? { retained_source_refs } : {}),
     })),
+    retained_source_refs,
     rows,
     unselected_previous: previous.filter((entry) => !entries.some((next) => next.entry_id === entry.entry_id)),
     entries,
