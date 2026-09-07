@@ -49,6 +49,12 @@ import {
   validateDistributableManifest,
 } from "./distributable-package-contract.mjs";
 import { normalizedDependencyLock } from "./dependency-lock-compatibility.mjs";
+import {
+  MERGED_R8A_BUILD_ID,
+  MERGED_R8A_COMMIT,
+  MERGED_R8A_TREE,
+  applyMergedR8AFixtureBuildConfig,
+} from "./merged-r8a-fixture-build-config.mjs";
 import { resolveAugnesLocalPaths } from "./augnes-local-paths.mjs";
 import {
   bootstrapJournalPath,
@@ -87,9 +93,6 @@ const TEST_UI_PORT_RANGE = Object.freeze([20_000, 23_999]);
 const TEST_BRIDGE_PORT_RANGE = Object.freeze([24_000, 27_999]);
 const PACKAGE_MANAGER_NAMES = ["npm", "npx", "pnpm", "yarn", "bun"];
 const SQLITE_SIDE_SUFFIXES = ["-wal", "-shm", "-journal"];
-const MERGED_R8A_COMMIT =
-  "e3a35bb36457d5444e7601ba5e8ed416c9bf7c3a";
-const MERGED_R8A_TREE = "aef09f2e88096fc553755b8c7e3ddc814353e023";
 const MERGED_R8A_APPLICATION_VERSION = "0.1.0";
 const MERGED_R8A_SOURCE_SCHEMA_SIGNATURE =
   "800d9cdf741cf7b85362e8ee9c101b6b33d923a41ff1efdddc098e32df776a4a";
@@ -174,6 +177,7 @@ const durations = {};
 let packageRoot = null;
 let packageManifest = null;
 let mergedR8ABuildIdentity = null;
+let mergedR8AFixtureBuildConfiguration = null;
 let fakePackageManagerSentinel = null;
 let suiteError = null;
 let cleanupError = null;
@@ -419,6 +423,7 @@ if (focusedScenario !== null) {
           focusedScenario === "v1-handoff" ? MERGED_R8A_TREE : null,
         merged_r8a_build_identity:
           focusedScenario === "v1-handoff" ? mergedR8ABuildIdentity : null,
+        merged_r8a_fixture_build_configuration: mergedR8AFixtureBuildConfiguration,
         external_network_attempts:
           networkGuard.attempts.length + childNetworkEvidence.blockedAttempts,
         owned_processes_after: 0,
@@ -454,6 +459,7 @@ if (focusedScenario !== null) {
       current_database_restart_verified: true,
       compatible_different_build_handoff_verified: true,
       actual_merged_r8a_package_handoff_verified: true,
+      merged_r8a_fixture_build_configuration: mergedR8AFixtureBuildConfiguration,
       packaged_old_schema_update_verified: true,
       verified_recovery_backup_and_atomic_restore: true,
       product_recovery_action_verified: true,
@@ -1947,6 +1953,11 @@ async function buildMergedR8APackage() {
     timeoutMs: 30_000,
   });
   assert.equal(extractedSource.code, 0, extractedSource.output);
+  mergedR8AFixtureBuildConfiguration = applyMergedR8AFixtureBuildConfig({
+    sourceRoot,
+    commit: MERGED_R8A_COMMIT,
+    tree: tree.stdout.trim(),
+  });
   assert.equal(
     JSON.parse(readFileSync(path.join(sourceRoot, "package.json"), "utf8"))
       .version,
@@ -1979,6 +1990,11 @@ async function buildMergedR8APackage() {
   });
   durations.merged_r8a_package_command_ms = Date.now() - packageStartedAt;
   assert.equal(packaged.code, 0, packaged.output);
+  assert.equal(
+    readFileSync(path.join(sourceRoot, ".next", "BUILD_ID"), "utf8").trim(),
+    MERGED_R8A_BUILD_ID,
+    "the historical Next build must consume the controlled build configuration",
+  );
   assert.equal(packaged.output.includes(PRIVATE_BUILD_SENTINEL), false);
   assert.deepEqual(packageDependencySnapshot(sourceRoot), dependencySnapshot);
   assert.deepEqual(
@@ -1998,6 +2014,10 @@ async function buildMergedR8APackage() {
   const root = findPackageRoot(unpackedRoot, artifactPath);
   assertOutsideRepository(root, "merged R8A unpacked package root");
   const manifest = await validateMergedR8APackageContents(root);
+  assert.equal(readFileSync(path.join(root, ".next", "BUILD_ID"), "utf8").trim(),
+    MERGED_R8A_BUILD_ID);
+  assert(manifest.files.some((entry) => entry.path ===
+    `.next/static/${MERGED_R8A_BUILD_ID}/_buildManifest.js`));
   applyRestrictiveExtractionModes(root, manifest);
   return { root, manifest };
 }

@@ -19,6 +19,7 @@ import { createRequire } from "node:module";
 import net from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
+import { chooseBrowserPorts } from "./browser-preferred-ports.mjs";
 import {
   TASK_CONTEXT_PACKET_FIXTURE_EXPIRES_AT,
   TASK_CONTEXT_PACKET_FIXTURE_GENERATED_AT,
@@ -570,11 +571,7 @@ async function main() {
   result.active_packet_id = activePacketId;
   result.active_packet_fingerprint = activePacketFingerprint;
 
-  appPort = await chooseAvailablePort();
-  do bridgePort = await chooseAvailablePort(); while (bridgePort === appPort);
-  do debugPort = await chooseAvailablePort(); while (
-    debugPort === appPort || debugPort === bridgePort
-  );
+  ({ app: appPort, bridge: bridgePort, debug: debugPort } = await chooseBrowserPorts());
   appOrigin = `http://127.0.0.1:${appPort}`;
   const runtimeEnvironment = isolatedRuntimeEnvironment({
     databasePath,
@@ -4364,20 +4361,6 @@ async function waitForHttp(url, timeoutMs) {
     await delay(200);
   }
   throw new Error("Timed out waiting for the loopback runtime.");
-}
-
-async function chooseAvailablePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      server.close(() => {
-        if (address && typeof address === "object") resolve(address.port);
-        else reject(new Error("Unable to allocate a loopback port."));
-      });
-    });
-  });
 }
 
 async function runCapture(command, args, { cwd, env, timeoutMs }) {

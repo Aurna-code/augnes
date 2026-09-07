@@ -1389,6 +1389,7 @@ requireText(
   "canonical child Windows repository-root authorization is not forwarded",
 );
 for (const [pathName, timeout] of [
+  ["scripts/test-operational-continuation-admission.ts", "60_000"],
   ["scripts/test-vnext-operator-pure-contracts-v0-1.ts", "30_000"],
   ["scripts/test-codex-qualified-runtime-registry.ts", "30_000"],
   ["scripts/test-codex-ordinary-runtime-candidate.ts", "30_000"],
