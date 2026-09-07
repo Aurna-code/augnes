@@ -1,5 +1,24 @@
-import type { TaskContextPacketV01 } from "./task-context-packet";
+import type { TaskContextPacketSelectedEntryV01, TaskContextPacketV01 } from "./task-context-packet";
 import type { ProjectWorkDefinitionV01 } from "./project-work-initialization";
+
+export const SELECTED_WORK_SOURCE_LABELS = [
+  "Changed assumption / user correction", "New candidate", "Rejection reason",
+  "Deferred item / revisit condition", "Open question", "Next check", "Unclassified / needs review",
+] as const;
+
+/** Ephemeral user input; persistence uses existing TaskContextPacket source entries. */
+export interface SelectedWorkSourceInput {
+  source: string;
+  observed_at: string | null;
+  provenance: "user_declaration" | "derived_interpretation" | "imported_unverified";
+  label: (typeof SELECTED_WORK_SOURCE_LABELS)[number];
+  text: string;
+}
+
+export interface SelectedWorkSourceSelection {
+  selected_source_context: TaskContextPacketSelectedEntryV01[];
+  expected_source_comparison: string;
+}
 
 export const PROJECT_WORK_REVISION_ELIGIBILITY_VERSION_V01 =
   "project_work_revision_eligibility.v0.1" as const;
@@ -65,6 +84,9 @@ export interface RevisePreExecutionProjectWorkRequestV01 {
   goal: string;
   success_criteria: string[];
   non_goals: string[];
+  /** Optional selected excerpts, encoded using the existing packet source-entry shape. */
+  selected_source_context?: TaskContextPacketSelectedEntryV01[];
+  expected_source_comparison?: string;
 }
 
 export interface RevisePreExecutionProjectWorkResultV01 {

@@ -1,6 +1,7 @@
 import { accessSync, constants, statSync } from "node:fs";
 
 import type Database from "better-sqlite3";
+import { readSelectedWorkSources } from "@/lib/intake/selected-work-source-comparison";
 
 import {
   assertVNextDurableSemanticStoreSchemaV01,
@@ -363,6 +364,7 @@ function readProjectWorkInitializationStrictV01(
           : current.lineage_kind === "semantic_transition"
             ? "current_transition_packet"
             : "current_operational_continuation_packet";
+    const selectedSources = readSelectedWorkSources(current.packet);
     return {
       ...baseV01(
         input,
@@ -373,6 +375,9 @@ function readProjectWorkInitializationStrictV01(
       state,
       reason,
       current_work: structuredClone(current.packet.task),
+      ...(selectedSources.length > 0
+        ? { selected_source_context: selectedSources }
+        : {}),
       current_packet: {
         packet_id: current.packet.packet_id,
         packet_fingerprint: current.packet.integrity.fingerprint,

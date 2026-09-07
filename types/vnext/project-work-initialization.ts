@@ -1,4 +1,4 @@
-import type { TaskContextPacketV01 } from "./task-context-packet";
+import type { TaskContextPacketSelectedEntryV01, TaskContextPacketV01 } from "./task-context-packet";
 import type { ProjectWorkRevisionEligibilityV01 } from "./project-work-revision";
 
 export const PROJECT_WORK_INITIALIZATION_VERSION_V01 =
@@ -57,6 +57,7 @@ export interface ProjectWorkInitializationV01 {
   active_project_id: string | null;
   active_selection_revision: number | null;
   current_work: ProjectWorkDefinitionV01 | null;
+  selected_source_context?: TaskContextPacketSelectedEntryV01[];
   current_packet: null | {
     packet_id: string;
     packet_fingerprint: string;

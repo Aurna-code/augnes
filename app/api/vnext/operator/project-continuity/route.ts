@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { NextResponse } from "next/server";
+import { buildSelectedWorkSourceEntry, compareSelectedWorkSources, SelectedWorkSourceError } from "@/lib/intake/selected-work-source-comparison";
 
 import {
   VNextLocalOperatorSessionErrorV01,
@@ -31,7 +32,7 @@ import {
   ProjectWorkRevisionErrorV01,
   revisePreExecutionProjectWorkV01,
 } from "@/lib/vnext/runtime/project-work-revision";
-import { PreExecutionProjectWorkRevisionErrorV01 } from "@/lib/vnext/runtime/pre-execution-project-work-revision";
+import { PreExecutionProjectWorkRevisionErrorV01, inspectPreExecutionProjectWorkRevisionChainV01 } from "@/lib/vnext/runtime/pre-execution-project-work-revision";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -128,6 +129,23 @@ export function createVNextOperatorContextUseReviewHandlerV01(
       const credential = readVNextLocalOperatorCredentialFromRequestV01(request);
       db = (options.open_database ?? openVNextLocalOperatorDatabaseV01)(config);
       const body = await readBoundedVNextLocalOperatorBodyV01(request);
+      if (body.action === "compare_selected_work_sources") {
+        authenticateVNextLocalOperatorSessionV01(db, { config, credential, clock: options.clock });
+        if (Object.keys(body).sort().join(",") !== "action,expected_current_packet_fingerprint,expected_current_packet_id,notes" ||
+          !Array.isArray(body.notes) || body.notes.length > 8) {
+          throw new ProjectWorkRevisionErrorV01("selected_source_context_invalid", 400);
+        }
+        const comparison = db.transaction(() => {
+          const chain = inspectPreExecutionProjectWorkRevisionChainV01(db!, config);
+          if (!chain.projection_current || chain.tip_packet.packet_id !== body.expected_current_packet_id ||
+            chain.tip_packet.integrity.fingerprint !== body.expected_current_packet_fingerprint) {
+            throw new ProjectWorkRevisionErrorV01("work_revision_current_packet_changed", 409);
+          }
+          return compareSelectedWorkSources(chain.tip_packet,
+            (body.notes as unknown[]).map((note) => buildSelectedWorkSourceEntry(config, note)));
+        })();
+        return jsonResponse({ ok: true, status: "selected_source_comparison", comparison, projection_is_read_only: true });
+      }
       if (body.action === "define_initial_project_work") {
         const result = defineInitialProjectWorkV01(db, {
           config,
@@ -250,6 +268,7 @@ function errorResponse(error: unknown): NextResponse {
     error instanceof VNextOperatorPilotContinuityErrorV01 ||
     error instanceof VNextOperatorPilotContextUseReviewErrorV01 ||
     error instanceof ProjectWorkRevisionErrorV01 ||
+    error instanceof SelectedWorkSourceError ||
     error instanceof PreExecutionProjectWorkRevisionErrorV01 ||
     isProjectWorkInitializationErrorV01(error);
   const disabled =

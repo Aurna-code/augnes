@@ -434,6 +434,37 @@ await runOperatorExecutionBrowserChildV1({
         'textarea[name="work-revision-non-goals"]',
         "",
       );
+      const selectedCorrection = "User correction: reject A only under X; Y remains untested. Defer Y until B arrives. Open question: does Z matter? Next check: compare X and Y with B.";
+      await lifecycle.evaluateBoolean(`(() => {
+        const details = document.querySelector('[data-selected-work-sources]');
+        if (!(details instanceof HTMLDetailsElement)) return false;
+        details.open = true; return true;
+      })()`);
+      await lifecycle.setFormControlValue('#selected-note-source', 'Selected conversation, revision 2');
+      await lifecycle.setFormControlValue('#selected-note-provenance', 'user_declaration');
+      await lifecycle.setFormControlValue('#selected-note-kind', 'Changed assumption / user correction');
+      await lifecycle.setFormControlValue('#selected-note-text', selectedCorrection);
+      await lifecycle.evaluateBoolean(`(() => {
+        document.querySelector('[data-selected-source-action="add"]').click(); return true;
+      })()`);
+      await lifecycle.waitForCondition(
+        `document.querySelector('[data-work-revision-action="save"]')?.disabled === true && document.querySelector('[data-selected-work-sources]')?.textContent?.includes(${JSON.stringify(selectedCorrection)}) === true`,
+        "selected notes require a current comparison",
+      );
+      const comparisonDatabase = new Database(fixture.writable_database_path, { readonly: true, fileMustExist: true });
+      try {
+        const beforeComparison = comparisonDatabase.serialize();
+        await lifecycle.evaluateBoolean(`(() => {
+          document.querySelector('[data-selected-source-action="compare"]').click(); return true;
+        })()`);
+        await lifecycle.waitForCondition(
+          `document.querySelector('[data-selected-work-sources] [role="status"]')?.textContent?.includes('1 selected') === true`,
+          "selected notes compared without persistence",
+        );
+        assert(beforeComparison.equals(comparisonDatabase.serialize()), "Browser comparison must write no database state");
+      } finally {
+        comparisonDatabase.close();
+      }
       await lifecycle.waitForCondition(
         `document.querySelector('[data-work-revision-action="save"]:not(:disabled)') !== null`,
         "valid Korean revision",
@@ -454,6 +485,15 @@ await runOperatorExecutionBrowserChildV1({
         ),
         { ...beforeCancel, packets: 2 },
       );
+      const selectedReadback = await lifecycle.evaluateJson(`(async () => {
+        const response = await fetch('/api/vnext/operator/semantic-review', { cache: 'no-store' });
+        return (await response.json()).work_initialization.selected_source_context;
+      })()`);
+      assert.equal(selectedReadback.length, 1);
+      assert.equal(selectedReadback[0].bounded_summary, selectedCorrection);
+      assert.equal(selectedReadback[0].compatibility_source_ref.external_id, 'Selected conversation, revision 2');
+      assert.equal(selectedReadback[0].trust_class, 'user_declaration');
+      assert.equal(selectedReadback[0].currentness.status, 'unknown');
 
       const sessionSentinel = "SESSION-BOUND-UNSAVED-REVISION";
       await lifecycle.evaluateBoolean(`(() => {
@@ -536,6 +576,7 @@ await runOperatorExecutionBrowserChildV1({
       const revisionViewports = [
         [1440, 1000],
         [1280, 900],
+        [768, 1024],
         [430, 932],
         [390, 844],
       ];
@@ -590,6 +631,7 @@ await runOperatorExecutionBrowserChildV1({
           mobile: width < 600,
         });
         const editorMetrics = await lifecycle.evaluateJson(`(() => {
+          document.querySelector('[data-selected-work-sources]').open = true;
           const save = document.querySelector('[data-work-revision-action="save"]');
           const cancel = document.querySelector('[data-work-revision-action="cancel"]');
           const primary = [...document.querySelectorAll('[data-augnes-primary-action]')]

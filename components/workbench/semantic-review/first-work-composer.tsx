@@ -8,6 +8,8 @@ import type {
 } from "@/types/vnext/project-work-initialization";
 import { INITIAL_PROJECT_WORK_LIMITS_V01 } from "@/types/vnext/project-work-initialization";
 import { SEMANTIC_VISUAL_PRIORITY } from "@/lib/vnext/semantic-visual/semantic-visual-contract";
+import { SelectedWorkSourceEditor } from "./selected-work-source-editor";
+import type { SelectedWorkSourceSelection } from "@/types/vnext/project-work-revision";
 
 import styles from "./semantic-review.module.css";
 
@@ -21,7 +23,7 @@ export function FirstWorkComposer({
 }: {
   initialization: ProjectWorkInitializationV01;
   busy: boolean;
-  onSave: (definition: ProjectWorkDefinitionV01) => Promise<void>;
+  onSave: (definition: ProjectWorkDefinitionV01, selection?: SelectedWorkSourceSelection) => Promise<void>;
   mode?: "initial" | "revision";
   initialDefinition?: ProjectWorkDefinitionV01;
   onCancel?: () => void;
@@ -34,6 +36,8 @@ export function FirstWorkComposer({
     initialDefinition?.non_goals.join("\n") ?? "",
   );
   const goalRef = useRef<HTMLTextAreaElement>(null);
+  const [sourceSelection, setSourceSelection] = useState<SelectedWorkSourceSelection | null>(null);
+  const [sourcesPending, setSourcesPending] = useState(false);
   const definition = useMemo(
     () => ({
       goal: goal.trim(),
@@ -46,7 +50,7 @@ export function FirstWorkComposer({
   const unchanged =
     mode === "revision" &&
     initialDefinition !== undefined &&
-    sameDefinitionV01(definition, initialDefinition);
+    sameDefinitionV01(definition, initialDefinition) && sourceSelection === null;
   const prefix = mode === "revision" ? "work-revision" : "first-work";
 
   useEffect(() => {
@@ -86,8 +90,8 @@ export function FirstWorkComposer({
         noValidate
         onSubmit={(event) => {
           event.preventDefault();
-          if (issues.length > 0 || busy || unchanged) return;
-          void onSave(definition);
+          if (issues.length > 0 || busy || unchanged || sourcesPending) return;
+          void onSave(definition, sourceSelection ?? undefined);
         }}
       >
         <label htmlFor={`${prefix}-goal`}>Goal</label>
@@ -138,11 +142,13 @@ export function FirstWorkComposer({
             {issues[0]!.message}
           </p>
         ) : null}
+        {mode === "revision" ? <SelectedWorkSourceEditor initialization={initialization} busy={busy}
+          onChange={(selection, pending) => { setSourceSelection(selection); setSourcesPending(pending); }} /> : null}
         <div className={styles.buttonRow}>
           <button
             type="submit"
             className={styles.button}
-            disabled={issues.length > 0 || busy || unchanged}
+            disabled={issues.length > 0 || busy || unchanged || sourcesPending}
             data-first-work-action={mode === "initial" ? "save" : undefined}
             data-work-revision-action={mode === "revision" ? "save" : undefined}
             data-augnes-primary-action={
