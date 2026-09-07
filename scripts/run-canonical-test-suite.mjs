@@ -171,7 +171,10 @@ const suites = {
       label:
         "authenticated source-linked continuation admission and fresh managed Start contract",
       ...rootNode("scripts/test-operational-continuation-admission.ts"),
-      timeoutMs: 45_000,
+      // #1224: prospective whole-child headroom for the complete verification.
+      // This relaxes 45s to 60s, allowing 15s more before timeout handling;
+      // it is not a speedup or a resolution of the historical timeout cause.
+      timeoutMs: 60_000,
     },
     {
       label:
