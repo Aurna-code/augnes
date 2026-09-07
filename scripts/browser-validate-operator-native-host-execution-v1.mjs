@@ -709,6 +709,80 @@ await runOperatorExecutionBrowserChildV1({
       result.work_revision_saved_without_execution = true;
       completeDetailedField("work_revision_saved_without_execution");
 
+      // P1.5: explicitly exclude the note, then find it from saved history and
+      // deliberately reselect through the real UI/comparison/revision route.
+      const recallDb = new Database(fixture.writable_database_path, { readonly: true, fileMustExist: true });
+      const historicalNotePackets = recallDb.prepare("SELECT record_id, payload_json FROM vnext_core_records WHERE project_id = ? AND record_kind = 'task_context_packet' ORDER BY record_id").all(firstWorkProjectId);
+      try {
+        await lifecycle.evaluateBoolean(`(() => { document.querySelector('[data-work-revision-action="open"]').click(); return true; })()`);
+        await lifecycle.waitForCondition(`document.querySelector('[data-selected-source-action="exclude"]') !== null`, "saved selected note available for exclusion");
+        await lifecycle.evaluateBoolean(`(() => {
+          document.querySelector('[data-selected-work-sources]').open = true;
+          document.querySelector('[data-selected-source-action="exclude"]').click(); return true;
+        })()`);
+        await lifecycle.evaluateBoolean(`(() => { document.querySelector('[data-selected-source-action="compare"]').click(); return true; })()`);
+        await lifecycle.waitForCondition(`document.querySelector('[data-selected-work-sources] [role="status"]')?.textContent.includes('0 selected') === true`, "explicit exclusion compared");
+        await lifecycle.evaluateBoolean(`(() => { document.querySelector('[data-work-revision-composer] form').requestSubmit(); return true; })()`);
+        await lifecycle.waitForCondition(`document.querySelector('[data-work-revision-composer]') === null`, "explicit note exclusion saved");
+        assert.equal(readFirstWorkState(fixture.writable_database_path, firstWorkProjectId).packets, 3);
+        const excludedInitialization = await lifecycle.evaluateJson(`(async () => {
+          const response = await fetch('/api/vnext/operator/semantic-review', { cache: 'no-store' });
+          return (await response.json()).work_initialization;
+        })()`);
+        assert.deepEqual(excludedInitialization.selected_source_context ?? [], []);
+        await lifecycle.evaluateBoolean(`(() => { document.querySelector('[data-work-revision-action="open"]').click(); return true; })()`);
+        await lifecycle.waitForCondition(`document.querySelector('[data-retained-work-sources]') !== null`, "retained note search in existing revision form");
+        await lifecycle.evaluateBoolean(`(() => {
+          document.querySelector('[data-selected-work-sources]').open = true;
+          document.querySelector('[data-retained-work-sources]').open = true; return true;
+        })()`);
+        await lifecycle.setFormControlValue('#retained-source-query', 'conversation');
+        await lifecycle.waitForCondition(`document.querySelector('[data-retained-source-action="search"]:not(:disabled)') !== null`, "retained source query ready");
+        const beforeLookup = recallDb.serialize();
+        await lifecycle.evaluateBoolean(`(() => { document.querySelector('[data-retained-source-action="search"]').click(); return true; })()`);
+        await lifecycle.waitForCondition(`document.querySelector('[data-retained-source-results]') !== null || document.querySelector('[data-retained-work-sources] [role="alert"]') !== null`, "retained source lookup answered");
+        const lookupView = await lifecycle.evaluateJson(`(() => ({
+          error: document.querySelector('[data-retained-work-sources] [role="alert"]')?.textContent ?? null,
+          historical_note: document.querySelector('[data-retained-source-results]')?.textContent.includes('Historical — not selected in current work') === true,
+          query: document.querySelector('#retained-source-query')?.value
+        }))()`);
+        assert.equal(lookupView.error, null, JSON.stringify(lookupView));
+        assert.equal(lookupView.historical_note, true, JSON.stringify(lookupView));
+        assert(beforeLookup.equals(recallDb.serialize()), "Historical lookup writes nothing and does not reselect notes");
+        assert.equal(await lifecycle.evaluateBoolean(`document.querySelector('[data-selected-source-action="exclude"]') === null`), true);
+        for (const [width, height] of revisionViewports) {
+          await lifecycle.cdp().send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 600 });
+          assert.equal(await lifecycle.evaluateBoolean(`document.documentElement.scrollWidth <= window.innerWidth + 1 && document.querySelector('[data-retained-source-results]')?.textContent.includes(${JSON.stringify(selectedCorrection)}) === true`), true);
+        }
+        const staleLookup = await lifecycle.evaluateJson(`(async () => {
+          const old = ${JSON.stringify(staleInitialization)};
+          const response = await fetch('/api/vnext/operator/project-continuity', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'lookup_retained_work_sources', query: 'conversation',
+              expected_active_project_id: old.active_project_id, expected_active_selection_revision: old.active_selection_revision,
+              expected_current_packet_id: old.current_packet.packet_id, expected_current_packet_fingerprint: old.current_packet.packet_fingerprint })
+          });
+          return { status: response.status, body: await response.json() };
+        })()`);
+        assert.equal(staleLookup.status, 409);
+        assert.equal(staleLookup.body.error_code, 'work_revision_current_packet_changed');
+        assert(beforeLookup.equals(recallDb.serialize()), "Stale historical lookup refuses without writes");
+        await lifecycle.evaluateBoolean(`(() => { document.querySelector('[data-retained-source-action="select"]').click(); return true; })()`);
+        await lifecycle.waitForCondition(`document.querySelector('[data-selected-source-action="exclude"]') !== null && document.querySelector('[data-work-revision-action="save"]')?.disabled === true`, "historical selection requires fresh comparison");
+        await lifecycle.evaluateBoolean(`(() => { document.querySelector('[data-selected-source-action="compare"]').click(); return true; })()`);
+        await lifecycle.waitForCondition(`document.querySelector('[data-selected-work-sources] > [role="status"]')?.textContent.includes('1 selected') === true`, "reselected history compared against current work");
+        assert(beforeLookup.equals(recallDb.serialize()), "Reselection comparison remains zero-write");
+        await lifecycle.evaluateBoolean(`(() => { document.querySelector('[data-work-revision-composer] form').requestSubmit(); return true; })()`);
+        await lifecycle.waitForCondition(`document.querySelector('[data-work-revision-composer]') === null`, "reselected historical note saved by existing writer");
+        const recalledReadback = await lifecycle.evaluateJson(`(async () => {
+          const response = await fetch('/api/vnext/operator/semantic-review', { cache: 'no-store' });
+          return (await response.json()).work_initialization.selected_source_context;
+        })()`);
+        assert.deepEqual(recalledReadback, selectedReadback, "Original excerpt identity, provenance, chronology and conditions survive actual reselection");
+        assert.equal(readFirstWorkState(fixture.writable_database_path, firstWorkProjectId).packets, 4);
+        assert.deepEqual(recallDb.prepare("SELECT record_id, payload_json FROM vnext_core_records WHERE project_id = ? AND record_kind = 'task_context_packet' ORDER BY record_id").all(firstWorkProjectId).filter((row) => historicalNotePackets.some((prior) => prior.record_id === row.record_id)), historicalNotePackets);
+      } finally { recallDb.close(); }
+
       await lifecycle.navigate(`${appOrigin}/`);
       await lifecycle.waitForCondition(
         `document.querySelector('[data-blank-state="v0.1"]')?.textContent?.includes(${JSON.stringify(firstRevisionGoal)}) === true && document.querySelector('[data-blank-state-focus="first_work_not_defined"]') === null`,
@@ -918,7 +992,7 @@ await runOperatorExecutionBrowserChildV1({
       assert.deepEqual(
         readFirstWorkState(fixture.writable_database_path, firstWorkProjectId),
         {
-          packets: 3,
+          packets: 5,
           receipts: 0,
           proposals: 0,
           decisions: 0,
@@ -970,7 +1044,7 @@ await runOperatorExecutionBrowserChildV1({
       assert.equal(firstRun.first_work_definition_id, null);
       assert.match(
         firstRun.work_definition_revision_id,
-        /^work-definition-revision:2:/u,
+        /^work-definition-revision:4:/u,
       );
       const initialTurnStart = traceEntries(prepared.approval_trace_path).find(
         (entry) =>

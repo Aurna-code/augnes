@@ -166,6 +166,16 @@ assert.doesNotThrow(() =>
     result,
   ),
 );
+for (const delta of [-1, 1]) {
+  const changedPackets = nativeSnapshots();
+  if (delta < 0) {
+    changedPackets.after.rows.splice(changedPackets.after.rows.findIndex((row) => row.identity.record_kind === "task_context_packet"), 1);
+  } else {
+    changedPackets.after.rows.push(coreRow("task_context_packet", "packet:unexpected-extra"));
+  }
+  assert.throws(() => validate(changedPackets.before, changedPackets.after, { ...manifest, profile: "native_host_execution" }, result),
+    /operator_effect_core_kind_set_mismatch/u, "Retained-source revisions must have the exact bounded packet effects");
+}
 const wrongEvent = nativeSnapshots();
 wrongEvent.after.rows.find((entry) => entry.table === "autonomy_run_events")
   .identity.event_type = "run_event_replaced_at_equal_count";
@@ -290,7 +300,7 @@ function nativeSnapshots() {
   const coreCounts = {
     automation_work_item: 4,
     capability_grant: 1,
-    task_context_packet: 4,
+    task_context_packet: 6,
     run_receipt: 4,
     episode_delta_proposal: 4,
     context_use_review: 1,

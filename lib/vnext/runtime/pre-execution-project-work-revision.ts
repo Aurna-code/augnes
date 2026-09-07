@@ -86,6 +86,8 @@ export interface PreExecutionProjectWorkChainInspectionV01 {
   projection_current: boolean;
   origin_first_work_definition_ref: ExternalRefV01;
   packet_ids: string[];
+  /** Already validated, chronological snapshots for bounded read projections. */
+  packets: TaskContextPacketV01[];
 }
 
 export function createPreExecutionProjectWorkRevisionMaterialV01(input: {
@@ -515,6 +517,7 @@ export function inspectPreExecutionProjectWorkRevisionChainV01(
     projection_current: projectionCurrent,
     origin_first_work_definition_ref: genesisLineage.definition_ref,
     packet_ids: [genesis.packet_id, ...ordered.map((entry) => entry.packet.packet_id)],
+    packets: [genesis, ...ordered.map((entry) => entry.packet)],
   };
 }
 

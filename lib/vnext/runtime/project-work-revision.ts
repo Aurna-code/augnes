@@ -1,7 +1,8 @@
 import { accessSync, constants, statSync } from "node:fs";
 
 import type Database from "better-sqlite3";
-import { compareSelectedWorkSources, normalizeSelectedWorkSources, readSelectedWorkSources } from "@/lib/intake/selected-work-source-comparison";
+import { compareSelectedWorkSources, normalizeRetainedWorkSourceRefs, normalizeSelectedWorkSources, readSelectedWorkSources, SelectedWorkSourceError } from "@/lib/intake/selected-work-source-comparison";
+import { resolveRetainedWorkSources } from "@/lib/intake/retained-work-source-recall";
 
 import {
   assertVNextDurableSemanticStoreSchemaV01,
@@ -314,9 +315,15 @@ export function revisePreExecutionProjectWorkV01(
     if (request.selected_source_context !== undefined) {
       const comparisonPacket = chain.tip_packet.packet_id === request.expected_current_packet_id
         ? chain.tip_packet : chain.tip_revision?.prior_packet;
+      const cutoff = chain.packets.findIndex((packet) => packet.packet_id === comparisonPacket?.packet_id);
+      const retained = resolveRetainedWorkSources({ ...chain, packets: chain.packets.slice(0, cutoff + 1) }, request.retained_source_refs ?? []);
+      if (retained.entries.some((entry) => !request.selected_source_context!.some((selected) =>
+        canonicalizeProtocolValueV01(selected) === canonicalizeProtocolValueV01(entry)))) {
+        refuse("retained_source_selection_changed", 409);
+      }
       if (!comparisonPacket || comparisonPacket.packet_id !== request.expected_current_packet_id ||
         comparisonPacket.integrity.fingerprint !== request.expected_current_packet_fingerprint ||
-        compareSelectedWorkSources(comparisonPacket, request.selected_source_context).fingerprint !== request.expected_source_comparison) {
+        compareSelectedWorkSources(comparisonPacket, request.selected_source_context, retained.refs).fingerprint !== request.expected_source_comparison) {
         refuse("work_revision_source_comparison_changed", 409);
       }
     }
@@ -428,7 +435,8 @@ export function revisePreExecutionProjectWorkV01(
     if (
       error instanceof ProjectWorkRevisionErrorV01 ||
       error instanceof PreExecutionProjectWorkRevisionErrorV01 ||
-      error instanceof VNextLocalOperatorSessionErrorV01
+      error instanceof VNextLocalOperatorSessionErrorV01 ||
+      error instanceof SelectedWorkSourceError
     ) {
       throw error;
     }
@@ -532,7 +540,7 @@ function parseRequestV01(value: unknown): RevisePreExecutionProjectWorkRequestV0
   }
   const request = { ...value } as Record<string, unknown>;
   const optionalKeys = request.selected_source_context === undefined
-    ? [] : ["selected_source_context", "expected_source_comparison"];
+    ? [] : ["selected_source_context", "expected_source_comparison", ...(request.retained_source_refs !== undefined ? ["retained_source_refs"] : [])];
   if (
     canonicalizeProtocolValueV01(Object.keys(request).sort()) !==
       canonicalizeProtocolValueV01([...REQUEST_KEYS, ...optionalKeys].sort()) ||
@@ -560,6 +568,7 @@ function parseRequestV01(value: unknown): RevisePreExecutionProjectWorkRequestV0
     }
     request.selected_source_context = normalizeSelectedWorkSources(
       { workspace_id: request.workspace_id as string, project_id: request.project_id as string }, request.selected_source_context);
+    if (request.retained_source_refs !== undefined) request.retained_source_refs = normalizeRetainedWorkSourceRefs(request.retained_source_refs);
   }
   return request as unknown as RevisePreExecutionProjectWorkRequestV01;
 }
