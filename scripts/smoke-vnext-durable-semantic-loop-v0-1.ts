@@ -2818,6 +2818,12 @@ function runSparseContextCompilerCoverage(
   assert(sparseCompiled.later_packet.excluded_context.every((entry) =>
     entry.why_excluded === "Excluded by the explicit selected-context budget." &&
     sparseCompiled.current_state_entries.some((state) => state.state_fingerprint === entry.source_ref)));
+  assertCompilerValidationInvocationBoundaryV01(
+    opened,
+    compilerInput(lastScenario, sparsePrior, lastReceipt!, DURABLE_LOCAL_LOOP_LATER_PACKET_GENERATED_AT),
+    sparseCompiled.later_packet,
+    appliedStates[0]!.receipt,
+  );
   assert(validateTaskContextPacketTransitionRelationV01(sparsePrior,
     appliedStates[0]!.receipt, sparseCompiled.later_packet).errors.some(
       (issue) => issue.code === "transition_receipt_not_new_packet_source"));
@@ -4335,6 +4341,96 @@ function acceptedStateFixtureEntry(
     compatibility_source_ref: stateRef,
     bounded_summary: "Compatibility accepted-state fixture.",
   };
+}
+
+function assertCompilerValidationInvocationBoundaryV01(
+  opened: WriterCoverageDatabaseV01,
+  input: ReturnType<typeof compilerInput>,
+  expectedPacket: TaskContextPacketV01,
+  carriedReceipt: StateTransitionReceiptV01,
+): void {
+  const { database } = opened;
+  const baseline = readDatabaseSnapshot(database);
+  const otherPath = resolve(dirname(opened.path), "compiler-invocation-other-database.db");
+  const otherFiles = [otherPath, `${otherPath}-wal`, `${otherPath}-shm`];
+  for (const path of otherFiles) assert.equal(existsSync(path), false);
+  database.pragma("wal_checkpoint(TRUNCATE)");
+  copyFileSync(opened.path, otherPath);
+  let other: Database.Database | null = null;
+  const compile = (connection: Database.Database) => {
+    const freshInput = { ...input, clock: fixedClock(expectedPacket.generated_at) };
+    return connection.inTransaction
+      ? compileTaskContextPacketFromPersistedSemanticStateInsideTransactionV01(connection, freshInput)
+      : compileTaskContextPacketFromPersistedSemanticStateV01(connection, freshInput);
+  };
+  const assertReplay = (connection: Database.Database) => {
+    const before = readDatabaseSnapshot(connection);
+    const result = compile(connection);
+    assert.equal(result.status, "exact_replay");
+    assert.deepEqual(result.later_packet, expectedPacket);
+    assert.deepEqual(readDatabaseSnapshot(connection), before);
+  };
+  const removeCarriedGate = (connection: Database.Database) => {
+    connection.exec("DROP TRIGGER trg_vnext_core_records_immutable_delete");
+    assert.equal(connection.prepare("DELETE FROM vnext_core_records WHERE record_id = ?").run(
+      carriedReceipt.semantic_commit_gate.evaluation_ref.external_id,
+    ).changes, 1);
+    ensureVNextDurableSemanticStoreSchemaV01(connection);
+  };
+
+  // A caller may compile more than once before committing. Each invocation
+  // must discard source reuse even though the surrounding transaction survives.
+  database.exec("SAVEPOINT compiler_invocation_boundary");
+  try {
+    assertReplay(database);
+    for (const mutation of ["missing_gate", "head_revision"] as const) {
+      database.exec("SAVEPOINT compiler_source_mutation");
+      try {
+        if (mutation === "missing_gate") removeCarriedGate(database);
+        else {
+          assert.equal(database.prepare(`UPDATE vnext_semantic_target_heads
+            SET revision = revision + 1 WHERE workspace_id = ? AND project_id = ? AND target_key = ?`).run(
+            input.workspace_id, input.project_id,
+            deriveVNextSemanticTargetKeyV01(carriedReceipt.effects[0]!.target_ref),
+          ).changes, 1);
+        }
+        const mutated = readDatabaseSnapshot(database);
+        assertCompilerRefusalNoWrite(opened, () => compile(database), mutated,
+          mutation === "missing_gate" ? /persisted_semantic_commit_gate_missing/ : /semantic_target_head_projection_drift/,
+          `fresh compiler invocation rejects ${mutation} within the same transaction`);
+      } finally {
+        database.exec("ROLLBACK TO compiler_source_mutation; RELEASE compiler_source_mutation");
+      }
+      assertReplay(database);
+      assert.deepEqual(readDatabaseSnapshot(database), baseline);
+    }
+
+    // Identical record IDs and fingerprints on another connection cannot
+    // inherit validation performed against this database.
+    const copiedDatabase = new Database(otherPath, { fileMustExist: true });
+    other = copiedDatabase;
+    try {
+      assertReplay(copiedDatabase);
+      removeCarriedGate(copiedDatabase);
+      const otherMutated = readDatabaseSnapshot(copiedDatabase);
+      assert.throws(() => compile(copiedDatabase), /persisted_semantic_commit_gate_missing/);
+      assert.deepEqual(readDatabaseSnapshot(copiedDatabase), otherMutated);
+      assertReplay(database);
+    } finally {
+      copiedDatabase.close();
+    }
+  } finally {
+    database.exec("ROLLBACK TO compiler_invocation_boundary; RELEASE compiler_invocation_boundary");
+    if (other?.open) other.close();
+    for (const path of otherFiles) rmSync(path, { force: true });
+  }
+  for (const path of otherFiles) assert.equal(existsSync(path), false);
+  assert.deepEqual(readDatabaseSnapshot(database), baseline);
+  console.log(JSON.stringify({ compiler_validation_invocation: {
+    same_transaction_mutation_refused: ["missing_gate", "head_revision"],
+    valid_after_rollback: true, same_identity_other_database_revalidated: true,
+    replay_and_refusal_writes: 0,
+  } }));
 }
 
 function rebuildPacketV01(

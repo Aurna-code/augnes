@@ -44,9 +44,10 @@ import {
 } from "@/lib/vnext/project-controls/project-controls";
 import { readPersonalPerspectiveEffectiveScopeV01 } from "@/lib/vnext/persistence/project-control-store";
 import {
-  assertProjectVerifyLifecyclePersistedStateSourceBoundV01,
-  loadValidatedVNextSemanticTransitionRelationV01,
+  assertProjectVerifyLifecyclePersistedStateSourceBoundWithReadSessionV01,
+  createValidatedVNextSemanticTransitionRelationReadSessionV01,
   type ValidatedVNextSemanticTransitionRelationV01,
+  type VNextSemanticTransitionRelationReadSessionV01,
 } from "@/lib/vnext/runtime/durable-semantic-transition";
 import type { ExternalRefV01 } from "@/types/vnext/external-ref";
 import type {
@@ -376,9 +377,14 @@ function compileTaskContextPacketInternalV01(
     scope: personalPerspectiveScopeResolution.scope,
     candidates: input.personal_perspective_candidates ?? [],
   });
-  const transition = loadValidatedVNextSemanticTransitionRelationV01(db, {
-    workspace_id: input.workspace_id,
-    project_id: input.project_id,
+  // This invocation has finished reading the caller's clock and owns one
+  // synchronous validation interval inside the caller's transaction. Reuse
+  // exact immutable sources only until the packet insertion below: no writes
+  // or caller callbacks occur in between, and the loader never escapes this
+  // invocation, including when its surrounding transaction remains open.
+  const readTransition =
+    createValidatedVNextSemanticTransitionRelationReadSessionV01(db, input);
+  const transition = readTransition({
     transition_receipt_id: input.transition_receipt_id,
     transition_receipt_fingerprint: input.transition_receipt_fingerprint,
   });
@@ -390,6 +396,7 @@ function compileTaskContextPacketInternalV01(
     db,
     transition,
     currentStateEntries,
+    readTransition,
   );
   assertVNextSemanticProjectionPresenceV01(db, input);
   validatePersistedStateAndPriorSelections(
@@ -397,6 +404,7 @@ function compileTaskContextPacketInternalV01(
     transition,
     currentStateEntries,
     input.prior_packet,
+    readTransition,
   );
   const laterPacket = buildLaterPacket(
     input,
@@ -447,9 +455,7 @@ function compileTaskContextPacketInternalV01(
       ref.external_id === transition.receipt.transition_receipt_id &&
       ref.source_ref === transition.receipt.integrity.fingerprint
       ? transition
-      : loadValidatedVNextSemanticTransitionRelationV01(db, {
-          workspace_id: input.workspace_id,
-          project_id: input.project_id,
+      : readTransition({
           transition_receipt_id: ref.external_id,
           transition_receipt_fingerprint: ref.source_ref,
         });
@@ -526,6 +532,7 @@ function resolvePersistedEffectStates(
   db: Database.Database,
   transition: ValidatedVNextSemanticTransitionRelationV01,
   currentEntries: VNextSemanticStateProjectionEntryV01[],
+  readTransition: VNextSemanticTransitionRelationReadSessionV01,
 ): ResolvedPresentEffectV01[] {
   const currentByTarget = new Map(
     currentEntries.map((entry) => [entry.target_key, entry]),
@@ -574,7 +581,7 @@ function resolvePersistedEffectStates(
     ) {
       throw new Error("applied_semantic_state_projection_drift");
     }
-    const state = loadValidatedProjectionState(db, projection);
+    const state = loadValidatedProjectionState(db, projection, readTransition);
     if (
       state.target_key !== targetKey ||
       canonicalizeProtocolValueV01(state.target_ref) !==
@@ -616,6 +623,7 @@ function validatePersistedStateAndPriorSelections(
   transition: ValidatedVNextSemanticTransitionRelationV01,
   currentEntries: VNextSemanticStateProjectionEntryV01[],
   priorPacket: TaskContextPacketV01,
+  readTransition: VNextSemanticTransitionRelationReadSessionV01,
 ): void {
   const affectedTargetKeys = new Set(
     transition.receipt.effects.map((effect) =>
@@ -645,8 +653,12 @@ function validatePersistedStateAndPriorSelections(
   );
   for (const projection of currentEntries) {
     if (affectedTargetKeys.has(projection.target_key)) continue;
-    const sourceReceipt = assertProjectionHeadAndReceipt(db, projection);
-    const state = loadValidatedProjectionState(db, projection);
+    const sourceReceipt = assertProjectionHeadAndReceipt(
+      db,
+      projection,
+      readTransition,
+    );
+    const state = loadValidatedProjectionState(db, projection, readTransition);
     // Canonical integrity belongs to persisted state, heads and exact applied
     // lineage, even when this task did not select a state into its packet.
     if (
@@ -702,6 +714,7 @@ function validatePersistedStateAndPriorSelections(
 function loadValidatedProjectionState(
   db: Database.Database,
   projection: VNextSemanticStateProjectionEntryV01,
+  readTransition: VNextSemanticTransitionRelationReadSessionV01,
 ): VNextPersistedSemanticStateVersionV01 {
   const stateRecord = readVNextCoreRecordV01(db, {
     record_kind: "semantic_state",
@@ -740,12 +753,16 @@ function loadValidatedProjectionState(
   if (state.state_content.project_verify_lifecycle_binding) {
     const binding = state.state_content.project_verify_lifecycle_binding;
     const authenticated =
-      assertProjectVerifyLifecyclePersistedStateSourceBoundV01(db, {
-        state,
-        transition_receipt_id: projection.source_transition_receipt_id,
-        transition_receipt_fingerprint:
-          projection.source_transition_receipt_fingerprint,
-      });
+      assertProjectVerifyLifecyclePersistedStateSourceBoundWithReadSessionV01(
+        db,
+        {
+          state,
+          transition_receipt_id: projection.source_transition_receipt_id,
+          transition_receipt_fingerprint:
+            projection.source_transition_receipt_fingerprint,
+        },
+        readTransition,
+      );
     const intended = authenticated.gate_record.intended_effects.filter(
       (effect) =>
         canonicalizeProtocolValueV01(effect.target_ref) ===
@@ -797,6 +814,7 @@ function assertTargetHeadMatchesReceiptEffect(
 function assertProjectionHeadAndReceipt(
   db: Database.Database,
   projection: VNextSemanticStateProjectionEntryV01,
+  readTransition: VNextSemanticTransitionRelationReadSessionV01,
 ): StateTransitionReceiptV01 {
   const head = readRequiredTargetHead(
     db,
@@ -816,11 +834,9 @@ function assertProjectionHeadAndReceipt(
   ) {
     throw new Error("semantic_target_head_projection_drift");
   }
-  const transition = loadValidatedVNextSemanticTransitionRelationV01(db, {
+  const transition = readTransition({
     transition_receipt_id: head.source_transition_receipt_id,
     transition_receipt_fingerprint: head.source_transition_receipt_fingerprint,
-    workspace_id: projection.workspace_id,
-    project_id: projection.project_id,
   });
   const receipt = transition.receipt;
   const effect = receipt.effects.find(
