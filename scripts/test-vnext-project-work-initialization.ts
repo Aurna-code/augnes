@@ -104,8 +104,10 @@ void main().catch((error) => {
 
 async function main(): Promise<void> {
   try {
-    await assertExecutedReviewedFollowUpV01();
-    if (process.argv.includes("--executed-follow-up-only")) return;
+    if (process.argv.includes("--executed-follow-up-only")) {
+      await assertExecutedReviewedFollowUpV01();
+      return;
+    }
     assertNormalizationAndCompilerV01();
     assertNativeHostRunIdentityCompatibilityV01();
     assertInitializationReadPolicyV01();

@@ -1060,6 +1060,7 @@ const integrationChildren = [
   "policy-triggered-model-run",
   "project-home",
   "project-work-initialization",
+  "executed-reviewed-follow-up",
   "blank-state",
   "guide-brief-current-project",
   "codex-read-guide-brief",

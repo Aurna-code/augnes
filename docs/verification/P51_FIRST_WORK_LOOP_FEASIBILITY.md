@@ -162,7 +162,8 @@ of the same live Companion. The new continuation phase took 51.337 seconds,
 including its disposable service restart; this is not a human review duration.
 
 The other focused commands passed: `npm run test:project-work-initialization`
-(33.35 seconds), `npm run test:operator-execution-browser-fixture` (7.28 seconds),
+(25.92 seconds) and its separate `-- --executed-follow-up-only` invocation
+(7.81 seconds), `npm run test:operator-execution-browser-fixture` (7.28 seconds),
 `npm run test:operator-execution-result-contract` (0.19 seconds; 30 staged
 finalization negatives) and `npm run test:operator-execution-effect-ledger`
 (0.19 seconds; 12 equal-count/scope negatives). `git diff --check` passed.
@@ -194,6 +195,23 @@ completed with zero owned processes and the same live Companion restored.
 The inventory assertion is corrected in a new commit, without dropping any
 field, marker or assertion. The failed head is not retried; the new clean exact
 head receives its own planner-selected deciding run.
+
+The second target, `c0c16d6b5c01ad0c5581004d99e573590d0c5feb`, passed
+dependencies, typecheck, build, unit and authority. Its new P5.1a fixture passed,
+but the combined first-work invocation exceeded that integration child's
+unchanged 30-second limit. The 1543.404-second failed run and non-deciding
+receipt remain preserved; operability and Browser phases were not run. Cleanup
+and same-Companion restoration completed. This is a test-registration error,
+not a reason to increase the original bound.
+
+The final registration gives the new scenario its own invocation in the
+existing serialized integration runner, using the same test file, fixture and
+cleanup owner. Both children have 30-second limits; the original assertions
+and all new assertions remain enabled in the deciding plan. The exact runner
+inventory contract now checks both owners. `npm run test:canonical-contract`
+passes with 30 uniquely owned integration children. The focused durations above
+are for these separate invocations; the earlier combined invocation took 33.35
+seconds. The second failed head is not retried.
 
 ## Separately authorized live execution card prerequisites
 
