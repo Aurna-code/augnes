@@ -97,6 +97,8 @@ const PROFILE_CONTRACTS = Object.freeze({
   native_host_execution: Object.freeze({
     allowed_tables: Object.freeze([
       "vnext_core_records",
+      "vnext_semantic_state_entries",
+      "vnext_semantic_target_heads",
       "vnext_active_project_selections",
       "vnext_local_operator_sessions",
       "autonomy_runs",
@@ -109,10 +111,15 @@ const PROFILE_CONTRACTS = Object.freeze({
       automation_work_item: 4,
       capability_grant: 1,
       // P1.5 adds exactly two explicit first-work revisions: exclude a note,
-      // then reselect it from retained history. All other effects stay exact.
-      task_context_packet: 6,
-      run_receipt: 4,
-      episode_delta_proposal: 4,
+      // then reselect it from retained history. P5.1a adds one reviewed
+      // correction, its atomic semantic successor and one next host result.
+      task_context_packet: 7,
+      run_receipt: 5,
+      episode_delta_proposal: 6,
+      review_decision: 1,
+      semantic_commit_gate: 1,
+      semantic_state: 1,
+      state_transition_receipt: 1,
       context_use_review: 1,
     }),
     operator_session_insert_count: 4,
@@ -127,11 +134,13 @@ const PROFILE_CONTRACTS = Object.freeze({
     }),
     table_operation_counts: Object.freeze({
       inserted: Object.freeze({
-        autonomy_run_events: 52,
-        autonomy_run_steps: 4,
-        autonomy_runs: 4,
-        vnext_core_records: 20,
+        autonomy_run_events: 57,
+        autonomy_run_steps: 5,
+        autonomy_runs: 5,
+        vnext_core_records: 28,
         vnext_local_operator_sessions: 4,
+        vnext_semantic_state_entries: 1,
+        vnext_semantic_target_heads: 1,
       }),
       updated: Object.freeze({ vnext_active_project_selections: 1 }),
       deleted: Object.freeze({}),
@@ -142,15 +151,15 @@ const PROFILE_CONTRACTS = Object.freeze({
       host_event_observed: 22,
       run_cancelled: 1,
       run_cancelling: 1,
-      run_completed: 3,
-      run_created: 4,
+      run_completed: 4,
+      run_created: 5,
       run_needs_review: 1,
       run_queued: 3,
-      run_started: 1,
+      run_started: 2,
       run_starting: 3,
       step_cancelled: 1,
-      step_completed: 3,
-      step_started: 4,
+      step_completed: 4,
+      step_started: 5,
     }),
     event_type_status_counts: Object.freeze({
       "approval_decided:waiting_for_approval": 2,
@@ -159,16 +168,16 @@ const PROFILE_CONTRACTS = Object.freeze({
       "host_event_observed:starting": 6,
       "run_cancelled:cancelled": 1,
       "run_cancelling:cancelling": 1,
-      "run_completed:completed": 3,
+      "run_completed:completed": 4,
       "run_created:queued": 3,
-      "run_created:running": 1,
+      "run_created:running": 2,
       "run_needs_review:needs_review": 1,
       "run_queued:queued": 3,
-      "run_started:running": 1,
+      "run_started:running": 2,
       "run_starting:starting": 3,
       "step_cancelled:cancelled": 1,
-      "step_completed:completed": 3,
-      "step_started:running": 4,
+      "step_completed:completed": 4,
+      "step_started:running": 5,
     }),
     host_event_observed_running_or_waiting_count: 14,
     approval_trace_event_kinds: NATIVE_APPROVAL_TRACE_EVENT_KINDS_V1,
@@ -845,7 +854,7 @@ function assertRunAndEventBindings(diff, contract, manifest, before) {
     return;
   }
   assert.equal(updatedRuns.length, 0);
-  assert.equal(runs.length, 4, "operator_effect_native_run_set_mismatch");
+  assert.equal(runs.length, 5, "operator_effect_native_run_set_mismatch");
   assert.deepEqual(
     countBy(events, (entry) => entry.identity.event_type),
     contract.event_type_counts,
@@ -896,7 +905,7 @@ function assertRunAndEventBindings(diff, contract, manifest, before) {
     {
       [`${manifest.automation_project_id}:needs_review:direct_native_host_round_trip.v0.1`]: 1,
       [`${manifest.profile_project_id}:cancelled:direct_native_host_round_trip.v0.1`]: 1,
-      [`${manifest.project_id}:completed:direct_native_host_round_trip.v0.1`]: 2,
+      [`${manifest.project_id}:completed:direct_native_host_round_trip.v0.1`]: 3,
     },
     "operator_effect_native_run_scope_status_contract_mismatch",
   );

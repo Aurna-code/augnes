@@ -300,20 +300,25 @@ function nativeSnapshots() {
   const coreCounts = {
     automation_work_item: 4,
     capability_grant: 1,
-    task_context_packet: 6,
-    run_receipt: 4,
-    episode_delta_proposal: 4,
+    task_context_packet: 7,
+    run_receipt: 5,
+    episode_delta_proposal: 6,
+    review_decision: 1,
+    semantic_commit_gate: 1,
+    semantic_state: 1,
+    state_transition_receipt: 1,
     context_use_review: 1,
   };
   const core = Object.entries(coreCounts).flatMap(([kind, count]) =>
     Array.from({ length: count }, (_, index) =>
-      coreRow(kind, `${kind}:${index}`),
+      coreRow(kind, `${kind}:${index}`, ["semantic_commit_gate", "state_transition_receipt"].includes(kind) ? { decision_id: "review_decision:0" } : {}),
     ),
   );
   const runs = [
     runRow("run:profile", "project:profile", "cancelled"),
     runRow("run:direct", "project:primary", "completed"),
     runRow("run:live", "project:primary", "completed"),
+    runRow("run:follow-up", "project:primary", "completed"),
     runRow("run:automation", "project:automation", "needs_review"),
   ];
   const events = nativeEventRows();
@@ -331,6 +336,7 @@ function nativeSnapshots() {
       afterSelection,
       ...roots,
       ...core,
+      ...semanticStateRows(),
       ...runs,
       ...runs.map((entry, index) =>
         runStepRow(`step:${index}`, entry.identity.run_id),
@@ -422,6 +428,13 @@ function nativeEventRows() {
       ["step_completed", "completed"],
       ["run_completed", "completed"],
       ["run_needs_review", "needs_review"],
+    ]],
+    ["run:follow-up", [
+      ["run_created", "running"],
+      ["run_started", "running"],
+      ["step_started", "running"],
+      ["step_completed", "completed"],
+      ["run_completed", "completed"],
     ]],
   ];
   let sequence = 0;
