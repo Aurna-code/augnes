@@ -184,6 +184,17 @@ authentication bootstrap. Classification now covers only those existing exact
 read/endpoint/status events in the added phase. The third passed. No runtime
 guard, timeout, effect assertion, coverage, planner or receipt policy changed.
 
+The first committed target, `d998cbc6ca1c011e9364044adbe4233e0db2f518`,
+selected Full Canonical. Dependency preparation, normal typecheck and build
+passed; unit verification correctly failed because the existing manifest
+inventory test still expected 136 fields / 63 markers instead of the two new
+fields and one new marker (138 / 64). Its 383.202-second failed run and
+non-deciding receipt are preserved; remaining phases were skipped. Cleanup
+completed with zero owned processes and the same live Companion restored.
+The inventory assertion is corrected in a new commit, without dropping any
+field, marker or assertion. The failed head is not retried; the new clean exact
+head receives its own planner-selected deciding run.
+
 ## Separately authorized live execution card prerequisites
 
 Live feasibility, live utility, model qualification and controlled comparisons
