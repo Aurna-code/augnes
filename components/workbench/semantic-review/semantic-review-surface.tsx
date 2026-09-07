@@ -32,6 +32,7 @@ import { DecisionCenteredProposalDetail } from "./decision-centered-proposal-det
 import { SemanticReviewProposalList } from "./proposal-list";
 import { semanticReviewDetailEntryPresentationV01 } from "./semantic-review-entry-presentation";
 import { FirstWorkComposer } from "./first-work-composer";
+import type { SelectedWorkSourceSelection } from "@/types/vnext/project-work-revision";
 import type {
   ProjectWorkDefinitionV01,
   ProjectWorkInitializationV01,
@@ -515,6 +516,7 @@ export function SemanticReviewSurface({
 
   async function saveWorkRevision(
     definition: ProjectWorkDefinitionV01,
+    sourceSelection?: SelectedWorkSourceSelection,
   ): Promise<void> {
     const initialization =
       privateView?.kind === "list"
@@ -562,6 +564,7 @@ export function SemanticReviewSurface({
             submittedBinding.current_packet_fingerprint,
           expected_current_lineage_kind: submittedBinding.current_lineage_kind,
           ...definition,
+          ...sourceSelection,
         }),
       });
       const body = (await response.json()) as FirstWorkMutationResponseV01;

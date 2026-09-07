@@ -1,6 +1,7 @@
 import { accessSync, constants, statSync } from "node:fs";
 
 import type Database from "better-sqlite3";
+import { compareSelectedWorkSources, normalizeSelectedWorkSources, readSelectedWorkSources } from "@/lib/intake/selected-work-source-comparison";
 
 import {
   assertVNextDurableSemanticStoreSchemaV01,
@@ -310,6 +311,15 @@ export function revisePreExecutionProjectWorkV01(
       db,
       input.config,
     );
+    if (request.selected_source_context !== undefined) {
+      const comparisonPacket = chain.tip_packet.packet_id === request.expected_current_packet_id
+        ? chain.tip_packet : chain.tip_revision?.prior_packet;
+      if (!comparisonPacket || comparisonPacket.packet_id !== request.expected_current_packet_id ||
+        comparisonPacket.integrity.fingerprint !== request.expected_current_packet_fingerprint ||
+        compareSelectedWorkSources(comparisonPacket, request.selected_source_context).fingerprint !== request.expected_source_comparison) {
+        refuse("work_revision_source_comparison_changed", 409);
+      }
+    }
     const exactExpectedCurrent =
       chain.tip_packet.packet_id === request.expected_current_packet_id &&
       chain.tip_packet.integrity.fingerprint ===
@@ -343,7 +353,9 @@ export function revisePreExecutionProjectWorkV01(
       refuse("work_revision_current_packet_changed", 409);
     }
     assertEligibleForMutationV01(eligibility);
-    if (sameDefinitionV01(chain.tip_packet.task, definition)) {
+    if (sameDefinitionV01(chain.tip_packet.task, definition) &&
+      canonicalizeProtocolValueV01(readSelectedWorkSources(chain.tip_packet)) ===
+      canonicalizeProtocolValueV01(request.selected_source_context ?? readSelectedWorkSources(chain.tip_packet))) {
       db.exec("COMMIT");
       return resultV01(
         "exact_replay",
@@ -518,10 +530,12 @@ function parseRequestV01(value: unknown): RevisePreExecutionProjectWorkRequestV0
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     refuse("work_revision_request_invalid", 400);
   }
-  const request = value as Record<string, unknown>;
+  const request = { ...value } as Record<string, unknown>;
+  const optionalKeys = request.selected_source_context === undefined
+    ? [] : ["selected_source_context", "expected_source_comparison"];
   if (
     canonicalizeProtocolValueV01(Object.keys(request).sort()) !==
-      canonicalizeProtocolValueV01([...REQUEST_KEYS].sort()) ||
+      canonicalizeProtocolValueV01([...REQUEST_KEYS, ...optionalKeys].sort()) ||
     request.action !== "revise_pre_execution_project_work" ||
     typeof request.workspace_id !== "string" ||
     typeof request.project_id !== "string" ||
@@ -539,6 +553,13 @@ function parseRequestV01(value: unknown): RevisePreExecutionProjectWorkRequestV0
     ].includes(String(request.expected_current_lineage_kind))
   ) {
     refuse("work_revision_request_invalid", 400);
+  }
+  if (request.selected_source_context !== undefined) {
+    if (typeof request.expected_source_comparison !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(request.expected_source_comparison)) {
+      refuse("work_revision_request_invalid", 400);
+    }
+    request.selected_source_context = normalizeSelectedWorkSources(
+      { workspace_id: request.workspace_id as string, project_id: request.project_id as string }, request.selected_source_context);
   }
   return request as unknown as RevisePreExecutionProjectWorkRequestV01;
 }

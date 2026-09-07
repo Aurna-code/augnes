@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { normalizeSelectedWorkSources, readSelectedWorkSources, compareSelectedWorkSources } from "@/lib/intake/selected-work-source-comparison";
 
 import {
   assertVNextCoreRecordMatchesProtocolPayloadBindingV01,
@@ -98,6 +99,10 @@ export function createPreExecutionProjectWorkRevisionMaterialV01(input: {
   observed_at: string;
 }): PreExecutionProjectWorkRevisionMaterialV01 {
   const definition = normalizeInitialProjectWorkDefinitionV01(input.definition);
+  const selectedSources = normalizeSelectedWorkSources(input.request,
+    input.request.selected_source_context ?? readSelectedWorkSources(input.prior_packet));
+  const sourceIdentity = selectedSources.length > 0
+    ? { selected_source_context: selectedSources } : {};
   const definitionFingerprint = createProtocolSha256V01(
     canonicalizeProtocolValueV01({
       compiler: PRE_EXECUTION_PROJECT_WORK_REVISION_COMPILER_VERSION_V01,
@@ -106,6 +111,7 @@ export function createPreExecutionProjectWorkRevisionMaterialV01(input: {
       prior_packet_id: input.prior_packet.packet_id,
       prior_packet_fingerprint: input.prior_packet.integrity.fingerprint,
       definition,
+      ...sourceIdentity,
     }),
   );
   const logicalDigest = definitionFingerprint.slice("sha256:".length);
@@ -133,6 +139,7 @@ export function createPreExecutionProjectWorkRevisionMaterialV01(input: {
       expected_current_lineage_kind:
         input.request.expected_current_lineage_kind,
       definition,
+      ...sourceIdentity,
     }),
   );
   const revisionRequestRef: ExternalRefV01 = {
@@ -193,6 +200,7 @@ export function createPreExecutionProjectWorkRevisionMaterialV01(input: {
         prior_packet_id: input.prior_packet.packet_id,
         prior_packet_fingerprint: input.prior_packet.integrity.fingerprint,
         definition,
+        ...sourceIdentity,
       }),
     ),
   };
@@ -212,6 +220,8 @@ export function buildPreExecutionProjectWorkRevisionPacketV01(input: {
   lineage: PreExecutionProjectWorkRevisionMaterialV01;
 } {
   const definition = normalizeInitialProjectWorkDefinitionV01(input.definition);
+  const selectedSources = normalizeSelectedWorkSources(input.request,
+    input.request.selected_source_context ?? readSelectedWorkSources(input.prior_packet));
   const lineage = createPreExecutionProjectWorkRevisionMaterialV01({
     ...input,
     definition,
@@ -256,6 +266,7 @@ export function buildPreExecutionProjectWorkRevisionPacketV01(input: {
         ],
       },
       selected_context: [
+        ...selectedSources,
         {
           entry_id: `work-revision-definition:${lineage.revision_definition_ref.external_id}`,
           entry_kind: "source_ref",
@@ -321,7 +332,9 @@ export function buildPreExecutionProjectWorkRevisionPacketV01(input: {
         required_checks: [],
         forbidden_actions: [],
         data_classification: "private",
-        context_budget: REVISION_PACKET_CONTEXT_BUDGET_V01,
+        context_budget: selectedSources.length > 0
+          ? { ...REVISION_PACKET_CONTEXT_BUDGET_V01, max_selected_entries: 12 }
+          : REVISION_PACKET_CONTEXT_BUDGET_V01,
       },
       capability_grant: null,
       return_contract: {
@@ -385,6 +398,7 @@ export function preExecutionProjectWorkRevisionIdempotencyKeyV01(
 ): string | null {
   if (!isStandaloneRevisionPacketV01(packet)) return null;
   const prior = exactRef(packet, "task_context_packet");
+  const selectedSources = readSelectedWorkSources(packet);
   return createProtocolSha256V01(
     canonicalizeProtocolValueV01({
       purpose: PRE_EXECUTION_PROJECT_WORK_REVISION_COMPILER_VERSION_V01,
@@ -393,6 +407,8 @@ export function preExecutionProjectWorkRevisionIdempotencyKeyV01(
       prior_packet_id: prior.external_id,
       prior_packet_fingerprint: prior.source_ref,
       definition: normalizeInitialProjectWorkDefinitionV01(packet.task),
+      ...(selectedSources.length > 0
+        ? { selected_source_context: selectedSources } : {}),
     }),
   );
 }
@@ -634,6 +650,11 @@ function inspectRevisionPacketV01(
       priorRecord.packet.integrity.fingerprint,
     expected_current_lineage_kind: priorKind,
     ...normalizeInitialProjectWorkDefinitionV01(packet.task),
+    ...(readSelectedWorkSources(packet).length > 0 || readSelectedWorkSources(priorRecord.packet).length > 0
+      ? {
+          selected_source_context: readSelectedWorkSources(packet),
+          expected_source_comparison: compareSelectedWorkSources(priorRecord.packet, readSelectedWorkSources(packet)).fingerprint,
+        } : {}),
   };
   const expected = buildPreExecutionProjectWorkRevisionPacketV01({
     request,

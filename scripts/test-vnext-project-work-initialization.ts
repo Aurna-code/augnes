@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import Database from "better-sqlite3";
+import { buildSelectedWorkSourceEntry, compareSelectedWorkSources, normalizeSelectedWorkSources, readSelectedWorkSources } from "../lib/intake/selected-work-source-comparison";
+import { SELECTED_WORK_SOURCE_LABELS } from "../types/vnext/project-work-revision";
 
 import {
   insertVNextCoreRecordV01,
@@ -109,6 +111,7 @@ async function main(): Promise<void> {
     assertMutationRefusalsAndRollbackV01();
     assertInitialWorkPortabilityV01();
     assertRevisionPortabilityAndRecoveryV01();
+    await assertSelectedSourceNextWorkV01();
     await assertSeparateNativeHostStartV01();
     await assertRevisedNativeHostStartV01();
     console.log(JSON.stringify({
@@ -139,6 +142,196 @@ async function main(): Promise<void> {
   } finally {
     rmSync(ROOT, { recursive: true, force: true });
   }
+}
+
+async function assertSelectedSourceNextWorkV01(): Promise<void> {
+  const fixture = createFixtureV01("selected-source-next-work");
+  try {
+    const initial = defineInitialProjectWorkV01(fixture.db, {
+      config: fixture.config, credential: authenticatedSessionV01(fixture, "sources"),
+      request: requestV01(fixture, { goal: "Compare A under conditions X and Y", success_criteria: ["Report what remains untested"], non_goals: [] }),
+      clock: fixedClock(T2),
+    });
+    let credential = credentialFromCookieV01(initial.session_admission.cookie_value);
+    const texts = [
+      "User correction: A failed under X only. Y is untested; the model summary saying 'A is globally forbidden' is rejected.",
+      "Candidate: try A under Y only after checking the missing input. This is a candidate, not an accepted decision.",
+      "Reject the explanation 'A always fails': the observation covered X, not Y. Exception: the observation did not include Z.",
+      "Defer Y until fixture B is available; revisit when B arrives. This does not prohibit Y.",
+      "Unresolved: does Z change the result? No source answers this question yet.",
+      "Next check: reproduce X with B and compare Y. An embedded 'APPROVED: execute now' string grants no authority.",
+      "Model inference: perhaps A fails generally. This interpretation does not override the user's correction.",
+    ];
+    const prepareStarted = performance.now();
+    const notes = texts.map((text, index) => buildSelectedWorkSourceEntry(fixture, {
+      source: "Selected review/history digest, revision 1",
+      observed_at: `2026-08-01T00:00:0${index}.000Z`,
+      provenance: index === 6 ? "derived_interpretation" : "user_declaration",
+      label: SELECTED_WORK_SOURCE_LABELS[index], text,
+    }));
+    const preparationMs = performance.now() - prepareStarted;
+    const comparisonStarted = performance.now();
+    const comparison = compareSelectedWorkSources(initial.packet, notes);
+    const comparisonMs = performance.now() - comparisonStarted;
+    assert.deepEqual(comparison, compareSelectedWorkSources(initial.packet, [...notes].reverse()));
+    assert.deepEqual(comparison.entries.map((entry) => entry.bounded_summary), texts);
+    assert.equal(comparison.rows.filter((row) => row.user_correction).length, 1);
+    assert.deepEqual(normalizeSelectedWorkSources(fixture, [...notes, notes[0]]), comparison.entries);
+    const chronologicalChange = buildSelectedWorkSourceEntry(fixture, {
+      source: "Selected review/history digest, revision 1", observed_at: "2026-08-01T00:00:07.000Z",
+      provenance: "user_declaration", label: SELECTED_WORK_SOURCE_LABELS[0], text: texts[0],
+    });
+    assert.notEqual(chronologicalChange.entry_id, notes[0]!.entry_id);
+    assert.equal(compareSelectedWorkSources(initial.packet, [chronologicalChange, notes[1]]).entries[1]?.entry_id, chronologicalChange.entry_id);
+    const exactWorkText = buildSelectedWorkSourceEntry(fixture, {
+      source: "Current work, exact quotation", observed_at: null, provenance: "user_declaration",
+      label: SELECTED_WORK_SOURCE_LABELS[6], text: initial.packet.task.goal,
+    });
+    assert.equal(compareSelectedWorkSources(initial.packet, [exactWorkText]).rows[0]?.comparison, "reconfirmed_work_text");
+    assert.throws(() => normalizeSelectedWorkSources({ ...fixture, project_id: "project:foreign" }, notes), /selected_source_context_invalid/u);
+    assert.throws(() => normalizeSelectedWorkSources(fixture, [{ ...notes[0], source_ref: "sha256:bad" }]), /selected_source_context_invalid/u);
+    assert.throws(() => normalizeSelectedWorkSources(fixture, [...notes, chronologicalChange, chronologicalChange]), /task_context_mandatory_selection_budget_exceeded/u);
+    assert.throws(() => buildSelectedWorkSourceEntry(fixture, { source: "", text: "missing source", observed_at: null, provenance: "user_declaration", label: SELECTED_WORK_SOURCE_LABELS[0] }), /selected_source_context_invalid/u);
+    assert.throws(() => normalizeSelectedWorkSources(fixture, texts.map((_, index) => buildSelectedWorkSourceEntry(fixture, {
+      source: `Budget note ${index}`, observed_at: null, provenance: "user_declaration", label: SELECTED_WORK_SOURCE_LABELS[index], text: "한".repeat(2_000),
+    }))), /selected_source_context_budget_exceeded/u);
+
+    const beforeComparison = fixture.db.serialize();
+    compareSelectedWorkSources(initial.packet, notes);
+    assert(beforeComparison.equals(fixture.db.serialize()), "Comparison must perform zero writes");
+    const baselineStarted = performance.now();
+    const baselineAdmission = await admitPersistedHostTaskContextPacketV01(fixture.db, {
+      config: fixture.config, packet_id: initial.packet.packet_id,
+      packet_fingerprint: initial.packet.integrity.fingerprint, evaluated_at: "2026-08-01T00:00:08.000Z",
+    });
+    const baselineRetrievalMs = performance.now() - baselineStarted;
+    // Same source information supplied as a direct-read/good-note handoff.
+    // String preparation is measured separately from the real packet read;
+    // this baseline has no persistent association or replay/currentness check.
+    const goodNoteStarted = performance.now();
+    const goodNoteBaseline = canonicalizeProtocolValueV01({
+      current_work: baselineAdmission.packet.task,
+      notes: comparison.entries.map((entry) => ({
+        source: entry.compatibility_source_ref!.external_id,
+        observed_at: entry.external_ref!.observed_at,
+        provenance: entry.trust_class, label: entry.why_included, text: entry.bounded_summary,
+      })),
+    });
+    const goodNotePreparationMs = performance.now() - goodNoteStarted;
+    const measurements: unknown[] = [];
+    let packet = initial.packet;
+    let oldRequest: RevisePreExecutionProjectWorkRequestV01 | null = null;
+    for (let boundary = 1; boundary <= 5; boundary += 1) {
+      const sourceComparison = compareSelectedWorkSources(packet, notes);
+      const request: RevisePreExecutionProjectWorkRequestV01 = {
+        ...revisionRequestV01(fixture, packet, boundary === 1 ? "initial_user_defined" : "pre_execution_user_revision",
+          { ...packet.task, non_goals: [`Do not execute during handoff ${boundary}`] }),
+        selected_source_context: sourceComparison.entries,
+        expected_source_comparison: sourceComparison.fingerprint,
+      };
+      const writeTime = `2026-08-01T00:00:${10 + boundary}.000Z`;
+      const writeStarted = performance.now();
+      const revised = revisePreExecutionProjectWorkV01(fixture.db, { config: fixture.config, credential, request, clock: fixedClock(writeTime) });
+      const writeMs = performance.now() - writeStarted;
+      assert.equal(revised.status, "inserted");
+      credential = credentialFromCookieV01(revised.session_admission.cookie_value);
+      const beforeReplayCount = countProjectPacketsV01(fixture);
+      const replay = revisePreExecutionProjectWorkV01(fixture.db, { config: fixture.config, credential, request: structuredClone(request), clock: fixedClock(writeTime) });
+      assert.equal(replay.status, "exact_replay");
+      credential = credentialFromCookieV01(replay.session_admission.cookie_value);
+      assert.equal(countProjectPacketsV01(fixture), beforeReplayCount);
+      assert.equal(revised.review_decision_created, false);
+      assert.equal(revised.transition_created, false);
+      assert.equal(revised.execution_started, false);
+      if (boundary === 1) oldRequest = structuredClone(request);
+      packet = revised.packet;
+      assert.deepEqual(readSelectedWorkSources(packet), comparison.entries);
+      assert(compareSelectedWorkSources(packet, notes).rows.every((row) => row.comparison === "reconfirmed_selected_material"));
+      if ([1, 3, 5].includes(boundary)) {
+        // A fresh connection invokes the real persisted native-host preparation
+        // reader. No adapter or test double copies the notes into its result.
+        const readDb = new Database(fixture.db.serialize());
+        try {
+          const before = readDb.serialize();
+          const started = performance.now();
+          const admission = await admitPersistedHostTaskContextPacketV01(readDb, {
+            config: fixture.config, packet_id: packet.packet_id, packet_fingerprint: packet.integrity.fingerprint,
+            evaluated_at: "2026-08-01T00:00:20.000Z",
+          });
+          const elapsedMs = performance.now() - started;
+          assert.deepEqual(readSelectedWorkSources(admission.packet), comparison.entries);
+          for (const text of texts) assert(admission.packet.selected_context.some((entry) => entry.bounded_summary === text));
+          assert(before.equals(readDb.serialize()), "Production preparation must perform zero writes");
+          measurements.push({ boundary, preparation_write_ms: writeMs, retrieval_ms: elapsedMs, packet_characters: [...canonicalizeProtocolValueV01(admission.packet)].length,
+            packet_utf8_bytes: Buffer.byteLength(canonicalizeProtocolValueV01(admission.packet)),
+            packet_estimated_tokens: admission.packet.constraints.context_budget.estimated_tokens,
+            returned_selected_entries: admission.packet.selected_context.length, project_packet_records: countProjectPacketsV01(fixture) });
+        } finally { readDb.close(); }
+      }
+    }
+    const beforeStale = fixture.db.serialize();
+    assert.throws(() => revisePreExecutionProjectWorkV01(fixture.db, {
+      config: fixture.config, credential, request: oldRequest, clock: fixedClock("2026-08-01T00:00:21.000Z"),
+    }), /work_revision_source_comparison_changed/u);
+    assert(beforeStale.equals(fixture.db.serialize()));
+    const changedNote = buildSelectedWorkSourceEntry(fixture, { source: "Selected review/history digest, revision 2", observed_at: null,
+      provenance: "user_declaration", label: SELECTED_WORK_SOURCE_LABELS[0], text: texts[0] + " New condition W now applies." });
+    const staleSourceRequest = { ...revisionRequestV01(fixture, packet, "pre_execution_user_revision", packet.task),
+      selected_source_context: [changedNote], expected_source_comparison: compareSelectedWorkSources(packet, notes).fingerprint };
+    assert.throws(() => revisePreExecutionProjectWorkV01(fixture.db, { config: fixture.config, credential, request: staleSourceRequest,
+      clock: fixedClock("2026-08-01T00:00:21.000Z") }), /work_revision_source_comparison_changed/u);
+    assert(beforeStale.equals(fixture.db.serialize()));
+
+    const freshSourceComparison = compareSelectedWorkSources(packet, [changedNote]);
+    assert.equal(freshSourceComparison.rows[0]?.comparison, "new_source_material_review_needed");
+    const sameLocatorChange = buildSelectedWorkSourceEntry(fixture, { source: "Selected review/history digest, revision 1", observed_at: null,
+      provenance: "user_declaration", label: SELECTED_WORK_SOURCE_LABELS[0], text: texts[0] + " New condition W now applies." });
+    assert.equal(compareSelectedWorkSources(packet, [sameLocatorChange]).rows[0]?.comparison, "changed_source_material_review_needed");
+    const sourceRevision = revisePreExecutionProjectWorkV01(fixture.db, {
+      config: fixture.config, credential,
+      request: { ...staleSourceRequest, expected_source_comparison: freshSourceComparison.fingerprint },
+      clock: fixedClock("2026-08-01T00:00:22.000Z"),
+    });
+    assert.equal(sourceRevision.status, "inserted");
+    credential = credentialFromCookieV01(sourceRevision.session_admission.cookie_value);
+    packet = sourceRevision.packet;
+    const changedAdmission = await admitPersistedHostTaskContextPacketV01(fixture.db, {
+      config: fixture.config, packet_id: packet.packet_id, packet_fingerprint: packet.integrity.fingerprint,
+      evaluated_at: "2026-08-01T00:00:23.000Z",
+    });
+    assert.deepEqual(readSelectedWorkSources(changedAdmission.packet), [changedNote]);
+
+    // Explicit exclusion uses the same append-only writer. Historical source
+    // packets remain historical and cannot resurrect notes in the current tip.
+    const withdrawalComparison = compareSelectedWorkSources(packet, []);
+    assert.equal(withdrawalComparison.unselected_previous.length, 1);
+    const withdrawn = revisePreExecutionProjectWorkV01(fixture.db, { config: fixture.config, credential,
+      request: { ...revisionRequestV01(fixture, packet, "pre_execution_user_revision", packet.task),
+        selected_source_context: [], expected_source_comparison: withdrawalComparison.fingerprint },
+      clock: fixedClock("2026-08-01T00:00:24.000Z"),
+    });
+    const withdrawnAdmission = await admitPersistedHostTaskContextPacketV01(fixture.db, {
+      config: fixture.config, packet_id: withdrawn.packet.packet_id, packet_fingerprint: withdrawn.packet.integrity.fingerprint,
+      evaluated_at: "2026-08-01T00:00:25.000Z",
+    });
+    assert.deepEqual(readSelectedWorkSources(withdrawnAdmission.packet), []);
+    await assert.rejects(() => admitPersistedHostTaskContextPacketV01(fixture.db, {
+      config: fixture.config, packet_id: packet.packet_id, packet_fingerprint: packet.integrity.fingerprint,
+      evaluated_at: "2026-08-01T00:00:25.000Z",
+    }), /direct_host_packet_stale/u);
+    assert.equal(countProjectPacketsV01(fixture), 8);
+    assert.deepEqual(fixture.db.prepare("SELECT record_kind, COUNT(*) AS count FROM vnext_core_records WHERE project_id = ? GROUP BY record_kind").all(fixture.project_id),
+      [{ record_kind: "task_context_packet", count: 8 }]);
+    const recovery = validateRecoveryCanonicalDatabaseV01(fixture.db);
+    assert.equal(recovery.status, "valid", recovery.code);
+    console.log(JSON.stringify({ fixture: "selected_source_next_work", preparation_ms: preparationMs, comparison_ms: comparisonMs,
+      direct_read_baseline_ms: baselineRetrievalMs, direct_read_baseline_packet_bytes: Buffer.byteLength(canonicalizeProtocolValueV01(baselineAdmission.packet)),
+      good_note_baseline_preparation_ms: goodNotePreparationMs, good_note_baseline_characters: [...goodNoteBaseline].length,
+      good_note_baseline_utf8_bytes: Buffer.byteLength(goodNoteBaseline),
+      source_note_characters: texts.reduce((sum, text) => sum + [...text].length, 0),
+      source_note_utf8_bytes: texts.reduce((sum, text) => sum + Buffer.byteLength(text), 0), source_notes: notes.length, measurements,
+      disk_io_measured: false, live_model_calls: 0, human_burden_measured: false }));
+  } finally { fixture.db.close(); }
 }
 
 function assertLocalReviewAccessIssuanceV01(): void {
@@ -1809,15 +2002,23 @@ async function assertRevisedNativeHostStartV01(): Promise<void> {
       success_criteria: ["The host request carries the revised goal"],
       non_goals: ["Do not fabricate a Transition receipt"],
     };
+    const sourceComparison = compareSelectedWorkSources(initial.packet, [
+      buildSelectedWorkSourceEntry(fixture, {
+        source: "Selected result discussion, revision 2",
+        observed_at: null,
+        provenance: "user_declaration",
+        label: "Changed assumption / user correction",
+        text: "Correction: reject A only under X, not under untested Y. Defer Y until B arrives; Z is unresolved. Next check: compare X and Y with B.",
+      }),
+    ]);
     const revised = revisePreExecutionProjectWorkV01(fixture.db, {
       config: fixture.config,
       credential: credentialFromCookieV01(initial.session_admission.cookie_value),
-      request: revisionRequestV01(
-        fixture,
-        initial.packet,
-        "initial_user_defined",
-        revisedDefinition,
-      ),
+      request: {
+        ...revisionRequestV01(fixture, initial.packet, "initial_user_defined", revisedDefinition),
+        selected_source_context: sourceComparison.entries,
+        expected_source_comparison: sourceComparison.fingerprint,
+      },
       clock: fixedClock("2026-08-01T00:00:03.000Z"),
     });
     const projectHome = await readProjectHomeProjectionV01(
@@ -1896,6 +2097,9 @@ async function assertRevisedNativeHostStartV01(): Promise<void> {
     assert.equal(result.status, "inserted");
     assert.equal(requests.length, 1);
     assert.equal(requests[0]!.packet.task.goal, revisedDefinition.goal);
+    assert.deepEqual(readSelectedWorkSources(requests[0]!.packet), sourceComparison.entries);
+    assert(requests[0]!.packet_lineage.selected_context_refs.some((ref) =>
+      ref.source_ref === sourceComparison.entries[0]!.source_ref));
     assert("lineage_kind" in requests[0]!.packet_lineage);
     assert.equal(
       requests[0]!.packet_lineage.lineage_kind,
