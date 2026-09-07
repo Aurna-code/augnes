@@ -357,6 +357,11 @@ const suites = {
       timeoutMs: 30_000,
     },
     {
+      label: "Browser preferred-port allocation and launch contract",
+      ...rootNode("scripts/test-browser-preferred-ports.mjs"),
+      timeoutMs: 30_000,
+    },
+    {
       label: "browser E2E timing and lifecycle contracts",
       ...rootNode("scripts/test-browser-e2e-timing.mjs"),
     },
