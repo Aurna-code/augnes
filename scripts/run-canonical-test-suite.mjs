@@ -362,6 +362,11 @@ const suites = {
       timeoutMs: 30_000,
     },
     {
+      label: "historical R8A fixture build configuration contract",
+      ...rootNode("scripts/test-merged-r8a-fixture-build-config.mjs"),
+      timeoutMs: 30_000,
+    },
+    {
       label: "browser E2E timing and lifecycle contracts",
       ...rootNode("scripts/test-browser-e2e-timing.mjs"),
     },
