@@ -27,6 +27,7 @@ import {
   createRepositoryExecutionDecisionRequestV01,
 } from "../lib/vnext/repository-execution/repository-execution.ts";
 import { createBrowserSupervisorPublicDiagnosticCapture } from "./browser-supervisor-public-diagnostic.mjs";
+import { chooseBrowserPorts } from "./browser-preferred-ports.mjs";
 import { createBrowserE2ETimingRecorder } from "./browser-e2e-timing.mjs";
 import {
   MANAGEMENT_SAFETY_HYDRATION_REGRESSION_WARNING_REQUIRED_COUNT_V1,
@@ -590,11 +591,7 @@ async function main() {
     fixture.writable_database_path,
   );
 
-  appPort = await chooseAvailablePort();
-  do bridgePort = await chooseAvailablePort(); while (bridgePort === appPort);
-  do debugPort = await chooseAvailablePort(); while (
-    debugPort === appPort || debugPort === bridgePort
-  );
+  ({ app: appPort, bridge: bridgePort, debug: debugPort } = await chooseBrowserPorts());
   appOrigin = `http://127.0.0.1:${appPort}`;
   const chromeExecutable = chromeCandidates.find((candidate) =>
     existsSync(candidate),
@@ -5165,20 +5162,6 @@ async function canConnectToListener(host, port) {
     socket.setTimeout(1_000, () => finish(false));
     socket.once("connect", () => finish(true));
     socket.once("error", () => finish(false));
-  });
-}
-
-async function chooseAvailablePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      server.close(() => {
-        if (address && typeof address === "object") resolve(address.port);
-        else reject(new Error("loopback_port_allocation_failed"));
-      });
-    });
   });
 }
 

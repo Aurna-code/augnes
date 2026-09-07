@@ -16,6 +16,7 @@ import {
   readVNextLocalOperatorPilotConfigV01,
 } from "../lib/vnext/runtime/local-operator-session.ts";
 import { createBrowserSupervisorPublicDiagnosticCapture } from "./browser-supervisor-public-diagnostic.mjs";
+import { chooseBrowserPorts } from "./browser-preferred-ports.mjs";
 import { createBrowserE2ETimingRecorder } from "./browser-e2e-timing.mjs";
 import { createOperatorRequestFailureEvidenceV1 } from "./operator-execution-result-contract-v1.mjs";
 import {
@@ -60,12 +61,7 @@ export async function createOperatorExecutionBrowserLifecycleV1({
   ]) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
   }
-  const ports = [];
-  while (ports.length < 3) {
-    const candidate = await chooseAvailablePort();
-    if (!ports.includes(candidate)) ports.push(candidate);
-  }
-  const [appPort, bridgePort, debugPort] = ports;
+  const { app: appPort, bridge: bridgePort, debug: debugPort } = await chooseBrowserPorts();
   const appOrigin = `http://127.0.0.1:${appPort}`;
   const timing = createBrowserE2ETimingRecorder({ scope: child_id });
   const requests = [];
@@ -1320,20 +1316,6 @@ async function canConnect(host, port) {
     socket.setTimeout(1_000, () => finish(false));
     socket.once("connect", () => finish(true));
     socket.once("error", () => finish(false));
-  });
-}
-
-async function chooseAvailablePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      server.close(() => {
-        if (address && typeof address === "object") resolve(address.port);
-        else reject(new Error("operator_loopback_port_allocation_failed"));
-      });
-    });
   });
 }
 

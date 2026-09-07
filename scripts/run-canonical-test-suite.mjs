@@ -171,7 +171,10 @@ const suites = {
       label:
         "authenticated source-linked continuation admission and fresh managed Start contract",
       ...rootNode("scripts/test-operational-continuation-admission.ts"),
-      timeoutMs: 45_000,
+      // #1224: prospective whole-child headroom for the complete verification.
+      // This relaxes 45s to 60s, allowing 15s more before timeout handling;
+      // it is not a speedup or a resolution of the historical timeout cause.
+      timeoutMs: 60_000,
     },
     {
       label:
@@ -351,6 +354,16 @@ const suites = {
       label: "bounded local project-root verification adapter",
       ...rootNode("scripts/test-local-project-verification-adapter.ts"),
       // Incremental-bound, root-drift, and terminal-residue coverage measured 0.4s locally.
+      timeoutMs: 30_000,
+    },
+    {
+      label: "Browser preferred-port allocation and launch contract",
+      ...rootNode("scripts/test-browser-preferred-ports.mjs"),
+      timeoutMs: 30_000,
+    },
+    {
+      label: "historical R8A fixture build configuration contract",
+      ...rootNode("scripts/test-merged-r8a-fixture-build-config.mjs"),
       timeoutMs: 30_000,
     },
     {
