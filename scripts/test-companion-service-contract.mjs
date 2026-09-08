@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -20,6 +21,13 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+import {
+  cleanupOwnedProcesses,
+  registerOwnedChild,
+  waitForOwnedProcessExit,
+} from "./test-harness-process-lifecycle.mjs";
+import { buildCanonicalChildEnvironment } from "./canonical-test-environment.mjs";
 
 import {
   COMPANION_SERVICE_CONTRACT,
@@ -62,6 +70,7 @@ const options = {
 };
 
 try {
+  await assertSupervisorOutputTransport();
   assert.equal(COMPANION_SERVICE_CONTRACT, "augnes-companion-service.v0.1");
   assert.equal(
     COMPANION_SERVICE_DESIRED_STATE_CONTRACT,
@@ -2436,4 +2445,99 @@ function differentCanonicalStatIdentity(value) {
   assert.equal(String(BigInt(changed)), changed);
   assert.notEqual(changed, value);
   return changed;
+}
+
+async function assertSupervisorOutputTransport() {
+  const owned = new Set();
+  try {
+    for (const scenario of [
+      "reader-closed", "reader-closed-coexisting", "attached",
+      "invalid-descriptor", "unrelated-stderr",
+    ]) {
+      const child = spawn(process.execPath, [
+        "--import", "tsx", "scripts/fixtures/runtime-output-transport-child.mjs",
+        scenario === "reader-closed-coexisting" ? "coexisting" : "plain",
+      ], {
+        cwd: repositoryRoot,
+        env: buildCanonicalChildEnvironment({
+          ambientEnvironment: process.env,
+          temporaryRoot: root,
+        }),
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe", "pipe", "ipc"],
+      });
+      const tracked = registerOwnedChild(owned, child, { label: `output-${scenario}` });
+      let output = "";
+      let observations = "";
+      child.stdout.resume();
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk) => { output = `${output}${chunk}`.slice(-65536); });
+      child.stdio[3].setEncoding("utf8");
+      child.stdio[3].on("data", (chunk) => { observations = `${observations}${chunk}`.slice(-4096); });
+      const waitFor = async (predicate, label) => {
+        let timeout;
+        let inspect;
+        let exited;
+        const event = new Promise((resolve, reject) => {
+          inspect = () => { if (predicate()) resolve(); };
+          exited = () => {
+            if (!predicate()) reject(new Error(
+              `${scenario}: ${label}; exit=${child.exitCode}; observations=${observations}`,
+            ));
+          };
+          child.stderr.on("data", inspect);
+          child.stdio[3].on("data", inspect);
+          child.once("exit", exited);
+          timeout = setTimeout(() => reject(new Error(`${scenario}: ${label} timeout`)), 5000);
+          inspect();
+        });
+        try { await event; } finally {
+          clearTimeout(timeout);
+          child.stderr.removeListener("data", inspect);
+          child.stdio[3].removeListener("data", inspect);
+          child.removeListener("exit", exited);
+        }
+      };
+      await waitFor(() => observations.includes('"armed"'), "armed");
+      if (scenario.startsWith("reader-closed") || scenario === "unrelated-stderr") {
+        const closed = once(child.stderr, "close");
+        child.stderr.destroy();
+        await closed;
+        child.send("forward");
+        await waitFor(() => observations.includes('"lost"'), "actual EPIPE callback");
+        if (scenario === "unrelated-stderr") {
+          child.send("unrelated-stderr");
+          const exit = await waitForOwnedProcessExit(tracked, 5000);
+          assert.equal(exit.code, 1);
+          assert.match(observations, /"event":"uncaught","code":"EPIPE"/u);
+          console.log("supervisor output: unrelated stderr EPIPE remains fatal");
+          continue;
+        }
+        child.send("after-loss");
+        await waitFor(() => observations.includes('"continued"'), "survive lost reader");
+      } else if (scenario === "attached") {
+        child.send("forward");
+        await waitFor(() => output.includes("[augnes:ui] attached-marker"), "attached output");
+        child.send("burst");
+        await waitFor(() => observations.includes('"bounded"'), "bounded burst");
+        const bounded = observations.trim().split("\n").map(JSON.parse).find((row) => row.event === "bounded");
+        assert.ok(bounded.pending_bytes <= 32768, JSON.stringify(bounded));
+      } else {
+        child.send("invalid-descriptor");
+        const exit = await waitForOwnedProcessExit(tracked, 5000);
+        assert.equal(exit.code, 1);
+        assert.match(observations, /"code":"EBADF"/u);
+        console.log("supervisor output: non-EPIPE remains fatal (EBADF)");
+        continue;
+      }
+      child.send("finish");
+      const exit = await waitForOwnedProcessExit(tracked, 5000);
+      assert.equal(exit.code, 0, `${scenario}: ${observations}`);
+      assert.equal(exit.signal, null);
+      console.log(`supervisor output: ${scenario} passed`);
+    }
+  } finally {
+    await cleanupOwnedProcesses(owned);
+    assert.equal(owned.size, 0);
+  }
 }

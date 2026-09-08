@@ -113,6 +113,12 @@ try {
   const firstManagerState = JSON.parse(
     readFileSync(layout.manager_state_path, "utf8"),
   );
+  const beforeManagerCrash = verifiedRuntimeIdentity(live);
+  assert.equal(firstManagerState.supervisor_pid, beforeManagerCrash.supervisor_pid);
+  assert.equal(
+    firstManagerState.supervisor_process_identity,
+    beforeManagerCrash.supervisor_process_identity,
+  );
   process.kill(firstManagerState.manager_pid, "SIGKILL");
   const adoptedAfterManagerCrash = await waitForManagerChange(
     firstManagerState.manager_pid,
@@ -120,6 +126,12 @@ try {
   );
   live = adoptedAfterManagerCrash;
   rememberRuntime(live);
+  const afterManagerCrash = verifiedRuntimeIdentity(live);
+  assert.deepEqual(afterManagerCrash, beforeManagerCrash,
+    "manager replacement must adopt the original verified supervisor, instance, and generation");
+  console.log(JSON.stringify({
+    case: "same-supervisor-adoption", before: beforeManagerCrash, after: afterManagerCrash,
+  }));
   const firstGeneration = live.runtime.generation_id;
   copyFileSync(layout.runtime_manifest_path, oldManifestPath);
   copyFileSync(layout.runtime_access_path, oldAccessPath);
@@ -397,8 +409,14 @@ try {
   );
   const finalManagerIdentity = processIdentity(finalManagerState.manager_pid);
   assert.notEqual(finalManagerIdentity, null);
+  const beforeResidual = verifiedRuntimeIdentity(recoveredFromStaleOwner);
+  assert.equal(finalManagerState.supervisor_pid, beforeResidual.supervisor_pid);
+  assert.equal(
+    finalManagerState.supervisor_process_identity,
+    beforeResidual.supervisor_process_identity,
+  );
   process.kill(finalManagerState.manager_pid, "SIGKILL");
-  spawnSync("/bin/launchctl", [
+  const residualBootout = spawnSync("/bin/launchctl", [
     "bootout",
     `gui/${process.getuid()}/${layout.service_label}`,
   ]);
@@ -407,9 +425,26 @@ try {
     10_000,
   );
   const exactResidual = await inspectCompanionService(options);
+  const residualSupervisorBirth = processIdentity(beforeResidual.supervisor_pid);
+  console.log(JSON.stringify({
+    case: "exact-residual-runtime",
+    before: beforeResidual,
+    bootout: {
+      status: residualBootout.status, signal: residualBootout.signal,
+      error_code: residualBootout.error?.code ?? null,
+    },
+    after: {
+      status: exactResidual.status, reason: exactResidual.reason,
+      loaded: exactResidual.loaded, runtime: exactResidual.runtime,
+    },
+    supervisor_process_identity: residualSupervisorBirth === null
+      ? null : processIdentityFingerprint(beforeResidual.supervisor_pid, residualSupervisorBirth),
+  }));
   assert.equal(exactResidual.status, "recovery_required");
   assert.equal(exactResidual.loaded, false);
   assert.equal(exactResidual.runtime.verified, true);
+  assert.deepEqual(verifiedRuntimeIdentity(exactResidual), beforeResidual,
+    "bootout must leave the exact verified pre-boundary runtime, not surviving children or a replacement");
 
   const finalStaleConfiguration = JSON.parse(
     readFileSync(layout.configuration_path, "utf8"),
@@ -1285,6 +1320,19 @@ function processIdentityFingerprint(pid, birthMaterial = processIdentity(pid)) {
   return createHash("sha256")
     .update(`${process.platform}:${pid}:${birthMaterial}`)
     .digest("hex");
+}
+
+function verifiedRuntimeIdentity(observation) {
+  assert.equal(observation.runtime?.verified, true, observation.reason);
+  const runtime = observation.runtime;
+  assert.equal(typeof runtime.instance_id, "string");
+  assert.equal(typeof runtime.generation_id, "string");
+  return {
+    supervisor_pid: runtime.supervisor_pid,
+    supervisor_process_identity: processIdentityFingerprint(runtime.supervisor_pid),
+    instance_id: runtime.instance_id,
+    generation_id: runtime.generation_id,
+  };
 }
 
 function currentProcessGroupMembers(processGroup) {
