@@ -106,6 +106,8 @@ async function main(): Promise<void> {
   });
   assert.equal(JSON.stringify(threadStart).includes("danger-full-access"), false);
   assert.equal(JSON.stringify(turnStart).includes("dangerFullAccess"), false);
+  assert.equal(trace.some(entry => entry.kind === "received" && entry.value.method === "command/exec"), false,
+    "The default route must not acquire the scoped environment check");
   assert.equal(readFileSync(networkPath, "utf8"), "0\n");
   assert.equal(readFileSync(cleanupPath, "utf8"), "settled\n");
   console.log("codex app-server sandbox projection: passed");
@@ -132,8 +134,8 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
   });
   const environment: NodeJS.ProcessEnv = { NODE_ENV: "test", HOME: path.join(testRoot, "home"), CODEX_HOME: codexHome, TMPDIR: path.join(testRoot, "runtime"), PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
   const configFile = path.join(codexHome, "config.toml");
-  writeFileSync(configFile, '[features]\nmemories=true\nchronicle=true\nplugins=true\n[mcp_servers.inherited]\ncommand="synthetic-must-not-start"\nenabled=true\n[mcp_servers."quoted.server"]\ncommand="synthetic-must-not-start"\n[permissions.old.filesystem]\n"/"="read"\n');
-  const scenarios = ["scoped_success", "scoped_unsupported_capability", "scoped_ignored_memory", "scoped_ignored_mcp", "scoped_ignored_permissions", "scoped_mcp_tool", "scoped_profile_mismatch", "scoped_model_mismatch", "scoped_effort_mismatch", "scoped_approval", "scoped_effect", "scoped_settings_drift", "scoped_result_effect", "scoped_cancel"];
+  writeFileSync(configFile, '[shell_environment_policy.set]\nPATH="/synthetic/unapproved"\nSYNTHETIC_SECRET="secret-like-sentinel"\nORDINARY_SENTINEL="ordinary-sentinel"\n[shell_environment_policy.filters]\n"*"="include"\n[features]\nmemories=true\nchronicle=true\nplugins=true\n[mcp_servers.inherited]\ncommand="synthetic-must-not-start"\nenabled=true\n[mcp_servers."quoted.server"]\ncommand="synthetic-must-not-start"\n[permissions.old.filesystem]\n"/"="read"\n');
+  const scenarios = ["scoped_success", "scoped_unsupported_capability", "scoped_ignored_memory", "scoped_ignored_mcp", "scoped_ignored_permissions", "scoped_ignored_environment_filter", "scoped_command_environment_mismatch", "scoped_mcp_tool", "scoped_profile_mismatch", "scoped_model_mismatch", "scoped_effort_mismatch", "scoped_approval", "scoped_effect", "scoped_settings_drift", "scoped_result_effect", "scoped_cancel"];
   for (const scenario of scenarios) {
     const scope = await scopeFor();
     const tracePath = path.join(testRoot, `${scenario}.jsonl`);
@@ -186,12 +188,16 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
       assert.equal(v.approval_policy, "never");
     }
     if (scenario === "scoped_success") {
+      assert.equal(received.filter(v => v.method === "command/exec").length, 1);
+      assert(received.findIndex(v => v.method === "command/exec") < received.findIndex(v => v.method === "thread/start"));
       assert.equal(received.filter(v => v.method === "turn/start").length, 1);
       for (const entry of trace.filter(entry => entry.kind === "scoped_launch_controls"))
         assert.deepEqual(entry.value, { strict_config: true, ambient_disabled: true, inherited_mcp_disabled: true, synthetic_background_started: false });
     } else if (!['scoped_approval', 'scoped_effect', 'scoped_settings_drift', 'scoped_result_effect', 'scoped_cancel'].includes(scenario)) {
       assert.equal(received.filter(v => v.method === "turn/start").length, 0, scenario);
     }
+    if (scenario === "scoped_command_environment_mismatch")
+      assert.equal(received.filter(v => v.method === "account/read" || v.method === "thread/start").length, 0);
   }
   const scope = await scopeFor();
   await assert.rejects(assertCodexScopedTaskCurrentV01({ ...scope }, request), /not_source_owned/);
@@ -199,7 +205,7 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
   const launch = prepareScopedCodexLaunchV01(scope, environment);
   writeFileSync(configFile, '[shell_environment_policy.set]\nUNAPPROVED="synthetic-only"\n');
   assert.throws(() => launch.assert_sources_current(), /configuration_changed/);
-  assert.throws(() => prepareScopedCodexLaunchV01(scope, environment), /unapproved_configuration_material/);
+  scopedShellEnvironmentV01(scope, environment, configFile);
   writeFileSync(configFile, 'developer_instructions="synthetic private text"\n');
   assert.throws(() => prepareScopedCodexLaunchV01(scope, environment), /unapproved_configuration_material/);
   writeFileSync(configFile, "");
@@ -216,6 +222,51 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
   await clockBoundaryV01(scopeFor, request);
   if (process.argv.includes("--pinned-host-sandbox")) await pinnedSandboxV01(testRoot, stage, held, environment, await scopeFor());
   console.log(`codex scoped projection: ${scenarios.length} fake-host scenarios; source/ambient/clock refusals passed; study calls=0`);
+}
+
+function scopedShellEnvironmentV01(scope: Awaited<ReturnType<typeof createCodexScopedTaskV01>>, environment: NodeJS.ProcessEnv, configFile: string): void {
+  const safePath = "/usr/bin:/bin:/usr/sbin:/sbin";
+  for (const filter of ['include_only=["*"]\nexclude=["PATH"]', '[shell_environment_policy.filters]\n"*"="include"']) {
+    writeFileSync(configFile, `[shell_environment_policy]\ninherit="all"\nexperimental_use_profile=true\n${filter}\n[shell_environment_policy.set]\nPATH="/synthetic/unapproved"\nSYNTHETIC_SECRET="secret-like-sentinel"\nORDINARY_SENTINEL="ordinary-sentinel"\n`);
+    const original = readFileSync(configFile);
+    const launch = prepareScopedCodexLaunchV01(scope, environment);
+    const projected = JSON.stringify({ args: launch.args, settings: launch.settings, check: launch.command_environment_check });
+    for (const sentinel of ["secret-like-sentinel", "ordinary-sentinel", "/synthetic/unapproved"])
+      assert.equal(projected.includes(sentinel), false, "Private set values must not enter launch or diagnostic material");
+    assert.deepEqual(launch.settings.shell_environment_policy, { inherit: "none", ignore_default_excludes: false,
+      set: { PATH: safePath }, include_only: ["PATH"], exclude: [], experimental_use_profile: false });
+    const response = { config: structuredClone(launch.settings), layers: [{ name: { type: "user", file: configFile } }, { name: { type: "sessionFlags" } }] };
+    const policy = response.config.shell_environment_policy as Record<string, unknown>;
+    policy.set = { PATH: safePath, SYNTHETIC_SECRET: "secret-like-sentinel", ORDINARY_SENTINEL: "ordinary-sentinel" };
+    launch.assert_configuration(response);
+    for (const mutation of [
+      { include_only: ["*"] }, { inherit: "all" }, { ignore_default_excludes: true }, { experimental_use_profile: true },
+      { set: { PATH: "/synthetic/unapproved" } }, { set: { PATH: safePath, Path: "alias-sentinel" } },
+      { include_only: null, filters: { PATH: "include", "*": "include" } }, { unknown_policy: true },
+    ]) assert.throws(() => launch.assert_configuration({ ...response, config: { ...response.config,
+      shell_environment_policy: { ...policy, ...mutation } } }), /shell_environment/);
+    policy.include_only = null; policy.exclude = null; policy.filters = { path: "include" };
+    launch.assert_configuration(response); // Pinned canonical filter representation.
+    launch.assert_command_environment({ exitCode: 0, stdout: "augnes-scoped-environment-ok\n", stderr: "" });
+    assert.throws(() => launch.assert_command_environment({ exitCode: 61, stdout: "", stderr: "" }), /command_environment_mismatch/);
+    assert.throws(() => launch.assert_command_environment({ exitCode: 0, stdout: "unexpected-sentinel\n", stderr: "" }), /command_environment_mismatch/);
+    assert.deepEqual(readFileSync(configFile), original);
+  }
+  for (const source of [
+    '[shell_environment_policy.set]\npath="alias-sentinel"',
+    '[shell_environment_policy.set]\nPath="alias-sentinel"',
+    '[shell_environment_policy.set]\nVALUE=12',
+    '[shell_environment_policy]\nunknown_policy=true',
+    '[shell_environment_policy]\ninherit=["none"]',
+    '[shell_environment_policy]\ninclude_only="PATH"',
+    '[shell_environment_policy]\ninclude_only=["PATH"]\n[shell_environment_policy.filters]\nPATH="include"',
+    '[shell_environment_policy.filters]\nPATH="include"\npath="exclude"',
+    '[shell_environment_policy.filters]\nPATH="unknown"',
+  ]) {
+    writeFileSync(configFile, source);
+    assert.throws(() => prepareScopedCodexLaunchV01(scope, environment), /shell_environment/);
+  }
+  console.log("scoped shell environment: closed final filter, source/effective aliases and malformed policies refused, private values absent from projection, default route unchanged");
 }
 
 async function clockBoundaryV01(scopeFor: (stage?: 1 | 2, packet?: NativeHostRequestV01["packet"]) => ReturnType<typeof createCodexScopedTaskV01>, request: NativeHostRequestV01): Promise<void> {
@@ -264,9 +315,18 @@ async function pinnedSandboxV01(testRoot: string, stage: string, held: string, e
   assert.equal(process.platform, "darwin", "This explicit check requires the pinned macOS host");
   const identity = resolveCodexProductionRuntimeV01(); // Read-only selection; no install, login, qualification, or model turn.
   const startupMarker = path.join(testRoot, "unapproved-mcp-started");
-  writeFileSync(path.join(environment.CODEX_HOME!, "config.toml"), `[features]\nmemories=true\nchronicle=true\nplugins=true\n[mcp_servers.inherited]\ncommand="/usr/bin/touch"\nargs=[${JSON.stringify(startupMarker)}]\nenabled=true\n`);
+  const configFile = path.join(environment.CODEX_HOME!, "config.toml");
+  const authFile = path.join(environment.CODEX_HOME!, "auth.json");
+  writeFileSync(authFile, "{}\n"); // Empty synthetic file store; never copy production auth.
+  const authBefore = readFileSync(authFile);
+  for (const filter of ['include_only=["*"]\nexclude=["PATH"]', '[shell_environment_policy.filters]\n"*"="include"']) {
+    writeFileSync(configFile, `[shell_environment_policy]\ninherit="all"\nexperimental_use_profile=true\n${filter}\n[shell_environment_policy.set]\nPATH="/synthetic/unapproved"\nSYNTHETIC_SECRET="secret-like-sentinel"\nORDINARY_SENTINEL="ordinary-sentinel"\nBASH_ENV="/synthetic/no-profile"\nCODEX_UNAPPROVED="not-runtime-metadata"\n[features]\nmemories=true\nchronicle=true\nplugins=true\n[mcp_servers.inherited]\ncommand="/usr/bin/touch"\nargs=[${JSON.stringify(startupMarker)}]\nenabled=true\n`);
+    const original = readFileSync(configFile);
+    await pinnedConfigurationV01(identity.canonical_native_executable, prepareScopedCodexLaunchV01(scope, environment), environment, stage, testRoot);
+    assert.deepEqual(readFileSync(configFile), original, "Diagnostic must leave original synthetic config unchanged");
+    assert.deepEqual(readFileSync(authFile), authBefore, "Diagnostic must leave original synthetic auth unchanged");
+  }
   const launch = prepareScopedCodexLaunchV01(scope, environment);
-  await pinnedConfigurationV01(identity.canonical_native_executable, launch, environment, stage, testRoot);
   assert.equal(statExistsV01(startupMarker), false, "Inherited MCP must be disabled before process startup");
   // The pinned diagnostic subcommand explicitly does not support strict-config.
   // Its named permission/profile projection is the same; App Server retains
@@ -348,6 +408,21 @@ async function pinnedConfigurationV01(executable: string, launch: ReturnType<typ
               send({ id: 3, method: "mcpServerStatus/list", params: {} });
             } else if (message.id === 3) {
               launch.assert_mcp_catalog(message.result);
+              // macOS refuses a second seatbelt installation in this already
+              // sandboxed diagnostic. The outer profile remains the OS owner.
+              // command/exec builds its environment before sandbox selection;
+              // this exercises that real consumer, not a replacement env_clear.
+              // Production always uses the named profile, never this override.
+              const { permissionProfile: _profile, ...check } = launch.command_environment_check;
+              send({ id: 4, method: "command/exec", params: { ...check,
+                sandboxPolicy: { type: "externalSandbox", networkAccess: "restricted" } } });
+            } else if (message.id === 4) {
+              try { launch.assert_command_environment(message.result); }
+              catch {
+                throw new Error(`pinned_command_environment_refused:${JSON.stringify({ exit_code: message.result.exitCode,
+                  stdout_matches: message.result.stdout === "augnes-scoped-environment-ok\n", stderr_empty: message.result.stderr === "",
+                  sandbox_denial: /Operation not permitted|Permission denied/.test(message.result.stderr ?? "") })}`);
+              }
               completed = true; child.stdin.end(); resolve();
             } else if (message.method && /mcpServer\/startup|model\/|hook\//.test(message.method)) {
               throw new Error("scoped_pinned_unexpected_startup_capability");
@@ -361,7 +436,7 @@ async function pinnedConfigurationV01(executable: string, launch: ReturnType<typ
     clearTimeout(timer); child.stdin.destroy();
     assert.equal((await stopOwnedProcessTreeV01(child, { graceful_timeout_ms: 1_000, forced_timeout_ms: 2_000 })).settled, true);
   }
-  console.log("pinned App Server: strict launch, experimental initialize, effective named policy and zero callable MCP capabilities verified; outer OS network denial; no account/thread/turn RPC");
+  console.log("pinned App Server: strict launch, effective closed shell filter and actual command/exec environment predicate passed; inherited PATH replaced, secret-like/ordinary/profile/CODEX sentinels excluded; zero callable MCP; externalSandbox command uses existing outer OS network denial; no account/thread/turn RPC");
 }
 
 async function boundedCommandV01(command: string, args: string[], environment: NodeJS.ProcessEnv, cwd: string, afterPolicyInstalled?: () => void): Promise<{ code: number | null; stdout: string; stderr: string }> {

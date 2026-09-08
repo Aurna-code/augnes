@@ -355,6 +355,15 @@ async function handle(message) {
       );
       return;
     }
+    if (message.method === "command/exec" && scopedScenario) {
+      const p = message.params;
+      const bounded = p.command?.[0] === "/usr/bin/awk" && p.command.length === 2 &&
+        p.permissionProfile === scopedPermissions && p.timeoutMs === 10_000 && p.outputBytesCap === 128 &&
+        !Object.hasOwn(p, "env") && !Object.hasOwn(p, "sandboxPolicy");
+      respond(message.id, { exitCode: bounded && scenario !== "scoped_command_environment_mismatch" ? 0 : 61,
+        stdout: bounded && scenario !== "scoped_command_environment_mismatch" ? "augnes-scoped-environment-ok\n" : "", stderr: "" });
+      return;
+    }
     if (message.method === "config/read") {
       if (scopedScenario) {
         const configPath = path.join(process.env.CODEX_HOME, "config.toml");
@@ -366,6 +375,7 @@ async function handle(message) {
         if (scenario === "scoped_ignored_memory") config.features.memories = true;
         if (scenario === "scoped_ignored_mcp") config.mcp_servers.inherited.enabled = true;
         if (scenario === "scoped_ignored_permissions") config.permissions[scopedPermissions].filesystem["/"] = "read";
+        if (scenario === "scoped_ignored_environment_filter") config.shell_environment_policy.include_only = ["*"];
         scopedConfig = config;
         trace("scoped_launch_controls", {
           strict_config: process.argv.includes("--strict-config"),
@@ -1695,11 +1705,15 @@ function structuredResult() {
 }
 
 // Synthetic fixture only: model the pinned loader's recursive TOML merge.
-function mergeScopedFixtureConfig(target, source) {
+function mergeScopedFixtureConfig(target, source, keys = []) {
+  if (keys.length === 1 && keys[0] === "shell_environment_policy") {
+    if (Object.hasOwn(source, "filters")) { delete target.exclude; delete target.include_only; }
+    else if (Object.hasOwn(source, "exclude") || Object.hasOwn(source, "include_only")) delete target.filters;
+  }
   for (const [key, value] of Object.entries(source)) {
     if (value && typeof value === "object" && !Array.isArray(value)) {
       if (!target[key] || typeof target[key] !== "object" || Array.isArray(target[key])) target[key] = {};
-      mergeScopedFixtureConfig(target[key], value);
+      mergeScopedFixtureConfig(target[key], value, [...keys, key]);
     } else target[key] = value;
   }
 }
