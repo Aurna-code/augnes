@@ -1,0 +1,396 @@
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { parse } from "smol-toml";
+
+import { canonicalizeProtocolValueV01, createProtocolSha256V01 } from "@/lib/vnext/protocol-primitives";
+import { inspectNativeHostPhysicalRootIdentityV01 } from "@/lib/vnext/native-host/project-root-identity";
+import type { NativeHostPhysicalRootIdentityV01, NativeHostRequestV01 } from "@/types/vnext/native-host-adapter";
+import type { NativeHostTimeoutSchedulerV01 } from "@/lib/vnext/runtime/direct-native-host-round-trip";
+
+// An application-local restriction. It is never serialized as an authority
+// grant, accepted from an HTTP body, or used by the default desktop route.
+export interface CodexScopedTaskV01 {
+  readonly fingerprint: string;
+  readonly stage: 1 | 2;
+}
+interface StageMaterial {
+  stage: 1 | 2;
+  root: string;
+  physical: NativeHostPhysicalRootIdentityV01;
+  packet_id: string;
+  packet_fingerprint: string;
+  guide_brief_fingerprint: string;
+  files: readonly Readonly<{ relative_path: string; sha256: string }>[];
+  approved_instruction_files: readonly Readonly<{ path: string; sha256: string }>[];
+}
+const scopes = new WeakMap<CodexScopedTaskV01, Readonly<StageMaterial>>();
+const consumed = new WeakSet<CodexScopedTaskV01>();
+export const SCOPED_CODEX_MODEL_V01 = "gpt-6-astra";
+export const SCOPED_CODEX_EFFORT_V01 = "max";
+export const SCOPED_CODEX_CONTRACT_V01 = "codex_synthetic_read_scope.v0.1";
+
+export class CodexScopedTaskErrorV01 extends Error {
+  constructor(readonly code: string) { super(code); this.name = "CodexScopedTaskErrorV01"; }
+}
+function refuse(code: string): never { throw new CodexScopedTaskErrorV01(`codex_scoped_${code}`); }
+function digest(bytes: Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
+function equal(a: unknown, b: unknown): boolean { return canonicalizeProtocolValueV01(a) === canonicalizeProtocolValueV01(b); }
+function record(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) refuse("object_invalid");
+  return value as Record<string, unknown>;
+}
+function optionalRecord(value: unknown): Record<string, unknown> { return value == null ? {} : record(value); }
+function freeze<T>(value: T): T {
+  if (value && typeof value === "object") {
+    Object.values(value).forEach(freeze); Object.freeze(value);
+  }
+  return value;
+}
+function material(scope: CodexScopedTaskV01): Readonly<StageMaterial> {
+  const result = scopes.get(scope); if (!result) refuse("scope_not_source_owned"); return result;
+}
+function fileBytes(filename: string, limit = 128 * 1024): Buffer {
+  try {
+    const stat = lstatSync(filename);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > limit || realpathSync(filename) !== filename)
+      refuse("file_identity_invalid");
+    const bytes = readFileSync(filename);
+    if (bytes.length !== stat.size) refuse("file_changed");
+    return bytes;
+  } catch { refuse("file_unavailable_or_changed"); }
+}
+
+/** The trusted disposable operator supplies reviewed hashes, not worker flags. */
+export async function createCodexScopedTaskV01(input: {
+  stage: 1 | 2;
+  canonical_root: string;
+  packet_id: string;
+  packet_fingerprint: string;
+  guide_brief_fingerprint: string;
+  files: readonly Readonly<{ relative_path: string; sha256: string }>[];
+  approved_instruction_files?: readonly Readonly<{ path: string; sha256: string }>[];
+}): Promise<CodexScopedTaskV01> {
+  if (![1, 2].includes(input.stage) || !input.packet_id || !/^sha256:[a-f0-9]{64}$/u.test(input.packet_fingerprint) ||
+    !/^sha256:[a-f0-9]{64}$/u.test(input.guide_brief_fingerprint) ||
+    input.files.length < 1 || input.files.length > 8) refuse("stage_invalid");
+  const value: StageMaterial = {
+    stage: input.stage, root: input.canonical_root,
+    physical: await inspectNativeHostPhysicalRootIdentityV01(input.canonical_root),
+    packet_id: input.packet_id, packet_fingerprint: input.packet_fingerprint,
+    guide_brief_fingerprint: input.guide_brief_fingerprint,
+    files: structuredClone(input.files),
+    approved_instruction_files: structuredClone(input.approved_instruction_files ?? []),
+  };
+  // Flat, exact files are sufficient for this case and exclude config/skill
+  // directories and symlink traversal. No parent-directory read grant is made.
+  if (value.files.some(f => !/^[A-Za-z0-9][A-Za-z0-9_-]*\.(?:json|md|txt)$/u.test(f.relative_path) ||
+    /^(?:AGENTS|CLAUDE)\./iu.test(f.relative_path) || !/^[a-f0-9]{64}$/u.test(f.sha256)) ||
+    new Set(value.files.map(f => f.relative_path)).size !== value.files.length ||
+    value.approved_instruction_files.length > 4 || value.approved_instruction_files.some(f =>
+      !path.isAbsolute(f.path) || !/^[a-f0-9]{64}$/u.test(f.sha256))) refuse("files_invalid");
+  const scope = freeze({ fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01(value)), stage: input.stage });
+  scopes.set(scope, freeze(value));
+  await assertCodexScopedTaskCurrentV01(scope);
+  return scope;
+}
+
+export async function assertCodexScopedTaskCurrentV01(scope: CodexScopedTaskV01, request?: NativeHostRequestV01): Promise<void> {
+  const m = material(scope);
+  if (!equal(await inspectNativeHostPhysicalRootIdentityV01(m.root), m.physical)) refuse("root_changed");
+  const entries = readdirSync(m.root).sort();
+  if (!equal(entries, m.files.map(f => f.relative_path).sort())) refuse("stage_inventory_changed");
+  for (const f of m.files) if (digest(fileBytes(path.join(m.root, f.relative_path))) !== f.sha256) refuse("stage_hash_changed");
+  for (const f of m.approved_instruction_files) if (digest(fileBytes(f.path)) !== f.sha256) refuse("instruction_hash_changed");
+  if (!request) return;
+  if (request.mode !== "interactive" || request.automation_context || request.repository_delegation_context ||
+    request.repository_resume_context || request.execution_grant_ref || request.packet_capability_grant ||
+    request.root_scope.root_kind !== "plain_folder" || request.root_scope.canonical_root !== m.root ||
+    !equal(request.root_scope.physical_root_identity, m.physical) ||
+    request.packet.packet_id !== m.packet_id || request.packet.integrity.fingerprint !== m.packet_fingerprint ||
+    createProtocolSha256V01(canonicalizeProtocolValueV01(request.guide_brief ?? null)) !== m.guide_brief_fingerprint ||
+    request.task_context_packet_ref.external_id !== m.packet_id ||
+    request.policy.filesystem !== "selected_project_root_only" || request.policy.model !== "native_host_managed" ||
+    !request.allowed_operation_categories.includes("read_validated_task_context") ||
+    !request.allowed_operation_categories.includes("return_bounded_structured_result") ||
+    (m.stage === 2 && (!("source_transition_receipt_ref" in request.packet_lineage) || !request.packet_lineage.source_transition_receipt_ref))) refuse("request_binding_mismatch");
+}
+
+// Pin only the small extension's controls, not the historical qualification
+// fingerprint. The host supports these at tagged source 5adb68a... (0.152.1).
+const DISABLED_FEATURES = [
+  "memories", "external_agent_memory_import", "chronicle", "background_paginated_rollout_migration",
+  "apps", "plugins", "remote_plugin", "plugin_hooks", "hooks", "recommended_plugins",
+  "executor_capability_discovery", "enable_mcp_apps", "tool_search", "tool_suggest", "skill_search",
+  "skill_mcp_dependency_install", "skill_env_var_dependency_prompt", "mentions_v2", "mcp_2026_07_28",
+  "multi_agent", "multi_agent_v2", "enable_fanout", "goals", "sleep_tool", "send_async_message",
+  "computer_use", "browser_use", "browser_use_external", "browser_use_full_cdp_access", "in_app_browser",
+  "in_app_chat", "in_app_local_automation", "image_generation", "workspace_dependencies",
+  "request_permissions_tool", "network_proxy", "remote_control", "realtime_conversation",
+  "auth_elicitation", "use_agent_identity", "shell_snapshot", "shell_snapshot_v2",
+  "web_search_request", "web_search_cached", "standalone_web_search", "guardian_approval", "guardianv2",
+  "guardian_ext", "step_model_switching",
+  "view_image", "code_mode", "code_mode_host", "code_mode_prewarm", "code_mode_only", "js_repl", "js_repl_tools_only",
+  "deferred_executor", "local_thread_store_compression", "local_thread_store_shared_compression",
+  "tool_call_mcp_elicitation", "unavailable_dummy_tools",
+] as const;
+
+function configFiles(codexHome: string, root: string): string[] {
+  const files = new Set(["/etc/codex/config.toml", path.join(codexHome, "config.toml")]);
+  for (let current = root; ; current = path.dirname(current)) {
+    files.add(path.join(current, ".codex", "config.toml"));
+    if (current === path.dirname(current)) break;
+  }
+  return [...files].sort();
+}
+function readConfig(filename: string): Record<string, unknown> {
+  if (!existsSync(filename)) return {};
+  try { return record(parse(fileBytes(filename).toString("utf8"))); }
+  catch { refuse("configuration_unreadable"); }
+}
+const UNAPPROVED_CONFIG_MATERIAL = [
+  "instructions", "developer_instructions", "model_instructions_file", "compact_prompt", "experimental_compact_prompt_file",
+  "model_catalog_json", "profile", "chatgpt_base_url", "openai_base_url", "experimental_thread_store_endpoint", "experimental_thread_store",
+] as const;
+function assertNoUnapprovedConfiguration(c: Record<string, unknown>): void {
+  for (const key of UNAPPROVED_CONFIG_MATERIAL) {
+    // Config/read materializes the pinned built-in subscription endpoint.
+    if (key === "chatgpt_base_url" && ["https://chatgpt.com/backend-api", "https://chatgpt.com/backend-api/"].includes(String(c[key]))) continue;
+    if (c[key] != null && c[key] !== "") refuse(`unapproved_configuration_material_${key}`);
+  }
+  for (const key of ["model_providers", "profiles", "responses_api_metadata", "otel"])
+    if (Object.keys(optionalRecord(c[key])).length) refuse(`unapproved_configuration_material_${key}`);
+}
+function inline(value: unknown): string {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean" || typeof value === "number") return String(value);
+  if (Array.isArray(value)) return `[${value.map(inline).join(",")}]`;
+  return `{${Object.entries(record(value)).map(([key, val]) => `${JSON.stringify(key)}=${inline(val)}`).join(",")}}`;
+}
+function permissionProjection(value: unknown): Record<string, unknown> {
+  const p = structuredClone(record(value));
+  // Pinned PermissionProfileToml serializes these Option fields as null.
+  // Normalize only those known absent defaults; every non-null addition,
+  // inherited root, network rule, or unknown field still fails equality.
+  for (const key of ["description", "extends", "workspace_roots"]) if (p[key] === null) delete p[key];
+  const fs = record(p.filesystem), net = record(p.network);
+  if (fs.glob_scan_max_depth === null) delete fs.glob_scan_max_depth;
+  for (const key of ["proxy_url", "enable_socks5", "socks_url", "enable_socks5_udp", "allow_upstream_proxy",
+    "dangerously_allow_non_loopback_proxy", "dangerously_allow_all_unix_sockets", "mode", "domains", "unix_sockets", "allow_local_binding", "mitm"])
+    if (net[key] === null) delete net[key];
+  return p;
+}
+export interface ScopedCodexLaunchV01 {
+  readonly args: readonly string[];
+  readonly profile_name: string;
+  readonly settings: Readonly<Record<string, unknown>>;
+  readonly configuration_fingerprint: string;
+  assert_sources_current(): void;
+  assert_configuration(response: unknown): void;
+  assert_mcp_catalog(response: unknown): void;
+  assert_thread(response: unknown): void;
+  assert_settings(response: unknown): void;
+}
+
+/** Reads local configuration only to suppress sources before process startup.
+ * Never returns config contents, credentials, prompts, or personal memory. */
+export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environment: NodeJS.ProcessEnv): ScopedCodexLaunchV01 {
+  const m = material(scope);
+  const codexHome = path.resolve(environment.CODEX_HOME ?? path.join(environment.HOME ?? os.homedir(), ".codex"));
+  const paths = configFiles(codexHome, m.root);
+  const servers = new Set<string>();
+  const sourceHashes = new Map<string, string | null>();
+  // These managed sources can override session controls. This bounded opt-in
+  // refuses their presence; it never disables or rewrites managed policy.
+  for (const p of ["/etc/codex/requirements.toml", "/etc/codex/managed_config.toml",
+    path.join(codexHome, "managed_config.toml"), "/Library/Managed Preferences/com.openai.codex.plist",
+    path.join(environment.HOME ?? os.homedir(), "Library/Managed Preferences/com.openai.codex.plist")]) {
+    if (existsSync(p)) refuse("managed_configuration_requires_review");
+    sourceHashes.set(p, null);
+  }
+  for (const p of paths) {
+    sourceHashes.set(p, existsSync(p) ? digest(fileBytes(p)) : null);
+    const c = readConfig(p);
+    assertNoUnapprovedConfiguration(c);
+    Object.keys(optionalRecord(c.mcp_servers)).forEach(name => servers.add(name));
+    if (Object.keys(optionalRecord(optionalRecord(c.shell_environment_policy).set)).length)
+      refuse("unapproved_configuration_material");
+  }
+  if (servers.size > 32) refuse("configuration_bound_exceeded");
+  for (const name of ["AGENTS.md", "AGENTS.override.md"]) {
+    const p = path.join(codexHome, name);
+    const hash = existsSync(p) ? digest(fileBytes(p)) : null;
+    sourceHashes.set(p, hash);
+    if (hash && !m.approved_instruction_files.some(f => f.path === p && f.sha256 === hash)) refuse("unapproved_instructions");
+  }
+  const profileName = `augnes_synthetic_${scope.fingerprint.slice(7)}`;
+  // The pinned :minimal preset also supplies required macOS startup syscalls.
+  // Keep those OS mechanics, but explicitly deny its unrelated configuration,
+  // database, third-party library and terminal read exceptions. The preset by
+  // itself is NOT an approved synthetic data boundary.
+  const runtimeDataDenials = ["/etc", "/private/etc", "/var/db", "/private/var/db", "/Library/Preferences",
+    "/Library/Filesystems/NetFSPlugins", "/opt/homebrew/lib", "/usr/local/lib", "/dev/tty", "/dev/ttys*"];
+  const profile = { filesystem: { ":minimal": "read", ...Object.fromEntries(runtimeDataDenials.map(p => [p, "deny"])),
+    ...Object.fromEntries(m.files.map(f => [path.join(m.root, f.relative_path), "read"])) }, network: { enabled: false } };
+  const settings: Record<string, unknown> = {
+    model: SCOPED_CODEX_MODEL_V01, model_provider: "openai", model_reasoning_effort: SCOPED_CODEX_EFFORT_V01,
+    default_permissions: profileName, permissions: { [profileName]: profile }, web_search: "disabled",
+    approval_policy: "never", approvals_reviewer: "user",
+    features: { ...Object.fromEntries(DISABLED_FEATURES.map(f => [f, false])), skip_host_skill_discovery: true },
+    memories: { use_memories: false, generate_memories: false },
+    mcp_servers: Object.fromEntries([...servers].sort().map(name => [name, { enabled: false }])),
+    skills: { bundled: { enabled: false }, include_instructions: false },
+    orchestrator: { mcp: { enabled: false }, skills: { enabled: false } },
+    project_doc_max_bytes: 0, project_doc_fallback_filenames: [], allow_login_shell: false,
+    check_for_update_on_startup: false, notify: [],
+    shell_environment_policy: { inherit: "none", ignore_default_excludes: false, set: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" } },
+  };
+  const args = ["--strict-config", ...Object.entries(settings).flatMap(([key, value]) => ["-c", `${key}=${inline(value)}`])];
+  const assertSources = () => {
+    for (const [p, hash] of sourceHashes) if ((existsSync(p) ? digest(fileBytes(p)) : null) !== hash) refuse("configuration_changed");
+  };
+  const assertConfiguration = (response: unknown) => {
+    assertSources();
+    const r = record(response), c = record(r.config);
+    assertNoUnapprovedConfiguration(c);
+    for (const key of ["model", "model_provider", "model_reasoning_effort", "default_permissions", "web_search", "project_doc_max_bytes", "allow_login_shell"])
+      if (!equal(c[key], settings[key])) refuse("effective_configuration_mismatch");
+    const features = record(c.features);
+    for (const key of DISABLED_FEATURES) {
+      const val = features[key];
+      if (val !== false && (val == null || typeof val !== "object" || record(val).enabled !== false)) refuse("ambient_feature_enabled");
+    }
+    const checks: [string, boolean][] = [
+      ["skill_discovery", features.skip_host_skill_discovery === true],
+      ["memories", record(c.memories).use_memories === false && record(c.memories).generate_memories === false],
+      ["skills", record(record(c.skills).bundled).enabled === false && record(c.skills).include_instructions === false],
+      ["orchestrator", record(record(c.orchestrator).mcp).enabled === false && record(record(c.orchestrator).skills).enabled === false],
+      ["mcp", Object.values(optionalRecord(c.mcp_servers)).every(v => record(v).enabled === false)],
+      ["permissions", equal(permissionProjection(record(c.permissions)[profileName]), profile)],
+      ["provider", Object.keys(optionalRecord(c.model_providers)).length === 0],
+      ["shell_environment", equal(record(c.shell_environment_policy).set, { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" }) && record(c.shell_environment_policy).inherit === "none"],
+    ];
+    for (const [key, valid] of checks) if (!valid) refuse(`effective_${key}_mismatch`);
+    if (!Array.isArray(r.layers)) refuse("configuration_provenance_missing");
+    for (const layer of r.layers) {
+      const name = record(record(layer).name);
+      if (name.type === "sessionFlags") continue;
+      if (name.type === "user" || name.type === "system") {
+        if (typeof name.file !== "string" || !sourceHashes.has(name.file)) refuse("configuration_source_unknown");
+      } else if (name.type === "project") {
+        if (typeof name.dotCodexFolder !== "string" || !sourceHashes.has(path.join(name.dotCodexFolder, "config.toml"))) refuse("configuration_source_unknown");
+      } else if (name.type !== "packagedDefaults") refuse("configuration_source_unknown");
+    }
+  };
+  const assertProfile = (r: Record<string, unknown>) => {
+    const active = record(r.activePermissionProfile);
+    if (active.id !== profileName || active.extends != null) refuse("permission_profile_mismatch");
+  };
+  const assertThread = (response: unknown) => {
+    assertSources();
+    const r = record(response), thread = record(r.thread);
+    assertProfile(r);
+    if (r.model !== SCOPED_CODEX_MODEL_V01 || r.modelProvider !== "openai" || r.reasoningEffort !== SCOPED_CODEX_EFFORT_V01 ||
+      r.cwd !== m.root || thread.cwd !== m.root || thread.modelProvider !== "openai" || thread.cliVersion !== "0.152.1" ||
+      r.approvalPolicy !== "never" || r.approvalsReviewer !== "user" ||
+      record(r.sandbox).type !== "readOnly" || record(r.sandbox).networkAccess !== false ||
+      thread.ephemeral !== true || !Array.isArray(thread.turns) || thread.turns.length ||
+      !Array.isArray(r.instructionSources) || r.instructionSources.some(p => !m.approved_instruction_files.some(f => f.path === p)))
+      refuse("thread_binding_mismatch");
+  };
+  return freeze({
+    args, profile_name: profileName, settings,
+    configuration_fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01({ settings, source_hashes: [...sourceHashes] })),
+    assert_sources_current: assertSources, assert_configuration: assertConfiguration, assert_thread: assertThread,
+    assert_mcp_catalog(response: unknown) {
+      const r = record(response);
+      if (!Array.isArray(r.data) || r.data.length > servers.size || r.nextCursor !== null) refuse("mcp_catalog_invalid");
+      for (const value of r.data) {
+        const server = record(value);
+        if (typeof server.name !== "string" || !servers.has(server.name) || server.pluginId != null || server.runtimeStatus != null || server.serverInfo != null ||
+          Object.keys(record(server.tools)).length || !equal(server.resources, []) || !equal(server.resourceTemplates, [])) refuse("mcp_capability_present");
+      }
+    },
+    assert_settings(response: unknown) {
+      const r = record(response); assertProfile(r);
+      if (r.model !== SCOPED_CODEX_MODEL_V01 || r.modelProvider !== "openai" || r.effort !== SCOPED_CODEX_EFFORT_V01 ||
+        r.cwd !== m.root || r.approvalPolicy !== "never" || r.approvalsReviewer !== "user") refuse("settings_binding_mismatch");
+    },
+  });
+}
+
+export async function consumeScopedCodexTaskV01(scope: CodexScopedTaskV01, request: NativeHostRequestV01): Promise<void> {
+  if (consumed.has(scope)) refuse("scope_already_consumed");
+  consumed.add(scope);
+  await assertCodexScopedTaskCurrentV01(scope, request);
+}
+
+export interface CodexFeasibilityWindowV01 {
+  begin(scope: CodexScopedTaskV01, timeout_ms: number, settle_ms: number): CodexScopedAttemptV01;
+  snapshot(): Readonly<{ attempts: number; active: boolean; stopped: boolean; remaining_window_ms: number | null }>;
+}
+const windows = new WeakSet<CodexFeasibilityWindowV01>();
+export function assertCodexScopedExecutionV01(input: { scope: CodexScopedTaskV01; window: CodexFeasibilityWindowV01 }): void {
+  material(input.scope);
+  if (!windows.has(input.window)) refuse("window_not_source_owned");
+}
+export interface CodexScopedAttemptV01 {
+  readonly scope: CodexScopedTaskV01;
+  readonly timeout_ms: number;
+  readonly stop_settle_timeout_ms: number;
+  before_invoke(request: NativeHostRequestV01): Promise<void>;
+  schedule(scheduler: NativeHostTimeoutSchedulerV01): NativeHostTimeoutSchedulerV01;
+  finish(completed: boolean): void;
+}
+
+/** One disposable case, one shared clock, no timer or durable/global budget. */
+export function createCodexFeasibilityWindowV01(now_ms: () => number = () => performance.now()): CodexFeasibilityWindowV01 {
+  let deadline: number | null = null, last = -Infinity, count = 0, active = false, failed = false;
+  let prior: Readonly<StageMaterial> | null = null;
+  const now = () => {
+    const n = now_ms(); if (!Number.isFinite(n) || n < last) refuse("clock_invalid"); last = n; return n;
+  };
+  const window = Object.freeze({
+    snapshot() {
+      const remaining = deadline === null ? null : Math.max(0, Math.floor(deadline - now()));
+      if (remaining === 0) failed = true;
+      return Object.freeze({ attempts: count, active, stopped: failed, remaining_window_ms: remaining });
+    },
+    begin(scope: CodexScopedTaskV01, timeout: number, settle: number): CodexScopedAttemptV01 {
+      const time = now(); deadline ??= time + 600_000;
+      const m = material(scope);
+      if (failed || active || count >= 2 || m.stage !== count + 1 ||
+        (prior && (m.root !== prior.root || !equal(m.physical, prior.physical) || m.packet_id === prior.packet_id || m.packet_fingerprint === prior.packet_fingerprint))) {
+        failed = true; refuse("window_start_refused");
+      }
+      count += 1;
+      if (!Number.isInteger(timeout) || timeout <= 0 || !Number.isInteger(settle) || settle <= 0) { failed = true; refuse("limit_invalid"); }
+      const stop = Math.min(settle, 10_000);
+      const allowance = Math.floor(Math.min(timeout, 180_000, deadline - time - stop));
+      if (allowance <= 0) { failed = true; refuse("window_expired"); }
+      active = true; prior = m;
+      let finished = false;
+      const remaining = () => Math.floor(Math.min(allowance, deadline! - now() - stop));
+      return Object.freeze({
+        scope, timeout_ms: allowance, stop_settle_timeout_ms: stop,
+        async before_invoke(request: NativeHostRequestV01) {
+          if (remaining() <= 0) { failed = true; refuse("window_expired"); }
+          await assertCodexScopedTaskCurrentV01(scope, request);
+          if (remaining() <= 0) { failed = true; refuse("window_expired"); }
+        },
+        schedule(scheduler: NativeHostTimeoutSchedulerV01): NativeHostTimeoutSchedulerV01 {
+          return input => {
+            const ms = Math.min(input.timeout_ms, remaining());
+            const on_timeout = () => { failed = true; input.on_timeout(); };
+            if (ms <= 0) { on_timeout(); return () => undefined; }
+            return scheduler({ ...input, timeout_ms: ms, on_timeout });
+          };
+        },
+        finish(completed: boolean) { if (finished) return; finished = true; active = false; if (!completed || now() > deadline!) failed = true; },
+      });
+    },
+  });
+  windows.add(window);
+  return window;
+}

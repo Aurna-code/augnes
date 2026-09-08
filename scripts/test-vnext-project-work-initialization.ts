@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 import Database from "better-sqlite3";
+import { LiveNativeHostRunServiceV01 } from "../lib/vnext/runtime/live-native-host-run-service";
+import { createCodexAppServerAdapterV01 } from "../lib/vnext/native-host/codex-app-server-adapter";
+import { createCodexScopedTaskV01, createCodexFeasibilityWindowV01 } from "../lib/vnext/native-host/codex-scoped-task";
+import { buildTaskStartGuideBriefCodexProjectionV02 } from "../lib/vnext/guide-brief/project-guide-brief";
 import { buildSelectedWorkSourceEntry, compareSelectedWorkSources, normalizeSelectedWorkSources, readSelectedWorkSources } from "../lib/intake/selected-work-source-comparison";
 import { SELECTED_WORK_SOURCE_LABELS } from "../types/vnext/project-work-revision";
 import { recallRetainedWorkSources, resolveRetainedWorkSources } from "../lib/intake/retained-work-source-recall";
@@ -104,6 +109,10 @@ void main().catch((error) => {
 
 async function main(): Promise<void> {
   try {
+    if (process.argv.includes("--scoped-host-only")) {
+      await assertScopedNativeHostConnectionV01();
+      return;
+    }
     if (process.argv.includes("--executed-follow-up-only")) {
       await assertExecutedReviewedFollowUpV01();
       return;
@@ -124,6 +133,7 @@ async function main(): Promise<void> {
     await assertRetainedSourceRecallV01();
     await assertSeparateNativeHostStartV01();
     await assertRevisedNativeHostStartV01();
+    await assertScopedNativeHostConnectionV01();
     console.log(JSON.stringify({
       status: "pass",
       contract: "project_work_initialization.v0.1",
@@ -152,6 +162,64 @@ async function main(): Promise<void> {
   } finally {
     rmSync(ROOT, { recursive: true, force: true });
   }
+}
+
+async function assertScopedNativeHostConnectionV01(): Promise<void> {
+  for (const mismatch of [false, true]) {
+    const name = mismatch ? "scoped-source-refusal" : "scoped-native-result";
+    const fixture = createFixtureV01(name, false, true, true);
+    let service: LiveNativeHostRunServiceV01 | null = null;
+    try {
+      const taskFile = path.join(fixture.root, "TASK.txt");
+      writeFileSync(taskFile, "Synthetic scoped native result check.\n");
+      const defined = defineInitialProjectWorkV01(fixture.db, {
+        config: fixture.config, credential: authenticatedSessionV01(fixture, "scoped"),
+        request: requestV01(fixture), clock: fixedClock(T2),
+      });
+      const scope = await createCodexScopedTaskV01({ stage: 1, canonical_root: fixture.root,
+        packet_id: defined.packet.packet_id, packet_fingerprint: defined.packet.integrity.fingerprint,
+        guide_brief_fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01(buildTaskStartGuideBriefCodexProjectionV02({ packet: defined.packet, project_name: `First work ${name}` }))),
+        files: [{ relative_path: "TASK.txt", sha256: createHash("sha256").update(readFileSync(taskFile)).digest("hex") }],
+      });
+      const hostHome = path.join(ROOT, `${name}-home`); mkdirSync(hostHome);
+      const trace = path.join(ROOT, `${name}-trace.jsonl`);
+      const cleanup = path.join(ROOT, `${name}-cleanup`);
+      const window = createCodexFeasibilityWindowV01();
+      service = new LiveNativeHostRunServiceV01({ now: timestampSequenceV01("2026-08-01T00:00:04.000Z"),
+        scoped_task: { scope, window }, timeout_ms: 10_000, stop_settle_timeout_ms: 3_000,
+        adapter_factory: bound => createCodexAppServerAdapterV01({ scoped_task: bound, launch: {
+          command: process.execPath, prefix_args: [path.join(process.cwd(), "scripts/fixtures/fake-codex-app-server.mjs")],
+          environment: { NODE_ENV: "test", HOME: hostHome, CODEX_HOME: hostHome, PATH: process.env.PATH,
+            FAKE_CODEX_SCENARIO: "scoped_success", FAKE_CODEX_TRACE_PATH: trace, FAKE_CODEX_CLEANUP_MARKER_PATH: cleanup },
+        } }),
+      });
+      if (mismatch) writeFileSync(taskFile, "Synthetic drift after admission preparation.\n");
+      const credential = credentialFromCookieV01(defined.session_admission.cookie_value);
+      const start = () => service!.start({ config: fixture.config, mode: "interactive", operator_mutation: { credential, clock: fixedClock("2026-08-01T00:00:04.000Z") } });
+      if (mismatch) await assert.rejects(start(), /direct_host_repository_launch_gate_blocked/);
+      const started = mismatch ? null : await start();
+      const deadline = performance.now() + 10_000;
+      let projection = started?.projection ?? service.read(fixture.config);
+      while (!["completed", "failed", "paused", "blocked", "cancelled", "timed_out"].includes(projection.status)) {
+        assert(performance.now() < deadline, "scoped service must settle within its existing limit");
+        await new Promise(resolve => setTimeout(resolve, 10)); projection = service.read(fixture.config);
+      }
+      if (mismatch) {
+        assert.notEqual(projection.status, "completed");
+        assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["run_receipt"], limit: 10 }).length, 0);
+        assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 10 }).length, 0);
+        assert.equal(readdirSync(ROOT).includes(path.basename(trace)), false, "Refused source must not spawn even the fake host");
+      } else {
+        assert.equal(projection.status, "completed");
+        assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["run_receipt"], limit: 10 }).length, 1);
+        assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 10 }).length, 1);
+        assert.equal(readFileSync(cleanup, "utf8"), "settled\n");
+      }
+      assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["state_transition_receipt"], limit: 10 }).length, 0);
+      await assert.rejects(service.start({ config: fixture.config, mode: "interactive", operator_mutation: { credential } }), /window_start_refused/);
+    } finally { await service?.shutdown(); fixture.db.close(); }
+  }
+  console.log("scoped disposable service: authenticated admission, exact packet/guide/root scope, native result/receipt/proposal, no implicit Transition, source-drift refusal without host/receipt/proposal, no replay; model calls=0");
 }
 
 async function assertExecutedReviewedFollowUpV01(): Promise<void> {
@@ -2613,8 +2681,8 @@ function insertManagedRunV01(
     );
 }
 
-function createFixtureV01(name: string, git = false, disk = false): FixtureV01 {
-  const root = path.join(ROOT, name);
+function createFixtureV01(name: string, git = false, disk = false, canonicalRoot = false): FixtureV01 {
+  const root = path.join(canonicalRoot ? realpathSync(ROOT) : ROOT, name);
   mkdirSync(root, { recursive: true });
   if (git) mkdirSync(path.join(root, ".git"));
   const databasePath = disk ? path.join(ROOT, `${name}.db`) : ":memory:";

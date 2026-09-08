@@ -3025,7 +3025,7 @@ async function invokeAdapterBounded(
   }
 }
 
-const scheduleNativeHostTimeoutV01: NativeHostTimeoutSchedulerV01 = ({
+export const scheduleNativeHostTimeoutV01: NativeHostTimeoutSchedulerV01 = ({
   timeout_ms,
   on_timeout,
 }) => {
