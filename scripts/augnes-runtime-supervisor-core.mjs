@@ -19,9 +19,11 @@ import {
   renameSync,
   rmdirSync,
   unlinkSync,
+  write,
   writeFileSync,
 } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
+import { Writable } from "node:stream";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -137,6 +139,9 @@ const OWNERSHIP_RACE_WAIT_MS = 3_000;
 const SERVER_CLOSE_TIMEOUT_MS = 5_000;
 const MAX_CONTROL_RESPONSE_BYTES = 64 * 1024;
 const OUTPUT_TAIL_BYTES = 32 * 1024;
+// Recovery can replace the runtime object in this same supervisor process. The
+// inherited fd 2 cannot gain a new reader, so remember its loss across reentry.
+let childOutputTransportLost = false;
 const ownedServerSockets = new WeakMap();
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 export const repositoryRoot = realpathSync(path.resolve(scriptDirectory, ".."));
@@ -1606,6 +1611,8 @@ async function runStartCommand({
       runtime.exitCode = 1;
     }
     removeSignalHandlers(runtime);
+    // The forwarding stream borrows fd 2; end it without closing process stderr.
+    runtime.childOutputTransport?.end();
   }
 
   if (runtime.recoveryRequest && cleanupError === null) {
@@ -1992,8 +1999,7 @@ function spawnRuntimeChild({ runtime, role, port }) {
   for (const stream of [child.stdout, child.stderr]) {
     stream.setEncoding("utf8");
     stream.on("data", (chunk) => {
-      record.outputTail = `${record.outputTail}${chunk}`.slice(-OUTPUT_TAIL_BYTES);
-      process.stderr.write(`[augnes:${role}] ${chunk}`);
+      forwardRuntimeChildOutput(runtime, record, role, chunk);
     });
   }
   child.once("error", (error) => {
@@ -2016,6 +2022,73 @@ function spawnRuntimeChild({ runtime, role, port }) {
     }
   });
   return record;
+}
+
+export function forwardRuntimeChildOutput(runtime, record, role, chunk) {
+  record.outputTail = `${record.outputTail}${chunk}`.slice(-OUTPUT_TAIL_BYTES);
+  if (childOutputTransportLost) return;
+  if (!runtime.childOutputTransport) {
+    // Own only optional child-output forwarding. Using process.stderr's shared
+    // Writable would also invoke unrelated listeners (which may throw). This
+    // writer borrows fd 2 without another socket handle or descriptor owner.
+    // fs.WriteStream requires a blocking fd: its retry-on-EAGAIN loop can fail
+    // fatally on an open, non-draining pipe. Attempt each accepted chunk once;
+    // temporary pressure or a partial write drops optional bytes, never retries.
+    const output = new Writable({
+      highWaterMark: OUTPUT_TAIL_BYTES,
+      write(bytes, _encoding, callback) {
+        write(2, bytes, 0, bytes.length, null, (error, written = 0) => {
+          if (error) {
+            if (error.code !== "EAGAIN" && error.code !== "EWOULDBLOCK") {
+              callback(error);
+              return;
+            }
+            output.backpressureErrors = Math.min(
+              Number.MAX_SAFE_INTEGER, output.backpressureErrors + 1,
+            );
+          }
+          const accepted = error ? 0 : written;
+          output.bytesWritten = Math.min(
+            Number.MAX_SAFE_INTEGER, output.bytesWritten + accepted,
+          );
+          recordDroppedChildOutput(output, bytes.length - accepted);
+          callback();
+        });
+      },
+    });
+    // Bounded in-process counters describe incomplete optional output. They
+    // are not durable logs and do not imply reattachment by a later manager.
+    output.bytesWritten = 0;
+    output.droppedBytes = 0;
+    output.backpressureErrors = 0;
+    output.on("error", (error) => {
+      if (error.code !== "EPIPE") throw error;
+      childOutputTransportLost = true;
+      // errored permanently disables this optional transport. Child streams
+      // continue draining into their existing bounded local tails.
+    });
+    runtime.childOutputTransport = output;
+  }
+  const output = runtime.childOutputTransport;
+  if (output.errored || output.writableEnded) return;
+  const available = OUTPUT_TAIL_BYTES - output.writableLength;
+  // Bound queued diagnostics even when a manager is attached but not draining.
+  const text = `[augnes:${role}] ${chunk}`;
+  const inputBytes = Buffer.byteLength(text);
+  if (available <= 0) {
+    recordDroppedChildOutput(output, inputBytes);
+    return;
+  }
+  const bytes = Buffer.allocUnsafe(Math.min(available, inputBytes));
+  const written = bytes.write(text);
+  recordDroppedChildOutput(output, inputBytes - written);
+  // I/O errors arrive on this private stream; synchronous programming failures
+  // still propagate normally rather than entering an EPIPE recovery path.
+  output.write(bytes.subarray(0, written));
+}
+
+function recordDroppedChildOutput(output, bytes) {
+  output.droppedBytes = Math.min(Number.MAX_SAFE_INTEGER, output.droppedBytes + bytes);
 }
 
 async function waitForChildReadiness({ runtime, record, url, isReady }) {
