@@ -607,6 +607,21 @@ const suites = {
       timeoutMs: 30_000,
     },
     {
+      id: "executed-reviewed-follow-up",
+      group: "supporting-serial",
+      requirements: ["database", "migrations", "filesystem", "mutable-module-state"],
+      label:
+        "executed work, reviewed correction, persisted successor, and fresh native-host request",
+      ...rootNode(
+        "scripts/test-vnext-project-work-initialization.ts",
+        "--executed-follow-up-only",
+      ),
+      // Keep the original first-work child's bound and all assertions intact.
+      // This separate invocation uses the same fixture and cleanup owner.
+      timeoutMs: 30_000,
+      requireNaturalExit: true,
+    },
+    {
       id: "blank-state",
       group: "supporting-serial",
       requirements: ["database", "migrations", "filesystem"],

@@ -741,10 +741,10 @@ function profileEffectContract(profile: OperatorExecutionFixtureProfileV1) {
       records_intentionally_absent: [
         "first_work_definition_for_clean_project",
         "running_native_host_process",
+        "post_result_user_correction_and_successor",
       ],
       forbidden_effects: [
-        "review_decision",
-        "applied_transition",
+        "unreviewed_semantic_change",
         "provider_call",
         "external_network_call",
         "work_closure",

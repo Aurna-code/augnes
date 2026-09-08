@@ -728,6 +728,16 @@
           "fixture_profile": "native_host_execution",
           "families": [
             {
+              "id": "executed_reviewed_follow_up",
+              "fields": [
+                "post_result_browser_correction",
+                "post_result_fresh_successor_execution"
+              ],
+              "markers": [
+                "executed_result_user_correction_reaches_fresh_preparation_and_distinct_execution"
+              ]
+            },
+            {
               "id": "first_work_definition_and_start",
               "fields": [
                 "first_work_composer_validation",
@@ -854,7 +864,9 @@
               "live_codex_untouched_approval_polling_stopped",
               "live_codex_waiting_for_approval",
               "project_home_current_run_visible",
-              "project_home_latest_result_visible"
+              "project_home_latest_result_visible",
+              "post_result_browser_correction",
+              "post_result_fresh_successor_execution"
             ],
             "exact_integer": {
               "ai_workplane_approval_refresh_count": 2,

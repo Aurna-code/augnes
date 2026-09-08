@@ -16,6 +16,8 @@ import {
   selectActiveProjectV01,
 } from "../lib/vnext/persistence/project-lifecycle-registry.ts";
 import { runOperatorExecutionBrowserChildV1 } from "./operator-execution-browser-child-v1.mjs";
+import { admitPersistedHostTaskContextPacketV01 } from "../lib/vnext/runtime/direct-native-host-round-trip.ts";
+import { projectVNextOperatorPilotContinuityV01 } from "../lib/vnext/runtime/operator-pilot-project-continuity.ts";
 
 const require = createRequire(import.meta.url);
 const Database = require("better-sqlite3");
@@ -48,6 +50,9 @@ await runOperatorExecutionBrowserChildV1({
     ([
       "first_work_definition_and_start",
       "live_native_host_approval_lifecycle",
+      // The following project's existing authentication bootstrap is now
+      // attributed to this final primary-project phase.
+      "executed_reviewed_follow_up",
     ].includes(entry.phase) &&
       entry.request_path === "/api/vnext/operator/session" &&
       entry.response_status === 401 &&
@@ -63,6 +68,7 @@ await runOperatorExecutionBrowserChildV1({
       "direct_native_host_round_trip",
       "live_native_host_approval_lifecycle",
       "bounded_automation_execution",
+      "executed_reviewed_follow_up",
     ].includes(entry.phase) &&
       entry.request_path === "/favicon.ico" &&
       entry.response_status === 404 &&
@@ -75,6 +81,9 @@ await runOperatorExecutionBrowserChildV1({
       ([
         "first_work_definition_and_start",
         "live_native_host_approval_lifecycle",
+        // Review navigation replaces the GuideBrief read and its owner
+        // aborts the prior read; only this exact read cancellation is expected.
+        "executed_reviewed_follow_up",
       ].includes(entry.phase) &&
         entry.method === "GET" &&
         entry.path === "/api/augnes/read/guide-brief" &&
@@ -102,6 +111,9 @@ await runOperatorExecutionBrowserChildV1({
     const firstRevisionGoal = "한국어로 수정한 실행 전 목표를 보존한다.";
     const revisedWorkGoal =
       "Execute the latest mixed Unicode revision exactly 🚀 한글.";
+    // Fixed before execution. This text enters only through the post-result
+    // revision form; fixture initialization contains no follow-up outcome.
+    const postResultCorrection = "Post-result user correction: the host check under X proves bounded delivery only. Reject the explanation that this establishes success under every condition. Preserve the reported X check; Y remains untested and the cause is uncertain. Defer Y until its missing evidence is reviewed. Next check: verify this corrected validation context reaches fresh preparation before revisiting Y.";
     const criteria = [
       "The saved definition creates no run",
       "Explicit activation admits one exact run",
@@ -1824,6 +1836,110 @@ await runOperatorExecutionBrowserChildV1({
       record("active_project_live_codex_refreshes_two_approval_boundaries_and_persists_one_receipt");
       record("live_codex_product_path_uses_zero_copy_paste_or_internal_id_entry");
       record("project_home_distinguishes_latest_terminal_result_with_server_generated_review_link");
+    });
+
+    await lifecycle.runPhase("executed_reviewed_follow_up", async () => {
+      const projectId = fixture.manifest.project_id;
+      const db = new Database(fixture.writable_database_path, { readonly: true, fileMustExist: true });
+      const historyRows = () => db.prepare("SELECT record_id, payload_json FROM vnext_core_records WHERE project_id = ? ORDER BY record_id").all(projectId);
+      try {
+        const originalRows = historyRows();
+        assert.equal(JSON.stringify(originalRows).includes(postResultCorrection), false);
+        const before = readFirstWorkState(fixture.writable_database_path, projectId);
+        const beforeRead = db.serialize();
+        // The normal Project Home result link names the just-executed managed
+        // native-host result. No proposal/result fixture is injected here.
+        await clickSelector(lifecycle, '[data-review-result-link="true"]');
+        await lifecycle.waitForCondition(`document.querySelector('[data-result-to-proposal-link="true"]') !== null && document.querySelector('[data-ai-workplane-guide="guide_brief.v0.2"][data-ai-workplane-guide-loading="false"]') !== null`, "executed result and GuideBrief are ready for review");
+        await clickSelector(lifecycle, '[data-result-to-proposal-link="true"]');
+        await lifecycle.waitForCondition(`document.querySelector('[data-vnext-operation-revision-form="v0.1"]') !== null && document.querySelector('[data-ai-workplane-guide="guide_brief.v0.2"][data-ai-workplane-guide-loading="false"]') !== null`, "post-result correction entry");
+        assert(beforeRead.equals(db.serialize()), "Result and proposal navigation are zero-write");
+        const sourcePath = await lifecycle.evaluateString("location.pathname");
+        const sourceDetail = await lifecycle.evaluateJson(`(async () => {
+          const id = decodeURIComponent(location.pathname.split('/').at(-1)).replace('~', ':');
+          const response = await fetch('/api/vnext/operator/semantic-review?proposal_id=' + encodeURIComponent(id), { cache: 'no-store' });
+          return (await response.json()).proposal;
+        })()`);
+        assert.equal(sourceDetail.proposal.source_assessment.observed.execution.status, "completed");
+        assert.equal(sourceDetail.proposal.source_assessment.comparison.task_success_status, "unknown");
+        const sourceReceipt = originalRows.map((row) => JSON.parse(row.payload_json)).find((payload) => payload.receipt_id === sourceDetail.proposal.run_receipt_refs[0].external_id);
+        assert(sourceReceipt);
+        assert.equal(sourceReceipt.execution.status, "completed");
+        assert.equal(await lifecycle.evaluateBoolean(`document.querySelector('[data-vnext-operation-revision-form]')?.querySelectorAll('input[name*="fingerprint"], input[name*="nonce"], input[name*="id"]').length === 0`), true);
+        await lifecycle.setFormControlValue('[data-vnext-operation-revision-form] input', "Preserve the result's limits and review Y later");
+        await lifecycle.setFormControlValue('[data-vnext-operation-revision-form] textarea', postResultCorrection);
+        await lifecycle.setFormControlValue('[data-vnext-operation-revision-form] textarea', "The executed host result is bounded; this user correction does not verify untested conditions.", 1);
+        await clickSelector(lifecycle, '[data-vnext-operation-revision-form] button[type="submit"]');
+        await lifecycle.waitForCondition(`location.pathname !== ${JSON.stringify(sourcePath)} && document.querySelector('[data-vnext-candidate-accept-eligible="true"] [data-vnext-operator-decision-form]') !== null`, "source-bound immutable correction created");
+        const revisionCounts = readFirstWorkState(fixture.writable_database_path, projectId);
+        assert.deepEqual(revisionCounts, { ...before, proposals: before.proposals + 1 });
+        const revisedDetail = await lifecycle.evaluateJson(`(async () => {
+          const id = decodeURIComponent(location.pathname.split('/').at(-1)).replace('~', ':');
+          const response = await fetch('/api/vnext/operator/semantic-review?proposal_id=' + encodeURIComponent(id), { cache: 'no-store' });
+          return (await response.json()).proposal;
+        })()`);
+        assert.deepEqual(revisedDetail.proposal.source_assessment, sourceDetail.proposal.source_assessment);
+        assert.deepEqual(revisedDetail.proposal.observations, sourceDetail.proposal.observations);
+        assert.deepEqual(revisedDetail.proposal.attestations, sourceDetail.proposal.attestations);
+        assert.equal(revisedDetail.proposal.operation_revision.authored_by_ref.trust_class, "user_declaration");
+        const eligibleForm = '[data-vnext-candidate-accept-eligible="true"] [data-vnext-operator-decision-form]';
+        await lifecycle.setFormControlValue(`${eligibleForm} select`, "accept");
+        await lifecycle.setFormControlValue(`${eligibleForm} textarea`, "Accept only the corrected validation state. Y remains deferred; execution requires its separate action.");
+        await clickSelector(lifecycle, `${eligibleForm} button[type="submit"]`);
+        await lifecycle.waitForCondition(`document.querySelector('[data-vnext-transition-action="preview"]:not(:disabled)') !== null`, "reviewed correction awaits independent Transition");
+        assert.deepEqual(readFirstWorkState(fixture.writable_database_path, projectId), { ...revisionCounts, decisions: before.decisions + 1 });
+        const previewBefore = db.serialize();
+        await lifecycle.waitForCondition(`document.querySelector('[data-ai-workplane-guide="guide_brief.v0.2"][data-ai-workplane-guide-loading="false"]') !== null`, "GuideBrief settled before correction impact review");
+        await clickSelector(lifecycle, '[data-vnext-transition-action="preview"]');
+        await lifecycle.waitForCondition(`document.querySelector('[data-vnext-transition-step="preview"][data-vnext-transition-step-status="prepared"] input[type="checkbox"]:not(:disabled)') !== null`, "read-only correction impact preview");
+        assert(previewBefore.equals(db.serialize()));
+        await clickSelector(lifecycle, '[data-vnext-transition-step="preview"] input[type="checkbox"]');
+        await lifecycle.waitForCondition(`document.querySelector('[data-vnext-transition-action="confirm"]:not(:disabled)') !== null`, "correction confirmation is enabled");
+        await clickSelector(lifecycle, '[data-vnext-transition-action="confirm"]');
+        await lifecycle.waitForCondition(`document.querySelector('[data-vnext-transition-step="confirmation"][data-vnext-transition-step-status="recorded"] input[type="checkbox"]:not(:disabled)') !== null`, "separate correction gate");
+        assert.equal(readFirstWorkState(fixture.writable_database_path, projectId).transitions, before.transitions);
+        await clickSelector(lifecycle, '[data-vnext-transition-step="confirmation"] input[type="checkbox"]');
+        await lifecycle.waitForCondition(`document.querySelector('[data-vnext-transition-action="apply"]:not(:disabled)') !== null`, "reviewed correction application is enabled");
+        await clickSelector(lifecycle, '[data-vnext-transition-action="apply"]');
+        await lifecycle.waitForCondition(`document.querySelector('[data-selected-work-current-stage="project_updated"]') !== null`, "reviewed correction applied and later packet persisted");
+        await lifecycle.waitForCondition(`document.querySelector('[data-ai-workplane-guide="guide_brief.v0.2"][data-ai-workplane-guide-loading="false"]') !== null`, "GuideBrief settled after correction application");
+        assert.deepEqual(readFirstWorkState(fixture.writable_database_path, projectId), { ...before, proposals: before.proposals + 1, decisions: before.decisions + 1, transitions: before.transitions + 1, semantic_state: before.semantic_state + 1, packets: before.packets + 1 });
+        assert.deepEqual(historyRows().filter((row) => originalRows.some((prior) => prior.record_id === row.record_id)), originalRows);
+        result.post_result_browser_correction = true;
+        completeDetailedField("post_result_browser_correction");
+
+        await lifecycle.restartRuntimePreservingBrowserSession(projectId);
+        const freshDb = new Database(fixture.writable_database_path, { readonly: true, fileMustExist: true });
+        let preparedPacket;
+        try {
+          const config = { enabled: true, workspace_id: fixture.manifest.workspace_id, project_id: projectId, operator_id: fixture.manifest.operator_id, database_path: fixture.writable_database_path };
+          const beforePreparation = freshDb.serialize();
+          const continuity = projectVNextOperatorPilotContinuityV01(freshDb, { config });
+          const current = continuity.latest_compiled_packet;
+          const admitted = await admitPersistedHostTaskContextPacketV01(freshDb, { config, packet_id: current.packet_id, packet_fingerprint: current.packet_fingerprint, evaluated_at: new Date().toISOString() });
+          preparedPacket = admitted.packet;
+          assert.deepEqual(preparedPacket.task, directAfter.packet.task);
+          assert.deepEqual(preparedPacket.work_ref, directAfter.packet.work_ref);
+          assert.equal(preparedPacket.selected_context.filter((entry) => entry.entry_kind === "accepted_state_ref" && entry.bounded_summary === postResultCorrection).length, 1);
+          assert(beforePreparation.equals(freshDb.serialize()));
+        } finally { freshDb.close(); }
+        await lifecycle.navigate(`${appOrigin}/`);
+        await lifecycle.waitForCondition(`document.querySelector('[data-blank-state-project-management-hydrated="true"]') !== null`, "reconstructed project preparation");
+        await openProjectOptions(lifecycle);
+        const nextResponseStart = lifecycle.responses.length;
+        await clickSelector(lifecycle, '[data-direct-host-action="deterministic"]');
+        await lifecycle.waitForHostCondition(() => lifecycle.responses.slice(nextResponseStart).some((entry) => entry.path === "/api/vnext/operator/host-round-trip" && entry.method === "POST" && entry.status === 201), "new prepared native-host execution");
+        await lifecycle.waitForCondition(`document.querySelector('[data-direct-host-round-trip-status="completed"]') !== null`, "successor result persisted");
+        const after = directState(fixture.writable_database_path, projectId);
+        assert.equal(after.runs, before.runs + 1);
+        assert.notEqual(after.latest_receipt.run_id, sourceReceipt.run_id);
+        assert.equal(after.latest_receipt.task_context_packet_ref.external_id, preparedPacket.packet_id);
+        assert.equal(after.latest_receipt.task_context_packet_ref.source_ref, preparedPacket.integrity.fingerprint);
+        assert.equal(after.latest_receipt.source_refs.some((ref) => ref.ref_type === "state_transition_receipt" && ref.external_id !== fixture.manifest.transition_receipt_id), true);
+        result.post_result_fresh_successor_execution = true;
+        completeDetailedField("post_result_fresh_successor_execution");
+        record("executed_result_user_correction_reaches_fresh_preparation_and_distinct_execution");
+      } finally { db.close(); }
     });
 
     assert(fixture.manifest.automation_project_id);

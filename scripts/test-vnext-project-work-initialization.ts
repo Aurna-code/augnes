@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -72,6 +72,10 @@ import {
   type PersistedHostPacketAdmissionV01,
 } from "../lib/vnext/runtime/direct-native-host-round-trip";
 import { createDeterministicCodexAdapterV01 } from "../lib/vnext/native-host/deterministic-codex-adapter";
+import { recordVNextOperatorPilotProposalRevisionV01 } from "../lib/vnext/runtime/operator-pilot-proposal-revision";
+import { readVNextOperatorPilotSemanticReviewV01, recordVNextOperatorPilotReviewDecisionV01 } from "../lib/vnext/runtime/operator-pilot-review-material";
+import { prepareVNextOperatorPilotSemanticCommitPreviewV01, confirmVNextOperatorPilotSemanticCommitV01, applyVNextOperatorPilotReviewedSemanticTransitionV01 } from "../lib/vnext/runtime/operator-pilot-semantic-transition";
+import { createEpisodeDeltaCandidateFingerprintV01 } from "../lib/vnext/review-decision";
 import { projectVNextOperatorPilotContinuityV01 } from "../lib/vnext/runtime/operator-pilot-project-continuity";
 import { readVNextOperatorPilotProposalDurableLineageV01 } from "../lib/vnext/runtime/operator-pilot-workbench-lineage";
 import { readSharedProjectInspectorV01 } from "../lib/vnext/runtime/shared-project-inspector";
@@ -100,6 +104,10 @@ void main().catch((error) => {
 
 async function main(): Promise<void> {
   try {
+    if (process.argv.includes("--executed-follow-up-only")) {
+      await assertExecutedReviewedFollowUpV01();
+      return;
+    }
     assertNormalizationAndCompilerV01();
     assertNativeHostRunIdentityCompatibilityV01();
     assertInitializationReadPolicyV01();
@@ -144,6 +152,188 @@ async function main(): Promise<void> {
   } finally {
     rmSync(ROOT, { recursive: true, force: true });
   }
+}
+
+async function assertExecutedReviewedFollowUpV01(): Promise<void> {
+  const fixture = createFixtureV01("executed-reviewed-follow-up", false, true);
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = (async () => { fetchCalls += 1; throw new Error("p51_live_network_forbidden"); }) as typeof fetch;
+  const counts = () => fixture.db.prepare("SELECT record_kind, COUNT(*) AS count FROM vnext_core_records WHERE project_id = ? GROUP BY record_kind ORDER BY record_kind").all(fixture.project_id);
+  const history = () => fixture.db.prepare("SELECT record_id, payload_json FROM vnext_core_records WHERE project_id = ? ORDER BY record_id").all(fixture.project_id) as { record_id: string; payload_json: string }[];
+  const started = performance.now();
+  // These are inputs, fixed before execution. Neither a result nor the later
+  // operator correction exists in the starting project.
+  writeFileSync(path.join(fixture.root, "bench.json"), JSON.stringify({ X: { measured: 7, limit: 5 }, Y: { measured: null } }));
+  writeFileSync(path.join(fixture.root, "calibration-B.json"), JSON.stringify({ reference: 5, expected: 5 }));
+  const correction = "Post-result user correction: X exceeded its limit only in the cold-start sample. Reject the explanation that A always fails; preserve the X reading. Y is untested, not prohibited. The cause remains uncertain. Defer Y until calibration B is checked; revisit after B. Next check: compare B's reference with its expected value.";
+  const requests: NativeHostRequestV01[] = [];
+  const actions: string[] = [];
+  function adapter(check: "X" | "B") {
+    const base = createDeterministicCodexAdapterV01({ now: timestampSequenceV01(check === "X" ? "2026-08-01T00:00:05.000Z" : "2026-08-01T00:00:15.000Z"), observe: ({ request }) => requests.push(structuredClone(request)) });
+    return { ...base, invoke(request: NativeHostRequestV01, control: Parameters<typeof base.invoke>[1]) {
+      const handle = base.invoke(request, control);
+      const result = handle.result.then((result) => {
+        if (check === "X") {
+          const data = JSON.parse(readFileSync(path.join(fixture.root, "bench.json"), "utf8"));
+          assert.equal(data.Y.measured, null);
+          actions.push("read_X_sample");
+          return { ...result, summary: `X measured ${data.X.measured} against limit ${data.X.limit}; Y was not measured. The cause is unknown.`,
+            checks: [...result.checks, { check_id: "cold_start_X", required: false, status: data.X.measured <= data.X.limit ? "passed" as const : "failed" as const, summary: "Only the cold-start X sample was compared with its limit." }],
+            uncertainty: ["The X result does not establish the cause or Y behavior."], proposed_next_steps: ["Review the X result and choose a bounded next check."] };
+        }
+        assert.equal(request.packet.selected_context.filter((entry) => entry.entry_kind === "accepted_state_ref" && entry.bounded_summary === correction).length, 1, "The next deterministic consumer requires the reviewed correction");
+        const data = JSON.parse(readFileSync(path.join(fixture.root, "calibration-B.json"), "utf8"));
+        actions.push("compare_calibration_B");
+        return { ...result, summary: `Calibration B reference ${data.reference} equals expected ${data.expected}. Y remains untested.`,
+          checks: [...result.checks, { check_id: "calibration_B", required: false, status: data.reference === data.expected ? "passed" as const : "failed" as const, summary: "The local calibration reference was compared with its expected value." }],
+          uncertainty: ["This calibration check does not establish Y behavior."], proposed_next_steps: ["Review B before separately authorizing a Y test."] };
+      });
+      const settled = result.then(() => undefined, () => undefined);
+      return { ...handle, result, settled };
+    } };
+  }
+  try {
+    const initial = defineInitialProjectWorkV01(fixture.db, {
+      config: fixture.config, credential: authenticatedSessionV01(fixture, "p51"),
+      request: requestV01(fixture, { goal: "Investigate A under cold-start X and condition Y, preserving uncertainty and choosing one next check", success_criteria: ["Distinguish measured conditions from untested conditions and review the next check"], non_goals: ["No live model, external data or automatic Y test"] }), clock: fixedClock(T2),
+    });
+    let credential = credentialFromCookieV01(initial.session_admission.cookie_value);
+    const notes = [buildSelectedWorkSourceEntry(fixture, { source: "Synthetic bench protocol, revision 1", observed_at: "2026-08-01T00:00:00.000Z", provenance: "user_declaration", label: "Open question", text: "X is the cold-start sample in bench.json; Y has no reading. Calibration B is a separate input. Determine what is known before choosing the next check." }),
+      buildSelectedWorkSourceEntry(fixture, { source: "Unverified explanation candidate, revision 1", observed_at: null, provenance: "derived_interpretation", label: "Unclassified / needs review", text: "Hypothesis: if A fails in X, A might fail in all conditions. This explanation is unverified." })];
+    const comparison = compareSelectedWorkSources(initial.packet, notes);
+    const selected = revisePreExecutionProjectWorkV01(fixture.db, { config: fixture.config, credential,
+      request: { ...revisionRequestV01(fixture, initial.packet, "initial_user_defined", initial.definition), selected_source_context: comparison.entries, expected_source_comparison: comparison.fingerprint }, clock: fixedClock("2026-08-01T00:00:03.000Z") });
+    credential = credentialFromCookieV01(selected.session_admission.cookie_value);
+    assert.equal(JSON.stringify(history()).includes(correction), false);
+    const preparationMs = performance.now() - started;
+    const executionStarted = performance.now();
+    const first = await runDirectNativeHostRoundTripV01(fixture.db, { config: fixture.config, mode: "interactive", operator_mutation: { credential, clock: fixedClock("2026-08-01T00:00:04.000Z") } }, { adapter: adapter("X"), now: timestampSequenceV01("2026-08-01T00:00:04.000Z") });
+    const executionMs = performance.now() - executionStarted;
+    credential = credentialFromCookieV01(first.session_admission!.cookie_value);
+    assert.equal(first.status, "inserted");
+    assert.equal(first.proposal.status, "available");
+    assert.equal(first.receipt.execution.status, "completed");
+    assert.match(first.receipt.result_summary.summary, /X measured 7 against limit 5; Y was not measured/u);
+    assert.deepEqual(actions, ["read_X_sample"]);
+    assert.equal(requests.length, 1);
+    assert.deepEqual(readSelectedWorkSources(requests[0]!.packet), comparison.entries);
+    const afterExecution = fixture.db.serialize();
+    assert.throws(() => revisePreExecutionProjectWorkV01(fixture.db, { config: fixture.config, credential,
+      request: revisionRequestV01(fixture, selected.packet, "pre_execution_user_revision", selected.definition), clock: fixedClock("2026-08-01T00:00:06.000Z") }), /work_revision_execution_started/u);
+    assert(afterExecution.equals(fixture.db.serialize()), "Execution does not reopen the pre-execution editor");
+    const source = listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 1 })[0]!.payload as EpisodeDeltaProposalV01;
+    const beforeReview = history();
+    const readBefore = fixture.db.serialize();
+    const detail = readVNextOperatorPilotSemanticReviewV01(fixture.db, { config: fixture.config, proposal_id: source.proposal_id, authenticated_session_id: credential.session_id });
+    assert(readBefore.equals(fixture.db.serialize()));
+    assert.equal(source.source_assessment!.comparison.task_success_status, "unknown");
+    const sourceCandidate = detail.candidates[0]!;
+    assert.equal(sourceCandidate.candidate.operation, "unknown");
+    const reviewStarted = performance.now();
+    const revisionRequest = { action: "revise", proposal_id: source.proposal_id, proposal_fingerprint: source.integrity.fingerprint,
+      candidate_id: sourceCandidate.candidate.candidate_id, candidate_fingerprint: sourceCandidate.candidate_fingerprint,
+      delta_type: "validation_delta", operation: "add", title: "Preserve conditional X result and check B before revisiting Y", proposed_state_summary: correction,
+      rationale_summary: "The executed X reading does not justify a global failure explanation. This is a user-authored validation follow-up, not evidence that Y passed or failed.", uncertainties: ["The cause and Y behavior remain unknown."], limitations: ["Acceptance records only this reviewed validation state; it does not execute Y."] };
+    const beforeSourceDrift = fixture.db.serialize();
+    assert.throws(() => recordVNextOperatorPilotProposalRevisionV01(fixture.db, { config: fixture.config, credential, request: { ...revisionRequest, proposal_fingerprint: `sha256:${"0".repeat(64)}` }, clock: fixedClock("2026-08-01T00:00:07.000Z") }), /operator_pilot_revision_proposal_conflict/u);
+    assert(beforeSourceDrift.equals(fixture.db.serialize()), "Changed proposal binding refuses without writes");
+    const revised = recordVNextOperatorPilotProposalRevisionV01(fixture.db, { config: fixture.config, credential, request: revisionRequest, clock: fixedClock("2026-08-01T00:00:07.000Z") });
+    credential = credentialFromCookieV01(revised.session_cookie.value);
+    const afterRevision = counts();
+    const replay = recordVNextOperatorPilotProposalRevisionV01(fixture.db, { config: fixture.config, credential, request: revisionRequest, clock: fixedClock("2026-08-01T00:00:07.000Z") });
+    credential = credentialFromCookieV01(replay.session_cookie.value);
+    assert.equal(replay.status, "exact_replay");
+    assert.deepEqual(counts(), afterRevision);
+    assert.deepEqual(revised.proposal.observations, source.observations);
+    assert.deepEqual(revised.proposal.attestations, source.attestations);
+    assert.deepEqual(revised.proposal.inferences, source.inferences);
+    assert.deepEqual(revised.proposal.source_assessment, source.source_assessment);
+    assert.deepEqual(revised.proposal.run_receipt_refs, source.run_receipt_refs);
+    assert.equal(revised.proposal.run_receipt_refs[0]!.external_id, first.receipt.receipt_id);
+    assert.equal(revised.proposal.operation_revision!.authored_by_ref.trust_class, "user_declaration");
+    const candidate = revised.proposal.proposed_deltas.find((candidate) => candidate.candidate_id === revised.proposal.operation_revision!.revised_candidate.candidate_id)!;
+    const decisionRequest = { proposal_id: revised.proposal.proposal_id, proposal_fingerprint: revised.proposal.integrity.fingerprint, candidate_id: candidate.candidate_id,
+      candidate_fingerprint: createEpisodeDeltaCandidateFingerprintV01(candidate), decision: "accept", rationale_summary: "Accept the conditional validation follow-up. Y is still deferred and no test is authorized by this decision." };
+    const accepted = recordVNextOperatorPilotReviewDecisionV01(fixture.db, { config: fixture.config, credential, request: decisionRequest, clock: fixedClock("2026-08-01T00:00:08.000Z") });
+    credential = credentialFromCookieV01(accepted.session_cookie.value);
+    const binding = { proposal_id: revised.proposal.proposal_id, proposal_fingerprint: revised.proposal.integrity.fingerprint, decision_id: accepted.decision.decision_id, decision_fingerprint: accepted.decision.integrity.fingerprint };
+    const previewBefore = fixture.db.serialize();
+    const preview = prepareVNextOperatorPilotSemanticCommitPreviewV01(fixture.db, { config: fixture.config, credential, request: binding, clock: fixedClock("2026-08-01T00:00:09.000Z") });
+    assert(previewBefore.equals(fixture.db.serialize()), "Transition preview writes nothing");
+    const gate = confirmVNextOperatorPilotSemanticCommitV01(fixture.db, { config: fixture.config, credential, request: { ...binding, confirmation_digest: preview.preview.confirmation_digest }, preview_binding_cookie: preview.preview_binding_cookie, clock: fixedClock("2026-08-01T00:00:10.000Z") });
+    credential = credentialFromCookieV01(gate.session_admission.cookie_value);
+    assert.equal(countProjectPacketsV01(fixture), 2);
+    const reviewMs = performance.now() - reviewStarted;
+    const writerStarted = performance.now();
+    const applyRequest = { ...binding, gate_record_id: gate.gate_record.gate_record_id, gate_record_fingerprint: gate.gate_record.integrity.fingerprint, prior_packet_id: selected.packet.packet_id, prior_packet_fingerprint: selected.packet.integrity.fingerprint };
+    const applied = applyVNextOperatorPilotReviewedSemanticTransitionV01(fixture.db, { config: fixture.config, credential, request: applyRequest, clock: fixedClock("2026-08-01T00:00:11.000Z") });
+    credential = credentialFromCookieV01(applied.session_admission.cookie_value);
+    const writerMs = performance.now() - writerStarted;
+    assert.equal(applied.status, "applied");
+    assert.equal(applied.transition_receipt.source_proposal.proposal_id, revised.proposal.proposal_id);
+    assert.equal(applied.transition_receipt.source_decision.decision_id, accepted.decision.decision_id);
+    const effectCounts = counts();
+    const applyReplay = applyVNextOperatorPilotReviewedSemanticTransitionV01(fixture.db, { config: fixture.config, credential, request: applyRequest, clock: fixedClock("2026-08-01T00:00:12.000Z") });
+    credential = credentialFromCookieV01(applyReplay.session_admission.cookie_value);
+    assert.equal(applyReplay.status, "exact_replay");
+    assert.deepEqual(counts(), effectCounts);
+    assert.deepEqual(history().filter((row) => beforeReview.some((prior) => row.record_id === prior.record_id)), beforeReview);
+    const readStarted = performance.now();
+    // Reopen the file on disk. This proves production reconstruction, not cold
+    // model-session isolation. No expected packet is supplied to the reader.
+    fixture.db.close();
+    fixture.db = new Database(fixture.config.database_path);
+    const freshBefore = fixture.db.serialize();
+    const continuity = projectVNextOperatorPilotContinuityV01(fixture.db, { config: fixture.config, clock: fixedClock("2026-08-01T00:00:13.000Z") });
+    const current = continuity.latest_compiled_packet!;
+    assert.equal(current.lineage_kind, "semantic_transition");
+    const admitted = await admitPersistedHostTaskContextPacketV01(fixture.db, { config: fixture.config, packet_id: current.packet_id, packet_fingerprint: current.packet_fingerprint, evaluated_at: "2026-08-01T00:00:13.000Z" });
+    assert.deepEqual(admitted.packet.task, selected.packet.task);
+    assert.deepEqual(admitted.packet.work_ref, selected.packet.work_ref);
+    assert.deepEqual(readSelectedWorkSources(admitted.packet), comparison.entries);
+    const correctionEntries = admitted.packet.selected_context.filter((entry) => entry.entry_kind === "accepted_state_ref" && entry.bounded_summary === correction);
+    assert.equal(correctionEntries.length, 1);
+    assert.equal(correctionEntries[0]!.compatibility_source_ref?.external_id, applied.transition_receipt.transition_receipt_id);
+    assert.equal(correctionEntries[0]!.compatibility_source_ref?.source_ref, applied.transition_receipt.integrity.fingerprint);
+    assert.deepEqual(correctionEntries[0]!.currentness.source_ref, applied.transition_receipt.effects[0]!.after_application_observation_ref);
+    assert(admitted.packet.compatibility.source_refs.some((ref) => ref.external_id === applied.transition_receipt.transition_receipt_id && ref.source_ref === applied.transition_receipt.integrity.fingerprint));
+    await assert.rejects(() => admitPersistedHostTaskContextPacketV01(fixture.db, { config: fixture.config, packet_id: selected.packet.packet_id, packet_fingerprint: selected.packet.integrity.fingerprint, evaluated_at: "2026-08-01T00:00:13.000Z" }), /direct_host_packet_stale/u);
+    assert(freshBefore.equals(fixture.db.serialize()), "Fresh read and stale refusal write nothing");
+    const freshReadMs = performance.now() - readStarted;
+    const nextStarted = performance.now();
+    const next = await runDirectNativeHostRoundTripV01(fixture.db, { config: fixture.config, mode: "interactive", operator_mutation: { credential, clock: fixedClock("2026-08-01T00:00:14.000Z") } }, { adapter: adapter("B"), now: timestampSequenceV01("2026-08-01T00:00:14.000Z") });
+    const nextMs = performance.now() - nextStarted;
+    credential = credentialFromCookieV01(next.session_admission!.cookie_value);
+    assert.equal(next.status, "inserted");
+    assert.equal(requests.length, 2);
+    assert.notEqual(requests[1]!.request_id, requests[0]!.request_id);
+    assert.notEqual(next.receipt.run_id, first.receipt.run_id);
+    assert.deepEqual(requests[1]!.packet, admitted.packet);
+    assert.deepEqual(actions, ["read_X_sample", "compare_calibration_B"]);
+    assert.match(next.receipt.result_summary.summary, /Calibration B reference 5 equals expected 5. Y remains untested/u);
+    const beforeRunReplay = counts();
+    const nextReplay = await runDirectNativeHostRoundTripV01(fixture.db, { config: fixture.config, mode: "interactive", operator_mutation: { credential, clock: fixedClock("2026-08-01T00:00:17.000Z") } }, { adapter: adapter("B"), now: timestampSequenceV01("2026-08-01T00:00:17.000Z") });
+    assert.equal(nextReplay.status, "exact_replay");
+    assert.deepEqual(counts(), beforeRunReplay);
+    assert.equal(requests.length, 2);
+    assert.deepEqual(history().filter((row) => beforeReview.some((prior) => row.record_id === prior.record_id)), beforeReview);
+    assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["context_use_review"], limit: 1 }).length, 0);
+    assert.deepEqual(counts(), [
+      { record_kind: "episode_delta_proposal", count: 3 }, { record_kind: "review_decision", count: 1 },
+      { record_kind: "run_receipt", count: 2 }, { record_kind: "semantic_commit_gate", count: 1 },
+      { record_kind: "semantic_state", count: 1 }, { record_kind: "state_transition_receipt", count: 1 },
+      { record_kind: "task_context_packet", count: 3 },
+    ]);
+    const recovery = validateRecoveryCanonicalDatabaseV01(fixture.db);
+    assert.equal(recovery.status, "valid", recovery.code);
+    assert.equal(fetchCalls, 0);
+    const text = canonicalizeProtocolValueV01(admitted.packet);
+    console.log(JSON.stringify({ fixture: "executed_reviewed_follow_up", status: "pass", preparation_ms: preparationMs, execution_ms: executionMs, review_ms: reviewMs, successor_writer_ms: writerMs, fresh_preparation_ms: freshReadMs, next_execution_ms: nextMs,
+      packet_characters: [...text].length, packet_utf8_bytes: Buffer.byteLength(text), packet_estimated_tokens: admitted.packet.constraints.context_budget.estimated_tokens,
+      returned_selected_entries: admitted.packet.selected_context.length, actions, requests: requests.map((request) => ({ request_id: request.request_id, run_id: request.run_id, packet_id: request.packet.packet_id, packet_fingerprint: request.packet.integrity.fingerprint })),
+      record_counts: counts(), live_provider_calls: 0, billed_tokens: 0, disk_io_measured: false, human_burden_measured: false, local_context_use_probe_required: false, application_reconstruction: true, cold_model_isolation: false }));
+  } finally { if (fixture.db.open) fixture.db.close(); globalThis.fetch = originalFetch; }
 }
 
 async function assertRetainedSourceRecallV01(): Promise<void> {
@@ -2423,11 +2613,12 @@ function insertManagedRunV01(
     );
 }
 
-function createFixtureV01(name: string, git = false): FixtureV01 {
+function createFixtureV01(name: string, git = false, disk = false): FixtureV01 {
   const root = path.join(ROOT, name);
   mkdirSync(root, { recursive: true });
   if (git) mkdirSync(path.join(root, ".git"));
-  const db = new Database(":memory:");
+  const databasePath = disk ? path.join(ROOT, `${name}.db`) : ":memory:";
+  const db = new Database(databasePath);
   db.pragma("foreign_keys = ON");
   applyCanonicalDatabaseMigrations(db);
   const workspace = getOrCreateDefaultWorkspaceIdentityV01(db);
@@ -2453,7 +2644,7 @@ function createFixtureV01(name: string, git = false): FixtureV01 {
       workspace_id: workspace.workspace_id,
       project_id: registration.project.project_id,
       operator_id: `operator:first-work:${name}`,
-      database_path: ":memory:",
+      database_path: databasePath,
     },
   };
 }
