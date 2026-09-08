@@ -5,6 +5,11 @@ import {
 } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  assertCodexScopedTaskCurrentV01, consumeScopedCodexTaskV01, prepareScopedCodexLaunchV01,
+  SCOPED_CODEX_CONTRACT_V01, SCOPED_CODEX_MODEL_V01, SCOPED_CODEX_EFFORT_V01,
+  type CodexScopedTaskV01, type ScopedCodexLaunchV01,
+} from "@/lib/vnext/native-host/codex-scoped-task";
+import {
   chmodSync,
   lstatSync,
   mkdirSync,
@@ -380,6 +385,7 @@ export interface CodexAppServerAdapterObservationV01 {
 }
 
 export interface CodexAppServerAdapterOptionsV01 {
+  scoped_task?: CodexScopedTaskV01;
   candidate_canary?: CodexCandidateCanaryBindingV01;
   launch?: CodexAppServerLaunchV01;
   isolated_authenticated_execution?: CodexIsolatedAuthenticatedExecutionOwnerV01;
@@ -840,9 +846,21 @@ export function createCodexIsolatedAuthTestExecutionAuthorizationV01(input: {
   return authorization;
 }
 
+const scopedAdaptersV01 = new WeakMap<NativeHostAdapterV01, CodexScopedTaskV01>();
+
+export function assertCodexScopedAdapterV01(adapter: NativeHostAdapterV01, scope: CodexScopedTaskV01): void {
+  if (scopedAdaptersV01.get(adapter) !== scope) throw new Error("codex_scoped_adapter_binding_missing");
+}
+
 export function createCodexAppServerAdapterV01(
   options: CodexAppServerAdapterOptionsV01 = {},
 ): NativeHostAdapterV01 {
+  if (options.scoped_task) {
+    if (options.candidate_canary || options.isolated_authenticated_execution ||
+        options.isolated_authenticated_external_execution_authorization || options.observe_isolated_auth)
+      throw new Error("codex_scoped_parallel_lane_refused");
+    options = Object.freeze({ ...options });
+  }
   if (options.candidate_canary) {
     if (options.launch || options.isolated_authenticated_execution ||
         options.isolated_authenticated_external_execution_authorization || options.observe_isolated_auth)
@@ -861,16 +879,23 @@ export function createCodexAppServerAdapterV01(
     throw new CodexIsolatedAuthProjectionErrorV01(
       "codex_isolated_auth_external_execution_owner_missing",
     );
-  return {
+  const adapter: NativeHostAdapterV01 = {
     adapter_version: CODEX_APP_SERVER_ADAPTER_VERSION_V01,
     capability_version: CODEX_APP_SERVER_CAPABILITY_VERSION_V01,
     execution_profile: "native_host_managed_model",
     provider_egress: "native_host_managed",
     resume_capability: {
       binding_version: "native_host_resume_binding.v0.1",
-      resumable_after_detach: !options.candidate_canary,
+      resumable_after_detach: !options.candidate_canary && !options.scoped_task,
     },
     invoke(request, control) {
+      if (options.scoped_task) {
+        if (control.resume_binding || request.repository_resume_context ||
+            !Number.isInteger(control.timeout_ms) || control.timeout_ms <= 0 || control.timeout_ms > Math.min(180_000, request.policy.timeout_ms) ||
+            !Number.isInteger(control.stop_settle_timeout_ms) || control.stop_settle_timeout_ms <= 0 || control.stop_settle_timeout_ms > Math.min(10_000, request.policy.stop_settle_timeout_ms))
+          throw new Error("codex_scoped_invocation_refused");
+        request = deepFreezeAdapterValueV01(structuredClone(request));
+      }
       if (options.candidate_canary) {
         if (control.resume_binding || request.repository_resume_context)
           throw new Error("codex_candidate_canary_resume_refused");
@@ -890,6 +915,8 @@ export function createCodexAppServerAdapterV01(
       return new CodexAppServerInvocationV01(request, control, options).public;
     },
   };
+  if (options.scoped_task) scopedAdaptersV01.set(adapter, options.scoped_task);
+  return adapter;
 }
 
 export function observeOrdinaryCodexAppServerUserAgentV01(
@@ -1562,6 +1589,7 @@ class CodexAppServerInvocationV01 {
   private managedRuntimeSelection: CodexManagedRuntimeSelectionV01 | null = null;
   private managedRuntimeRoot: string | null = null;
   private candidateCanary: ReturnType<typeof consumeCodexCandidateCanaryV01> | null = null;
+  private scopedLaunch: ScopedCodexLaunchV01 | null = null;
   private readonly sandboxProjection: CodexAppServerSandboxProjectionV01;
   private readonly observedCommands: NativeHostObservedCommandV01[] = [];
   private readonly observedChangedFiles: NativeHostChangedFileV01[] = [];
@@ -1776,7 +1804,7 @@ class CodexAppServerInvocationV01 {
       });
     } else {
       if (
-        !this.options.launch &&
+        !this.options.launch && !this.options.scoped_task &&
         process.env.AUGNES_CANONICAL_TEST_MODE !== "1"
       ) {
         await ensurePinnedCodexManagedRuntimeV01({
@@ -1786,6 +1814,15 @@ class CodexAppServerInvocationV01 {
       }
       const launch =
         this.options.launch ?? resolveDefaultCodexAppServerLaunchV01();
+      if (this.options.scoped_task) {
+        // Custom transport is solely an existing credential-free fixture seam.
+        if (this.options.launch && !(launch.environment?.NODE_ENV === "test" && launch.command === process.execPath &&
+            launch.prefix_args?.length === 1 && launch.prefix_args[0] === path.join(process.cwd(), "scripts/fixtures/fake-codex-app-server.mjs")))
+          throw new Error("codex_scoped_unmanaged_launch_refused");
+        await consumeScopedCodexTaskV01(this.options.scoped_task, this.request);
+        this.scopedLaunch = prepareScopedCodexLaunchV01(this.options.scoped_task, launch.environment ?? boundedCodexChildEnvironmentV01(process.env, false));
+        if (this.control.cancellation_signal.aborted) throw new Error("codex_scoped_cancelled_before_spawn");
+      }
       const selectedRuntime =
         launch.qualified_runtime_selection ??
         selectPinnedCodexQualifiedRuntimeV01({
@@ -1793,6 +1830,8 @@ class CodexAppServerInvocationV01 {
         });
       assertCurrentCodexQualifiedRuntimeSelectionV01(selectedRuntime);
       assertCodexAppServerCompatibilityImplementedV01(selectedRuntime);
+      if (this.options.scoped_task && selectedRuntime.artifact.version !== "0.152.1")
+        throw new Error("codex_scoped_runtime_extension_unqualified");
       if (launch.production_runtime_identity) {
         assertCodexProductionRuntimeIdentityUnchangedV01(
           launch.production_runtime_identity,
@@ -1817,7 +1856,7 @@ class CodexAppServerInvocationV01 {
         launch.production_runtime_identity?.managed_runtime_root ?? null;
       this.transport = new CodexStdioJsonRpcTransportV01({
         command: launch.command,
-        args: [...(launch.prefix_args ?? []), "app-server", "--stdio"],
+        args: [...(launch.prefix_args ?? []), ...(this.scopedLaunch?.args ?? []), "app-server", "--stdio"],
         cwd: this.request.root_scope.canonical_root,
         environment:
           launch.environment ??
@@ -1840,7 +1879,7 @@ class CodexAppServerInvocationV01 {
       state: "starting",
       coverage: "observed",
       host_refs: [this.connectionRef],
-      bounded_metadata: { transport: "stdio_jsonl", experimental_api: false },
+      bounded_metadata: { transport: "stdio_jsonl", experimental_api: Boolean(this.scopedLaunch) },
     });
     this.observe("spawned");
   }
@@ -1876,7 +1915,7 @@ class CodexAppServerInvocationV01 {
               title: "Augnes",
               version: CODEX_APP_SERVER_ADAPTER_VERSION_V01,
             },
-            capabilities: null,
+            capabilities: this.scopedLaunch ? { experimentalApi: true } : null,
           },
         ),
         "codex_initialize_response_invalid",
@@ -1894,6 +1933,12 @@ class CodexAppServerInvocationV01 {
       );
       this.transport!.notify("initialized", {});
       this.observe("initialized");
+      if (this.scopedLaunch) {
+        this.scopedLaunch.assert_configuration(await this.transport!.request("config/read", { includeLayers: true }));
+        this.scopedLaunch.assert_mcp_catalog(await this.transport!.request("mcpServerStatus/list", {}));
+        await this.transport!.settleNotifications();
+        if (this.transport!.failure) throw this.transport!.failure;
+      }
       const account = objectV01(
         await this.transport!.request(
           CURRENT_REQUIRED_APP_SERVER_METHODS_V01.account_read,
@@ -1907,6 +1952,8 @@ class CodexAppServerInvocationV01 {
         throw new CodexCapabilityErrorV01(
           "codex_account_state_unsupported",
         );
+      if (this.scopedLaunch && (objectV01(account.account, "codex_account_response_invalid").type !== "chatgpt" || account.requiresOpenaiAuth !== true))
+        throw new Error("codex_scoped_ordinary_account_required");
       if (this.candidateCanary) {
         if (objectV01(account.account, "codex_account_response_invalid").type !== "chatgpt" || account.requiresOpenaiAuth !== true)
           throw new Error("codex_candidate_canary_ordinary_account_required");
@@ -1923,7 +1970,7 @@ class CodexAppServerInvocationV01 {
         await this.transport!.settleNotifications();
         if (this.transport!.failure) throw this.transport!.failure;
       }
-      if (this.managedRuntimeSelection && this.managedRuntimeRoot) {
+      if (this.managedRuntimeSelection && this.managedRuntimeRoot && !this.scopedLaunch) {
         try {
           recordCodexManagedRuntimeLastKnownGoodV01({
             root: this.managedRuntimeRoot,
@@ -1960,29 +2007,35 @@ class CodexAppServerInvocationV01 {
   }
 
   private async startNewThreadAndTurn(): Promise<void> {
+    if (this.options.scoped_task) {
+      await assertCodexScopedTaskCurrentV01(this.options.scoped_task, this.request);
+      this.scopedLaunch!.assert_sources_current();
+      if (this.control.cancellation_signal.aborted || this.stopRequest || this.fatalError) throw new Error("codex_scoped_stopped_before_thread");
+    }
     this.threadStartSent = true;
     const response = objectV01(
       await this.transport!.request(
         CURRENT_REQUIRED_APP_SERVER_METHODS_V01.thread_start,
         {
           cwd: this.request.root_scope.canonical_root,
-          approvalPolicy:
+          approvalPolicy: this.scopedLaunch ? "never" :
             this.qualifiedRuntimeSelection.compatibility_profile.semantics
               .server_requests.approval_policy,
           approvalsReviewer:
             this.qualifiedRuntimeSelection.compatibility_profile.semantics
               .server_requests.approvals_reviewer,
-          sandbox: this.sandboxProjection.thread_sandbox,
-          ephemeral: this.options.isolated_authenticated_execution || this.candidateCanary
+          ...(this.scopedLaunch ? { permissions: this.scopedLaunch.profile_name, model: SCOPED_CODEX_MODEL_V01, modelProvider: "openai" } : { sandbox: this.sandboxProjection.thread_sandbox }),
+          ephemeral: this.options.isolated_authenticated_execution || this.candidateCanary || this.scopedLaunch
             ? true
             : false,
-          ...(this.options.isolated_authenticated_execution || this.candidateCanary
+          ...(this.options.isolated_authenticated_execution || this.candidateCanary || this.scopedLaunch
             ? { allowProviderModelFallback: false }
             : {}),
         },
       ),
       "codex_thread_start_response_invalid",
     );
+    this.scopedLaunch?.assert_thread(response);
     if (this.candidateCanary) {
       const thread = objectV01(response.thread, "codex_thread_start_binding_invalid");
       if (response.modelProvider !== "openai" || thread.modelProvider !== "openai" ||
@@ -2303,6 +2356,11 @@ class CodexAppServerInvocationV01 {
   }
 
   private async startTurn(): Promise<void> {
+    if (this.options.scoped_task) {
+      await assertCodexScopedTaskCurrentV01(this.options.scoped_task, this.request);
+      this.scopedLaunch!.assert_sources_current();
+      if (this.control.cancellation_signal.aborted || this.stopRequest || this.fatalError) throw new Error("codex_scoped_stopped_before_turn");
+    }
     if (this.candidateCanary && (this.fatalError || this.stopRequest || this.control.cancellation_signal.aborted))
       throw this.fatalError ?? new CodexProtocolErrorV01("codex_candidate_canary_stopped_before_turn");
     const renderedPacket = this.candidateCanary
@@ -2324,7 +2382,7 @@ class CodexAppServerInvocationV01 {
           approvalsReviewer:
             this.qualifiedRuntimeSelection.compatibility_profile.semantics
               .server_requests.approvals_reviewer,
-          sandboxPolicy: this.sandboxProjection.turn_sandbox_policy,
+          ...(this.scopedLaunch ? { permissions: this.scopedLaunch.profile_name, model: SCOPED_CODEX_MODEL_V01, effort: SCOPED_CODEX_EFFORT_V01, approvalPolicy: "never" } : { sandboxPolicy: this.sandboxProjection.turn_sandbox_policy }),
           outputSchema: CODEX_HOST_STRUCTURED_RESULT_SCHEMA_V01,
         },
       ),
@@ -2359,6 +2417,17 @@ class CodexAppServerInvocationV01 {
   }
 
   private async onNotification(method: string, params: unknown): Promise<void> {
+    if (this.scopedLaunch) {
+      if (["account/updated", "configWarning", "mcpServer/startupStatus/updated", "model/rerouted", "modelProvider/authRecoveryStarted", "modelProvider/authRecoveryCompleted"].includes(method) ||
+          /^(?:hook\/|item\/(?:fileChange|mcpToolCall|dynamicToolCall|webSearch|imageGeneration|collabAgentToolCall|autoApprovalReview)\/)/u.test(method))
+        throw new Error("codex_scoped_runtime_policy_changed");
+      if (method === "thread/settings/updated") {
+        const value = objectV01(params, "codex_scoped_settings_invalid");
+        if (value.threadId !== this.threadId) throw new Error("codex_scoped_settings_thread_mismatch");
+        this.scopedLaunch.assert_settings(value.settings);
+        return;
+      }
+    }
     if (this.candidateCanary && /^(?:hook\/|item\/(?:commandExecution|fileChange|mcpToolCall|dynamicToolCall|webSearch|imageGeneration|collabAgentToolCall|autoApprovalReview)\/)/u.test(method)) {
       this.fatalError = new CodexProtocolErrorV01("codex_candidate_canary_unexpected_effect");
       throw this.fatalError;
@@ -2381,6 +2450,12 @@ class CodexAppServerInvocationV01 {
       );
     }
     const value = objectV01(params, "codex_notification_params_invalid");
+    if (this.scopedLaunch) {
+      const items = method === "item/started" || method === "item/completed" ? [value.item] :
+        method === "turn/completed" ? objectV01(value.turn, "codex_scoped_turn_invalid").items : [];
+      if (!Array.isArray(items) || items.some(item => !["userMessage", "agentMessage", "reasoning", "plan", "commandExecution", "contextCompaction"].includes(
+        String(objectV01(item, "codex_scoped_item_invalid").type)))) throw new Error("codex_scoped_unexpected_capability");
+    }
     this.assertNotificationBinding(value);
     if (
       this.qualifiedRuntimeSelection.compatibility_profile.semantics.notifications.bounded_observed_optional.includes(
@@ -2561,7 +2636,12 @@ class CodexAppServerInvocationV01 {
     params: unknown,
   ): Promise<unknown> {
     // The shared transport returns a bounded error and fails the invocation.
-    // No approval sink or permission normalization may grant canary authority.
+    // Neither the canary nor the read-only scoped task can escalate through
+    // operation approval. Semantic result review remains a separate owner.
+    if (this.scopedLaunch) {
+      this.fatalError = new CodexProtocolErrorV01("codex_scoped_permission_escalation_refused");
+      throw this.fatalError;
+    }
     if (this.candidateCanary) {
       this.fatalError = new CodexProtocolErrorV01("codex_candidate_canary_unexpected_effect");
       throw this.fatalError;
@@ -3044,6 +3124,8 @@ class CodexAppServerInvocationV01 {
         terminal.turn,
         this.request.result_return.max_result_bytes,
       );
+      if (this.scopedLaunch && (payload.changed_files.length || payload.artifacts.length || this.observedChangedFiles.length))
+        throw new CodexProtocolErrorV01("codex_scoped_result_effect_refused");
       if (this.candidateCanary && (payload.commands.length || payload.changed_files.length || payload.artifacts.length || payload.observed_actions.length))
         throw new CodexProtocolErrorV01("codex_candidate_canary_unexpected_effect");
       this.resultDeferred.resolve(this.buildCompletedResult(payload));
@@ -3171,7 +3253,15 @@ class CodexAppServerInvocationV01 {
           packet_delivery_initiated: !this.candidateCanary && this.packetDeliveryInitiated,
           ...this.candidateEvidenceMetadataV01(),
           app_server_transport: "stdio_jsonl",
-          experimental_api: false,
+          experimental_api: Boolean(this.scopedLaunch),
+          ...(this.scopedLaunch ? {
+            scoped_task_contract: SCOPED_CODEX_CONTRACT_V01,
+            scoped_task_fingerprint: this.options.scoped_task!.fingerprint,
+            scoped_configuration_fingerprint: this.scopedLaunch.configuration_fingerprint,
+            requested_model: SCOPED_CODEX_MODEL_V01, observed_model_selection: SCOPED_CODEX_MODEL_V01,
+            requested_effort: SCOPED_CODEX_EFFORT_V01, observed_effort_selection: SCOPED_CODEX_EFFORT_V01,
+            backend_serving_identity: "unknown", cold_isolation_claimed: false,
+          } : {}),
           cli_version: this.cliVersion,
           raw_provider_payload_included: false,
           ...(this.isolatedAuthObservation

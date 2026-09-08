@@ -17,6 +17,7 @@ import net from "node:net";
 import path from "node:path";
 import readline from "node:readline";
 import tls from "node:tls";
+import { parse as parseToml } from "smol-toml";
 
 import { waitForBoundedFileSignal } from "../bounded-file-signal.mjs";
 
@@ -30,6 +31,9 @@ const scenario =
 const isolatedAuthScenario = scenario.startsWith("isolated_auth_");
 const candidate01532Scenario = scenario.startsWith("candidate_0_153_2_");
 const candidateCanaryScenario = scenario.startsWith("candidate_canary_");
+const scopedScenario = scenario.startsWith("scoped_");
+let scopedConfig = null;
+let scopedPermissions = null;
 const candidateCanaryVersion = process.env.FAKE_CODEX_CANARY_VERSION;
 const threadId =
   process.env.FAKE_CODEX_THREAD_ID ?? "01900000-0000-7000-8000-000000000001";
@@ -248,6 +252,10 @@ process.on("exit", persistNetworkCount);
 async function handle(message) {
   if (Object.hasOwn(message, "method") && Object.hasOwn(message, "id")) {
     if (message.method === "initialize") {
+      if (scopedScenario && (message.params?.capabilities?.experimentalApi !== true || scenario === "scoped_unsupported_capability")) {
+        respondError(message.id, -32602, "scoped_capability_required");
+        return;
+      }
       if (scenario === "unsupported_app_server") {
         respondError(message.id, -32601, "Method not found");
         return;
@@ -348,6 +356,29 @@ async function handle(message) {
       return;
     }
     if (message.method === "config/read") {
+      if (scopedScenario) {
+        const configPath = path.join(process.env.CODEX_HOME, "config.toml");
+        const config = existsSync(configPath) ? parseToml(readFileSync(configPath, "utf8")) : {};
+        for (let i = 2; i < process.argv.length - 2; i++) {
+          if (process.argv[i] === "-c") mergeScopedFixtureConfig(config, parseToml(process.argv[++i]));
+        }
+        scopedPermissions = config.default_permissions;
+        if (scenario === "scoped_ignored_memory") config.features.memories = true;
+        if (scenario === "scoped_ignored_mcp") config.mcp_servers.inherited.enabled = true;
+        if (scenario === "scoped_ignored_permissions") config.permissions[scopedPermissions].filesystem["/"] = "read";
+        scopedConfig = config;
+        trace("scoped_launch_controls", {
+          strict_config: process.argv.includes("--strict-config"),
+          ambient_disabled: config.features.memories === false && config.features.chronicle === false && config.features.plugins === false,
+          inherited_mcp_disabled: Object.values(config.mcp_servers).every(server => server.enabled === false),
+          synthetic_background_started: config.features.memories === true || Object.values(config.mcp_servers).some(server => server.enabled !== false),
+        });
+        respond(message.id, { config, origins: {}, layers: [
+          ...(existsSync(configPath) ? [{ name: { type: "user", file: configPath } }] : []),
+          { name: { type: "sessionFlags" } },
+        ] });
+        return;
+      }
       if (candidate01532Scenario || candidateCanaryScenario) {
         const entries = isolatedAuthRuntimeOverrideEntriesV01(
           process.argv.slice(2, -2),
@@ -488,6 +519,7 @@ async function handle(message) {
       }
       respond(
         message.id,
+        scenario === "scoped_mcp_tool" ? { data: [{ name: "inherited", tools: { unexpected: {} }, resources: [], resourceTemplates: [], runtimeStatus: null, serverInfo: null, pluginId: null }], nextCursor: null } :
         scenario === "isolated_auth_mcp_drift"
           ? { data: [{ name: "unexpected-network-tool" }], nextCursor: null }
           : { data: [], nextCursor: null },
@@ -495,6 +527,11 @@ async function handle(message) {
       return;
     }
     if (message.method === "thread/start") {
+      if (scopedScenario && (!scopedConfig || message.params?.permissions !== scopedPermissions ||
+          Object.hasOwn(message.params, "sandbox") || message.params?.ephemeral !== true || message.params?.allowProviderModelFallback !== false)) {
+        respondError(message.id, -32602, "scoped_thread_policy_required");
+        return;
+      }
       if (candidateCanaryScenario && (!initializedCandidatePolicy || message.params?.ephemeral !== true ||
           message.params?.allowProviderModelFallback !== false || message.params?.sandbox !== "read-only"))
         throw new Error("candidate_canary_prethread_gate_missing");
@@ -548,6 +585,11 @@ async function handle(message) {
       return;
     }
     if (message.method === "turn/start") {
+      if (scopedScenario && (message.params?.permissions !== scopedPermissions || Object.hasOwn(message.params, "sandboxPolicy") ||
+          message.params?.model !== "gpt-6-astra" || message.params?.effort !== "max" || message.params?.approvalPolicy !== "never")) {
+        respondError(message.id, -32602, "scoped_turn_policy_required");
+        return;
+      }
       turnActive = true;
       persistState({ threadId, sessionId, turnId, status: "inProgress" });
       if (scenario === "browser_two_sequential_approvals") {
@@ -626,13 +668,22 @@ async function handle(message) {
           emitObservedItems(path.join(path.dirname(root), "outside-result.ts"));
           completeSuccess();
         } else if (
-          scenario === "success" || scenario === "candidate_canary_success" || scenario === "candidate_canary_descendant_cleanup" ||
+          scenario === "success" || scenario === "scoped_success" || scenario === "scoped_result_effect" || scenario === "candidate_canary_success" || scenario === "candidate_canary_descendant_cleanup" ||
           isolatedAuthScenario ||
           scenario === "thread_bound_notification_before_response" ||
           scenario === "status_only_notifications"
         )
           completeSuccess();
         else if (scenario === "turn_failure") completeFailure();
+        else if (scenario === "scoped_approval") requestCommandApproval();
+        else if (scenario === "scoped_effect") {
+          notify("item/started", { threadId, turnId, item: { id: "unexpected-tool", type: "webSearch" } });
+          completeSuccess();
+        }
+        else if (scenario === "scoped_settings_drift") {
+          notify("thread/settings/updated", { threadId, settings: { activePermissionProfile: { id: "wrong" } } });
+          completeSuccess();
+        }
         else if (scenario === "candidate_canary_server_request") requestCommandApproval();
         else if (scenario === "candidate_canary_effect") {
           notify("item/started", { threadId, turnId, item: { id: "unexpected-tool", type: "webSearch" } });
@@ -760,6 +811,8 @@ async function handle(message) {
         else if (scenario === "duplicate_event") {
           notify("turn/started", { threadId, turn: turn("inProgress", []) });
           completeSuccess();
+        } else if (scenario === "scoped_cancel") {
+          // Stay in progress until the existing interrupt/cleanup owner acts.
         } else completeSuccess();
       });
       return;
@@ -1586,6 +1639,12 @@ function completeUnsafeTextStructuredResult(summary) {
 }
 
 function structuredResult() {
+  if (scopedScenario && scenario !== "scoped_result_effect") return JSON.stringify({
+    result_version: "codex_host_structured_result.v0.1", summary: "The synthetic scoped fixture returned a bounded result.",
+    changed_files: [], artifacts: [], observed_actions: [], commands: [],
+    checks: [{ check_id: "synthetic_fixture", required: false, status: "passed", summary: "Deterministic contract check only." }],
+    skipped_checks: [], uncertainty: ["No model was used."], gaps: [], proposed_next_steps: ["Review the bounded fixture result."],
+  });
   if (candidateCanaryScenario) return JSON.stringify({
     result_version: "codex_host_structured_result.v0.1", summary: "AUGNES_CANARY_OK",
     changed_files: [], artifacts: [], observed_actions: [], commands: [], checks: [],
@@ -1635,11 +1694,21 @@ function structuredResult() {
   });
 }
 
+// Synthetic fixture only: model the pinned loader's recursive TOML merge.
+function mergeScopedFixtureConfig(target, source) {
+  for (const [key, value] of Object.entries(source)) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      if (!target[key] || typeof target[key] !== "object" || Array.isArray(target[key])) target[key] = {};
+      mergeScopedFixtureConfig(target[key], value);
+    } else target[key] = value;
+  }
+}
+
 function threadResponse(options = {}) {
-  const isolated = isolatedAuthScenario || candidateCanaryScenario;
+  const isolated = isolatedAuthScenario || candidateCanaryScenario || scopedScenario;
   return {
     thread: thread({ ...options, ephemeral: isolated }),
-    model: "configured-default",
+    model: scopedScenario && scenario !== "scoped_model_mismatch" ? "gpt-6-astra" : "configured-default",
     modelProvider:
       isolated && scenario !== "isolated_auth_provider_mismatch"
         ? "openai"
@@ -1650,16 +1719,17 @@ function threadResponse(options = {}) {
       scenario === "isolated_auth_instruction_source_drift"
         ? ["file:///foreign-instruction-source"]
         : [],
-    approvalPolicy: "on-request",
+    approvalPolicy: scopedScenario ? "never" : "on-request",
     approvalsReviewer: "user",
-    sandbox: candidateCanaryScenario ? { type: "readOnly", networkAccess: false } : {
+    sandbox: candidateCanaryScenario || scopedScenario ? { type: "readOnly", networkAccess: false } : {
       type: "workspaceWrite",
       writableRoots: [root],
       networkAccess: false,
       excludeTmpdirEnvVar: true,
       excludeSlashTmp: true,
     },
-    reasoningEffort: null,
+    reasoningEffort: scopedScenario && scenario !== "scoped_effort_mismatch" ? "max" : null,
+    ...(scopedScenario ? { activePermissionProfile: { id: scenario === "scoped_profile_mismatch" ? "wrong" : scopedPermissions } } : {}),
   };
 }
 
@@ -1681,7 +1751,7 @@ function thread(options = {}) {
     status: turnActive ? { type: "active", activeFlags: [] } : { type: "idle" },
     path: null,
     cwd: root,
-    cliVersion: candidateCanaryScenario ? candidateCanaryVersion : isolatedAuthScenario ? "0.152.1" : "0.147.0",
+    cliVersion: candidateCanaryScenario ? candidateCanaryVersion : isolatedAuthScenario || scopedScenario ? "0.152.1" : "0.147.0",
     source: "appServer",
     threadSource: null,
     agentNickname: null,
@@ -1761,6 +1831,12 @@ function minimized(message) {
     has_result: Object.hasOwn(message ?? {}, "result"),
     has_error: Object.hasOwn(message ?? {}, "error"),
   };
+  if (scopedScenario && ["thread/start", "turn/start"].includes(message?.method)) {
+    summary.permissions = message.params?.permissions ?? null;
+    summary.model = message.params?.model ?? null;
+    summary.effort = message.params?.effort ?? null;
+    summary.legacy_policy_present = Object.hasOwn(message.params ?? {}, "sandbox") || Object.hasOwn(message.params ?? {}, "sandboxPolicy");
+  }
   if (message?.method === "initialize") {
     summary.fixture_scenario = scenario;
     summary.capabilities = message.params?.capabilities ?? null;

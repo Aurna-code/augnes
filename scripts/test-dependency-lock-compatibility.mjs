@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { createRequire } from "node:module";
+import { materializeMergedR8ADependencies, planMergedR8ADependencyView, R8A_CURRENT_ONLY_PARSER, snapshotMergedR8ACurrentInputs } from "./merged-r8a-fixture-dependencies.mjs";
 
 import {
   ROOT_DEPENDENCY_BEARING_FIELDS,
@@ -90,6 +95,8 @@ assert.deepEqual(ROOT_DEPENDENCY_BEARING_FIELDS, [
   "workspaces",
 ]);
 
+const materializationCases = testHistoricalMaterialization();
+
 console.log(
   JSON.stringify(
     {
@@ -104,6 +111,10 @@ console.log(
       transitive_peer_reachability_classification_ignored: true,
       deleted_package_entries_refused: true,
       nested_lock_compatibility_protected: true,
+      historical_materialization_cases: materializationCases,
+      current_only_parser_excluded_from_historical_view: true,
+      current_source_locks_and_installed_files_unchanged: true,
+      isolated_copy_resolution_bins_and_hidden_lock_verified: true,
     },
     null,
     2,
@@ -172,4 +183,96 @@ function expectIncompatible(lock, mutate) {
     normalizedDependencyLock(candidate),
     normalizedDependencyLock(lock),
   );
+}
+
+function testHistoricalMaterialization() {
+  const parent = mkdtempSync(path.join(tmpdir(), "augnes-r8a-dependencies-"));
+  let count = 0;
+  const simpleLock = (name) => ({ name, version: "0.1.0", lockfileVersion: 3, requires: true,
+    packages: { "": { name, version: "0.1.0", dependencies: { base: "1.0.0" } },
+      "node_modules/base": { version: "1.0.0", resolved: "https://example.invalid/base.tgz", integrity: "sha512-base",
+        dependencies: { leaf: "1.0.0" }, bin: { base: "bin/run.js" } },
+      "node_modules/leaf": { version: "1.0.0", resolved: "https://example.invalid/leaf.tgz", integrity: "sha512-leaf" } } });
+  const addParser = lock => { lock.packages[""].dependencies["smol-toml"] = "1.8.0"; lock.packages["node_modules/smol-toml"] = structuredClone(R8A_CURRENT_ONLY_PARSER); };
+  const json = (file, value) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, `${JSON.stringify(value)}\n`); };
+  function installed(root, lock) {
+    json(path.join(root, "package-lock.json"), lock);
+    json(path.join(root, "package.json"), lock.packages[""]);
+    const records = Object.entries(lock.packages).filter(([p]) => p);
+    json(path.join(root, "node_modules/.package-lock.json"), { ...lock, packages: Object.fromEntries(records) });
+    for (const [p, record] of records) {
+      const name = p.split("/").at(-1);
+      json(path.join(root, p, "package.json"), { name, version: record.version,
+        ...(record.dependencies ? { dependencies: record.dependencies } : {}), ...(record.bin ? { bin: record.bin } : {}) });
+      writeFileSync(path.join(root, p, "index.js"), `module.exports = ${JSON.stringify(name)};\n`);
+      for (const [bin, relative] of Object.entries(record.bin ?? {})) {
+        mkdirSync(path.dirname(path.join(root, p, relative)), { recursive: true });
+        writeFileSync(path.join(root, p, relative), "#!/usr/bin/env node\n", { mode: 0o755 });
+        mkdirSync(path.join(root, "node_modules/.bin"), { recursive: true });
+        symlinkSync(`../${name}/${relative}`, path.join(root, "node_modules/.bin", bin));
+      }
+    }
+  }
+  function fixture(additive = true) {
+    const root = path.join(parent, `case-${count++}`), historicalRoot = path.join(root, "historical"), currentRoot = path.join(root, "current");
+    for (const prefix of ["", "apps/augnes_apps"]) {
+      const old = simpleLock(prefix ? "@augnes/apps" : "augnes"), current = structuredClone(old);
+      if (!prefix && additive) addParser(current);
+      json(path.join(historicalRoot, prefix, "package-lock.json"), old);
+      json(path.join(historicalRoot, prefix, "package.json"), old.packages[""]);
+      installed(path.join(currentRoot, prefix), current);
+    }
+    return { historicalRoot, currentRoot };
+  }
+  function mutate(file, update) { const value = JSON.parse(readFileSync(file)); update(value); json(file, value); }
+  try {
+    for (const additive of [false, true]) {
+      const input = fixture(additive);
+      const historical = JSON.parse(readFileSync(path.join(input.historicalRoot, "package-lock.json")));
+      const current = JSON.parse(readFileSync(path.join(input.currentRoot, "package-lock.json")));
+      assert.deepEqual(planMergedR8ADependencyView(historical, current), additive ? ["node_modules/smol-toml"] : []);
+      if (additive) assert.notDeepEqual(normalizedDependencyLock(historical), normalizedDependencyLock(current));
+      const assertCurrentInputsUnchanged = snapshotMergedR8ACurrentInputs(input.currentRoot);
+      const result = materializeMergedR8ADependencies(input);
+      assertCurrentInputsUnchanged();
+      const oldRequire = createRequire(path.join(input.historicalRoot, "package.json"));
+      assert.equal(oldRequire("base"), "base");
+      assert.throws(() => oldRequire.resolve("smol-toml"), { code: "MODULE_NOT_FOUND" });
+      const hidden = JSON.parse(readFileSync(path.join(input.historicalRoot, "node_modules/.package-lock.json")));
+      assert.equal(Object.hasOwn(hidden.packages, "node_modules/smol-toml"), false);
+      if (additive) assert.equal(createRequire(path.join(input.currentRoot, "package.json"))("smol-toml"), "smol-toml");
+      result.assertHistoricalViewUnchanged();
+      writeFileSync(path.join(input.historicalRoot, "node_modules/leaf/index.js"), "historical-only edit\n");
+      result.assertUnchanged();
+      assert.throws(result.assertHistoricalViewUnchanged, /historical dependency view changed/u);
+      writeFileSync(path.join(input.currentRoot, "node_modules/leaf/index.js"), "unexpected current edit\n");
+      assert.throws(result.assertUnchanged, /current installed dependencies changed/u);
+      assert.throws(assertCurrentInputsUnchanged, /current installed inputs changed/u);
+    }
+    const negatives = [
+      ({ currentRoot }) => mutate(path.join(currentRoot, "package-lock.json"), l => { l.packages["node_modules/unapproved"] = { version: "1" }; }),
+      ({ currentRoot }) => mutate(path.join(currentRoot, "package-lock.json"), l => { l.packages[""].dependencies.base = "2"; }),
+      ({ currentRoot }) => mutate(path.join(currentRoot, "package-lock.json"), l => { delete l.packages["node_modules/leaf"]; }),
+      ({ currentRoot }) => mutate(path.join(currentRoot, "package-lock.json"), l => { l.packages["node_modules/leaf"].integrity = "changed"; l.packages["node_modules/leaf"].resolved = "https://example.invalid/other"; }),
+      ({ currentRoot }) => mutate(path.join(currentRoot, "package-lock.json"), l => { delete l.packages["node_modules/leaf"].integrity; }),
+      ({ currentRoot }) => mutate(path.join(currentRoot, "package-lock.json"), l => { l.packages["node_modules/base"].peerDependencies = { leaf: "2" }; }),
+      ({ currentRoot }) => mutate(path.join(currentRoot, "package-lock.json"), l => { l.packages["node_modules/smol-toml"].bin = { injected: "bin.js" }; }),
+      ({ currentRoot }) => mutate(path.join(currentRoot, "apps/augnes_apps/package-lock.json"), addParser),
+      ({ currentRoot }) => mutate(path.join(currentRoot, "apps/augnes_apps/node_modules/base/package.json"), m => { m.version = "2.0.0"; }),
+      ({ currentRoot }) => mutate(path.join(currentRoot, "node_modules/.package-lock.json"), l => { l.packages["node_modules/leaf"].integrity = "wrong installed integrity"; }),
+      ({ currentRoot }) => mutate(path.join(currentRoot, "node_modules/.package-lock.json"), l => { l.unapproved = "current-only metadata"; }),
+      ({ currentRoot }) => mutate(path.join(currentRoot, "node_modules/base/package.json"), m => { m.version = "2.0.0"; }),
+      ({ currentRoot }) => rmSync(path.join(currentRoot, "node_modules/leaf"), { recursive: true }),
+      ({ currentRoot }) => rmSync(path.join(currentRoot, "node_modules/.bin/base")),
+      ({ currentRoot }) => { const bin = path.join(currentRoot, "node_modules/.bin/base"); rmSync(bin); symlinkSync("../leaf/index.js", bin); },
+      ({ currentRoot }) => { const p = path.join(currentRoot, "node_modules/base/node_modules/leaf"); mkdirSync(p, { recursive: true }); json(path.join(p, "package.json"), { name: "leaf", version: "1.0.0" }); },
+      ({ currentRoot }) => { symlinkSync(currentRoot, path.join(currentRoot, "node_modules/foreign")); },
+    ];
+    for (const negative of negatives) {
+      const input = fixture(); negative(input);
+      assert.throws(() => materializeMergedR8ADependencies(input));
+      assert.equal(existsSync(path.join(input.historicalRoot, "node_modules")), false, "refuse before materialization");
+    }
+    return count;
+  } finally { rmSync(parent, { recursive: true, force: true }); assert.equal(existsSync(parent), false); }
 }

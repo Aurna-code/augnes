@@ -11,7 +11,10 @@ import {
 } from "@/lib/autonomy/runner-ledger";
 import { isTerminalRunnerStatus } from "@/lib/autonomy/runner-state";
 import { assertNativeHostPublicTextV01 } from "@/lib/vnext/native-host/native-host-contract";
-import { createCodexAppServerAdapterV01 } from "@/lib/vnext/native-host/codex-app-server-adapter";
+import { createCodexAppServerAdapterV01, assertCodexScopedAdapterV01 } from "@/lib/vnext/native-host/codex-app-server-adapter";
+import type { CodexScopedTaskV01, CodexFeasibilityWindowV01, CodexScopedAttemptV01 } from "@/lib/vnext/native-host/codex-scoped-task";
+import { assertCodexScopedExecutionV01 } from "@/lib/vnext/native-host/codex-scoped-task";
+import { scheduleNativeHostTimeoutV01 } from "@/lib/vnext/runtime/direct-native-host-round-trip";
 import { createCanonicalRepositoryDelegationTestAdapterV01 } from "@/lib/vnext/native-host/canonical-repository-delegation-test-adapter";
 import { canonicalizeRepositoryRelativePathV01 } from "@/lib/vnext/repository-relative-path";
 import { validateExternalRefV01 } from "@/lib/vnext/task-context-packet";
@@ -170,7 +173,9 @@ export interface LiveNativeHostRunServiceOptionsV01 {
   open_database?: (
     config: VNextLocalOperatorPilotConfigV01,
   ) => Database.Database;
-  adapter_factory?: () => NativeHostAdapterV01;
+  adapter_factory?: (scope?: CodexScopedTaskV01) => NativeHostAdapterV01;
+  /** Source-owned disposable caller only; no public Start body/config field. */
+  scoped_task?: Readonly<{ scope: CodexScopedTaskV01; window: CodexFeasibilityWindowV01 }>;
   now?: () => string;
   timeout_ms?: number;
   stop_settle_timeout_ms?: number;
@@ -228,6 +233,10 @@ export class LiveNativeHostRunServiceV01 {
   private readonly runtimeGenerationFingerprint: string;
 
   constructor(private readonly options: LiveNativeHostRunServiceOptionsV01 = {}) {
+    if (options.scoped_task) {
+      assertCodexScopedExecutionV01(options.scoped_task);
+      this.options = Object.freeze({ ...options, scoped_task: Object.freeze({ ...options.scoped_task }) });
+    }
     this.openDatabase = options.open_database ?? openVNextLocalOperatorDatabaseV01;
     this.now = options.now ?? (() => new Date().toISOString());
     const supervised = supervisedRuntimeFingerprintsV01(process.env);
@@ -311,8 +320,8 @@ export class LiveNativeHostRunServiceV01 {
     return {
       adapter_version: adapter.adapter_version,
       capability_version: adapter.capability_version,
-      timeout_ms: this.options.timeout_ms ?? DEFAULT_LIVE_TIMEOUT_MS,
-      stop_settle_timeout_ms:
+      timeout_ms: this.options.scoped_task ? Math.min(this.options.timeout_ms ?? DEFAULT_LIVE_TIMEOUT_MS, 180_000) : this.options.timeout_ms ?? DEFAULT_LIVE_TIMEOUT_MS,
+      stop_settle_timeout_ms: this.options.scoped_task ? Math.min(this.options.stop_settle_timeout_ms ?? DEFAULT_STOP_SETTLE_TIMEOUT_MS, 10_000) :
         this.options.stop_settle_timeout_ms ?? DEFAULT_STOP_SETTLE_TIMEOUT_MS,
       execution_profile: adapter.execution_profile,
       provider_egress: adapter.provider_egress,
@@ -583,105 +592,114 @@ export class LiveNativeHostRunServiceV01 {
       secret_source?: VNextLocalOperatorSecretSourceV01;
     };
   }): Promise<LiveNativeHostStartResultV01> {
-    if (input.mode === "repository_attachment") {
-      refuseV01("live_host_repository_start_owner_required", 403);
-    }
-    if (
-      input.mode === "interactive" &&
-      !input.operator_mutation &&
-      this.options.test_only_allow_unauthenticated_interactive !== true
-    ) {
-      refuseV01("live_host_operator_authority_required", 401);
-    }
-    const key = projectKeyV01(input.config);
-    const active = this.controllers.get(key);
-    if (active && !active.completionSettled) {
-      const activeRun = this.readLatestManagedRun(input.config);
-      if (
-        !activeRun ||
-        activeRun.run_id !== active.runId ||
-        activeRun.metadata.adapter_version !== active.adapter.adapter_version ||
-        activeRun.metadata.capability_version !== active.adapter.capability_version ||
-        !active.matchesStart(input.mode, input.automation_context ?? null)
-      ) {
-        refuseV01("live_host_start_conflict", 409);
+    if (this.options.scoped_task) assertCodexScopedExecutionV01(this.options.scoped_task);
+    const scopedAttempt = this.options.scoped_task?.window.begin(this.options.scoped_task.scope,
+      this.options.timeout_ms ?? DEFAULT_LIVE_TIMEOUT_MS, this.options.stop_settle_timeout_ms ?? DEFAULT_STOP_SETTLE_TIMEOUT_MS);
+    try {
+      if (scopedAttempt && input.mode !== "interactive") refuseV01("live_host_scoped_mode_refused", 403);
+      if (input.mode === "repository_attachment") {
+        refuseV01("live_host_repository_start_owner_required", 403);
       }
-      await this.assertRunStillBindsCurrentSelection(input.config, activeRun);
-      return {
-        status: "exact_replay",
-        projection: this.read(input.config),
-        session_admission: this.admitReplayMutation(
-          input.config,
-          input.operator_mutation,
-        ),
-      };
-    }
-
-    const existing = this.readLatestManagedRun(input.config);
-    if (existing && !isTerminalRunnerStatus(existing.status)) {
       if (
-        !startMaterialMatchesRunV01(
+        input.mode === "interactive" &&
+        !input.operator_mutation &&
+        this.options.test_only_allow_unauthenticated_interactive !== true
+      ) {
+        refuseV01("live_host_operator_authority_required", 401);
+      }
+      const key = projectKeyV01(input.config);
+      const active = this.controllers.get(key);
+      if (active && !active.completionSettled) {
+        const activeRun = this.readLatestManagedRun(input.config);
+        if (
+          !activeRun ||
+          activeRun.run_id !== active.runId ||
+          activeRun.metadata.adapter_version !== active.adapter.adapter_version ||
+          activeRun.metadata.capability_version !== active.adapter.capability_version ||
+          !active.matchesStart(input.mode, input.automation_context ?? null)
+        ) {
+          refuseV01("live_host_start_conflict", 409);
+        }
+        await this.assertRunStillBindsCurrentSelection(input.config, activeRun);
+        return {
+          status: "exact_replay",
+          projection: this.read(input.config),
+          session_admission: this.admitReplayMutation(
+            input.config,
+            input.operator_mutation,
+          ),
+        };
+      }
+
+      const existing = this.readLatestManagedRun(input.config);
+      if (existing && !isTerminalRunnerStatus(existing.status)) {
+        if (scopedAttempt) refuseV01("live_host_scoped_replay_refused", 409);
+        if (
+          !startMaterialMatchesRunV01(
+            existing,
+            input.mode,
+            input.automation_context ?? null,
+            this.currentAdapterContract(),
+          )
+        ) {
+          refuseV01("live_host_start_conflict", 409);
+        }
+        await this.assertRunStillBindsCurrentSelection(input.config, existing);
+        if (existing.status !== "paused") {
+          this.pauseUnownedRun(input.config, existing);
+        }
+        return {
+          status: "exact_replay",
+          projection: this.read(input.config),
+          session_admission: this.admitReplayMutation(
+            input.config,
+            input.operator_mutation,
+          ),
+        };
+      }
+      if (
+        existing &&
+        isTerminalRunnerStatus(existing.status) &&
+        (await this.isExactCurrentStartReplay(
+          input.config,
           existing,
           input.mode,
           input.automation_context ?? null,
-          this.currentAdapterContract(),
-        )
+        ))
       ) {
-        refuseV01("live_host_start_conflict", 409);
+        if (scopedAttempt) refuseV01("live_host_scoped_replay_refused", 409);
+        await this.retryTerminalProposalAdmissionV01(input.config, existing);
+        const refreshed = this.readLatestManagedRun(input.config) ?? existing;
+        return {
+          status: "exact_replay",
+          projection: projectionFromRunV01(refreshed),
+          session_admission: this.admitReplayMutation(
+            input.config,
+            input.operator_mutation,
+          ),
+        };
       }
-      await this.assertRunStillBindsCurrentSelection(input.config, existing);
-      if (existing.status !== "paused") {
-        this.pauseUnownedRun(input.config, existing);
+      if (existing && isTerminalRunnerStatus(existing.status)) {
+        const currentPacket = this.currentPacketIdentity(input.config);
+        if (
+          !currentPacket ||
+          (currentPacket.packet_id === existing.metadata.packet_id &&
+            currentPacket.packet_fingerprint ===
+              existing.metadata.packet_fingerprint)
+        ) {
+          refuseV01("live_host_start_conflict", 409);
+        }
       }
-      return {
-        status: "exact_replay",
-        projection: this.read(input.config),
-        session_admission: this.admitReplayMutation(
-          input.config,
-          input.operator_mutation,
-        ),
-      };
-    }
-    if (
-      existing &&
-      isTerminalRunnerStatus(existing.status) &&
-      (await this.isExactCurrentStartReplay(
-        input.config,
-        existing,
-        input.mode,
-        input.automation_context ?? null,
-      ))
-    ) {
-      await this.retryTerminalProposalAdmissionV01(input.config, existing);
-      const refreshed = this.readLatestManagedRun(input.config) ?? existing;
-      return {
-        status: "exact_replay",
-        projection: projectionFromRunV01(refreshed),
-        session_admission: this.admitReplayMutation(
-          input.config,
-          input.operator_mutation,
-        ),
-      };
-    }
-    if (existing && isTerminalRunnerStatus(existing.status)) {
-      const currentPacket = this.currentPacketIdentity(input.config);
-      if (
-        !currentPacket ||
-        (currentPacket.packet_id === existing.metadata.packet_id &&
-          currentPacket.packet_fingerprint ===
-            existing.metadata.packet_fingerprint)
-      ) {
-        refuseV01("live_host_start_conflict", 409);
-      }
-    }
 
-    return this.launch({
-      ...input,
-      repository_delegation_context: null,
-      resume_binding: null,
-      resume_existing: false,
-      before_adapter_invoke: undefined,
-    });
+      return this.launch({
+        ...input,
+        repository_delegation_context: null,
+        resume_binding: null,
+        resume_existing: false,
+        before_adapter_invoke: undefined,
+        scoped_attempt: scopedAttempt,
+      }).catch(error => { scopedAttempt?.finish(false); throw error; });
+    } catch (error) { scopedAttempt?.finish(false); throw error; }
   }
 
   read(config: VNextLocalOperatorPilotConfigV01): LiveNativeHostRunProjectionV01 {
@@ -1302,6 +1320,7 @@ export class LiveNativeHostRunServiceV01 {
     clock?: VNextLocalRuntimeClockV01;
     secret_source?: VNextLocalOperatorSecretSourceV01;
   }): Promise<LiveNativeHostStartResultV01> {
+    if (this.options.scoped_task) refuseV01("live_host_scoped_resume_refused", 403);
     const db = this.openDatabase(input.config);
     let run: AutonomyRunRecord;
     let binding: NativeHostResumeBindingV01;
@@ -1391,10 +1410,13 @@ export class LiveNativeHostRunServiceV01 {
       DirectNativeHostRoundTripDependenciesV01["pre_admitted_repository_resume_claim"]
     >;
     before_adapter_invoke: ((request: NativeHostRequestV01) => Promise<void>) | undefined;
+    scoped_attempt?: CodexScopedAttemptV01;
   }): Promise<LiveNativeHostStartResultV01> {
-    const db = this.openDatabase(input.config);
+    if (this.options.scoped_task && !input.scoped_attempt) refuseV01("live_host_scoped_start_owner_required", 403);
     const delegate =
-      this.options.adapter_factory?.() ?? createCodexAppServerAdapterV01();
+      this.options.adapter_factory?.(input.scoped_attempt?.scope) ?? createCodexAppServerAdapterV01({ scoped_task: input.scoped_attempt?.scope });
+    if (input.scoped_attempt) assertCodexScopedAdapterV01(delegate, input.scoped_attempt.scope);
+    const db = this.openDatabase(input.config);
     const controller = new LiveRunControllerV01({
       config: input.config,
       mode: input.mode,
@@ -1429,10 +1451,10 @@ export class LiveNativeHostRunServiceV01 {
       {
         adapter: controller.adapter,
         now: this.now,
-        timeout_ms: this.options.timeout_ms ?? DEFAULT_LIVE_TIMEOUT_MS,
-        stop_settle_timeout_ms:
+        timeout_ms: input.scoped_attempt?.timeout_ms ?? this.options.timeout_ms ?? DEFAULT_LIVE_TIMEOUT_MS,
+        stop_settle_timeout_ms: input.scoped_attempt?.stop_settle_timeout_ms ??
           this.options.stop_settle_timeout_ms ?? DEFAULT_STOP_SETTLE_TIMEOUT_MS,
-        schedule_timeout: this.options.schedule_timeout,
+        schedule_timeout: input.scoped_attempt ? input.scoped_attempt.schedule(this.options.schedule_timeout ?? scheduleNativeHostTimeoutV01) : this.options.schedule_timeout,
         cancellation_signal: controller.abortController.signal,
         lifecycle_sink: controller,
         lifecycle_mode: "managed_live",
@@ -1444,7 +1466,10 @@ export class LiveNativeHostRunServiceV01 {
         pre_admitted_repository_resume_claim:
           input.pre_admitted_repository_resume_claim,
         repository_resume_context: input.repository_resume_context ?? null,
-        before_adapter_invoke: input.before_adapter_invoke,
+        before_adapter_invoke: input.scoped_attempt ? async request => {
+          await input.before_adapter_invoke?.(request);
+          await input.scoped_attempt!.before_invoke(request);
+        } : input.before_adapter_invoke,
         on_adapter_invocation_started: input.pre_admitted_repository_resume_claim
           ? () => {
               transitionResumeAttemptV01(db, {
@@ -1461,6 +1486,7 @@ export class LiveNativeHostRunServiceV01 {
       },
     )
       .then((result) => {
+        input.scoped_attempt?.finish(result.host_result?.outcome === "completed" && !controller.abortController.signal.aborted);
         controller.complete(result.run_id);
         if (input.pre_admitted_repository_resume_claim) {
           transitionResumeAttemptV01(db, {
@@ -1478,6 +1504,7 @@ export class LiveNativeHostRunServiceV01 {
         }
       })
       .catch((error: unknown) => {
+        input.scoped_attempt?.finish(false);
         controller.fail(error);
         if (input.pre_admitted_repository_resume_claim) {
           try {
@@ -1592,7 +1619,11 @@ export class LiveNativeHostRunServiceV01 {
   }
 
   private currentAdapterContract(): NativeHostAdapterV01 {
-    return this.options.adapter_factory?.() ?? createCodexAppServerAdapterV01();
+    const scope = this.options.scoped_task?.scope;
+    if (this.options.scoped_task) assertCodexScopedExecutionV01(this.options.scoped_task);
+    const adapter = this.options.adapter_factory?.(scope) ?? createCodexAppServerAdapterV01({ scoped_task: scope });
+    if (scope) assertCodexScopedAdapterV01(adapter, scope);
+    return adapter;
   }
 
   private currentPacketIdentity(config: VNextLocalOperatorPilotConfigV01): {
