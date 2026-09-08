@@ -1936,6 +1936,7 @@ class CodexAppServerInvocationV01 {
       if (this.scopedLaunch) {
         this.scopedLaunch.assert_configuration(await this.transport!.request("config/read", { includeLayers: true }));
         this.scopedLaunch.assert_mcp_catalog(await this.transport!.request("mcpServerStatus/list", {}));
+        this.scopedLaunch.assert_command_environment(await this.transport!.request("command/exec", this.scopedLaunch.command_environment_check));
         await this.transport!.settleNotifications();
         if (this.transport!.failure) throw this.transport!.failure;
       }

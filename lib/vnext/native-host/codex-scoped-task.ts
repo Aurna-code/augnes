@@ -162,6 +162,59 @@ function assertNoUnapprovedConfiguration(c: Record<string, unknown>): void {
   for (const key of ["model_providers", "profiles", "responses_api_metadata", "otel"])
     if (Object.keys(optionalRecord(c[key])).length) refuse(`unapproved_configuration_material_${key}`);
 }
+
+const SCOPED_COMMAND_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+const SHELL_POLICY_FIELDS = new Set([
+  "inherit", "ignore_default_excludes", "set", "exclude", "include_only", "filters", "experimental_use_profile",
+]);
+
+/** Inspect shape and surviving names, never return or copy private set values. */
+function assertShellEnvironmentPolicy(value: unknown, effective = false): void {
+  const p = optionalRecord(value);
+  if (Object.keys(p).some(k => !SHELL_POLICY_FIELDS.has(k)) ||
+    (p.inherit != null && (typeof p.inherit !== "string" || !["none", "core", "all"].includes(p.inherit))) ||
+    ["ignore_default_excludes", "experimental_use_profile"].some(k => p[k] != null && typeof p[k] !== "boolean"))
+    refuse("shell_environment_policy_invalid");
+  for (const field of ["exclude", "include_only"])
+    if (p[field] != null && (!Array.isArray(p[field]) || p[field].some(v => typeof v !== "string")))
+      refuse("shell_environment_policy_invalid");
+  const filters = p.filters == null ? null : record(p.filters);
+  if (filters && (p.exclude != null || p.include_only != null ||
+    Object.values(filters).some(v => v !== "include" && v !== "exclude") ||
+    new Set(Object.keys(filters).map(k => k.toLowerCase())).size !== Object.keys(filters).length))
+    refuse("shell_environment_policy_invalid");
+  const set = optionalRecord(p.set);
+  for (const [key, value] of Object.entries(set)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) || typeof value !== "string")
+      refuse("shell_environment_policy_invalid");
+    // Pinned patterns match without case sensitivity, while macOS set keys
+    // merge case-sensitively. PATH does not replace a surviving Path/path alias.
+    if (key.toLowerCase() === "path" && key !== "PATH") refuse("shell_environment_path_alias");
+  }
+  if (!effective) return;
+  // The loader may return canonical keyed filters instead of legacy arrays.
+  // Accept only the same closed final filter, including normalized key case.
+  const closedFilter = filters
+    ? Object.keys(filters).length === 1 && Object.entries(filters).every(([k, v]) => k.toLowerCase() === "path" && v === "include")
+    : equal(p.include_only, ["PATH"]) && equal(p.exclude ?? [], []);
+  if (p.inherit !== "none" || p.ignore_default_excludes !== false || p.experimental_use_profile !== false ||
+    set.PATH !== SCOPED_COMMAND_PATH || !closedFilter) refuse("effective_shell_environment_mismatch");
+}
+
+// A fixed predicate executed by the pinned command/exec consumer. It emits no
+// names or values on failure. These optional flags have specific runtime
+// producers; this is deliberately not a CODEX_* wildcard or a thread env claim.
+const COMMAND_ENVIRONMENT_PREDICATE = `BEGIN {
+  for (name in ENVIRON) {
+    if (name == "PATH") continue;
+    if (name == "CODEX_SANDBOX" && ENVIRON[name] == "seatbelt") continue;
+    if (name == "CODEX_SANDBOX_NETWORK_DISABLED" && ENVIRON[name] == "1") continue;
+    if (name == "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS" && ENVIRON[name] == "1") continue;
+    exit 61;
+  }
+  if (ENVIRON["PATH"] != "${SCOPED_COMMAND_PATH}") exit 62;
+  print "augnes-scoped-environment-ok";
+}`;
 function inline(value: unknown): string {
   if (typeof value === "string") return JSON.stringify(value);
   if (typeof value === "boolean" || typeof value === "number") return String(value);
@@ -188,6 +241,8 @@ export interface ScopedCodexLaunchV01 {
   readonly configuration_fingerprint: string;
   assert_sources_current(): void;
   assert_configuration(response: unknown): void;
+  readonly command_environment_check: Readonly<{ command: readonly string[]; cwd: string; permissionProfile: string; timeoutMs: number; outputBytesCap: number }>;
+  assert_command_environment(response: unknown): void;
   assert_mcp_catalog(response: unknown): void;
   assert_thread(response: unknown): void;
   assert_settings(response: unknown): void;
@@ -213,9 +268,9 @@ export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environme
     sourceHashes.set(p, existsSync(p) ? digest(fileBytes(p)) : null);
     const c = readConfig(p);
     assertNoUnapprovedConfiguration(c);
+    if (c["shell-environment-policy"] != null) refuse("shell_environment_policy_invalid");
+    assertShellEnvironmentPolicy(c.shell_environment_policy);
     Object.keys(optionalRecord(c.mcp_servers)).forEach(name => servers.add(name));
-    if (Object.keys(optionalRecord(optionalRecord(c.shell_environment_policy).set)).length)
-      refuse("unapproved_configuration_material");
   }
   if (servers.size > 32) refuse("configuration_bound_exceeded");
   for (const name of ["AGENTS.md", "AGENTS.override.md"]) {
@@ -244,7 +299,10 @@ export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environme
     orchestrator: { mcp: { enabled: false }, skills: { enabled: false } },
     project_doc_max_bytes: 0, project_doc_fallback_filenames: [], allow_login_shell: false,
     check_for_update_on_startup: false, notify: [],
-    shell_environment_policy: { inherit: "none", ignore_default_excludes: false, set: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" } },
+    // Pinned merge replaces these arrays and displaces inherited keyed filters.
+    // set remains privately merged; final include_only runs AFTER every set.
+    shell_environment_policy: { inherit: "none", ignore_default_excludes: false, set: { PATH: SCOPED_COMMAND_PATH },
+      include_only: ["PATH"], exclude: [], experimental_use_profile: false },
   };
   const args = ["--strict-config", ...Object.entries(settings).flatMap(([key, value]) => ["-c", `${key}=${inline(value)}`])];
   const assertSources = () => {
@@ -254,6 +312,7 @@ export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environme
     assertSources();
     const r = record(response), c = record(r.config);
     assertNoUnapprovedConfiguration(c);
+    assertShellEnvironmentPolicy(c.shell_environment_policy, true);
     for (const key of ["model", "model_provider", "model_reasoning_effort", "default_permissions", "web_search", "project_doc_max_bytes", "allow_login_shell"])
       if (!equal(c[key], settings[key])) refuse("effective_configuration_mismatch");
     const features = record(c.features);
@@ -269,7 +328,6 @@ export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environme
       ["mcp", Object.values(optionalRecord(c.mcp_servers)).every(v => record(v).enabled === false)],
       ["permissions", equal(permissionProjection(record(c.permissions)[profileName]), profile)],
       ["provider", Object.keys(optionalRecord(c.model_providers)).length === 0],
-      ["shell_environment", equal(record(c.shell_environment_policy).set, { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" }) && record(c.shell_environment_policy).inherit === "none"],
     ];
     for (const [key, valid] of checks) if (!valid) refuse(`effective_${key}_mismatch`);
     if (!Array.isArray(r.layers)) refuse("configuration_provenance_missing");
@@ -301,6 +359,14 @@ export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environme
   };
   return freeze({
     args, profile_name: profileName, settings,
+    command_environment_check: { command: ["/usr/bin/awk", COMMAND_ENVIRONMENT_PREDICATE], cwd: m.root,
+      permissionProfile: profileName, timeoutMs: 10_000, outputBytesCap: 128 },
+    assert_command_environment(response: unknown) {
+      assertSources();
+      const r = record(response);
+      if (r.exitCode !== 0 || r.stdout !== "augnes-scoped-environment-ok\n" || r.stderr !== "")
+        refuse("command_environment_mismatch");
+    },
     configuration_fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01({ settings, source_hashes: [...sourceHashes] })),
     assert_sources_current: assertSources, assert_configuration: assertConfiguration, assert_thread: assertThread,
     assert_mcp_catalog(response: unknown) {
