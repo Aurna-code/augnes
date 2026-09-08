@@ -32,6 +32,11 @@ process.on("message", async (command) => {
       forwardRuntimeChildOutput(runtime, record, "bridge", "x".repeat(65536));
     }
     assert.equal(record.outputTail, "x".repeat(32768));
+    // Packaged recovery re-enters with a new runtime object in this process.
+    // It still has the failed inherited descriptor, not a reattached reader.
+    const reenteredRecord = { outputTail: "" };
+    forwardRuntimeChildOutput({}, reenteredRecord, "ui", "reentered-after-loss\n");
+    assert.equal(reenteredRecord.outputTail, "reentered-after-loss\n");
     assert.deepEqual(process.stderr.rawListeners("error"), listeners);
     report({ event: "continued", tail_characters: record.outputTail.length });
   } else if (command === "burst") {

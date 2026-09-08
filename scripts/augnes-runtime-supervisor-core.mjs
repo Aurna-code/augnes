@@ -138,6 +138,9 @@ const OWNERSHIP_RACE_WAIT_MS = 3_000;
 const SERVER_CLOSE_TIMEOUT_MS = 5_000;
 const MAX_CONTROL_RESPONSE_BYTES = 64 * 1024;
 const OUTPUT_TAIL_BYTES = 32 * 1024;
+// Recovery can replace the runtime object in this same supervisor process. The
+// inherited fd 2 cannot gain a new reader, so remember its loss across reentry.
+let childOutputTransportLost = false;
 const ownedServerSockets = new WeakMap();
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 export const repositoryRoot = realpathSync(path.resolve(scriptDirectory, ".."));
@@ -2022,6 +2025,7 @@ function spawnRuntimeChild({ runtime, role, port }) {
 
 export function forwardRuntimeChildOutput(runtime, record, role, chunk) {
   record.outputTail = `${record.outputTail}${chunk}`.slice(-OUTPUT_TAIL_BYTES);
+  if (childOutputTransportLost) return;
   if (!runtime.childOutputTransport) {
     // Own only optional child-output forwarding. Using process.stderr's shared
     // Writable would also invoke unrelated listeners (which may throw). This
@@ -2034,6 +2038,7 @@ export function forwardRuntimeChildOutput(runtime, record, role, chunk) {
     });
     output.on("error", (error) => {
       if (error.code !== "EPIPE") throw error;
+      childOutputTransportLost = true;
       // errored permanently disables this optional transport. Child streams
       // continue draining into their existing bounded local tails.
     });
