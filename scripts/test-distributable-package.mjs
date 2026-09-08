@@ -48,7 +48,7 @@ import {
   formatDistributablePlatformLabel,
   validateDistributableManifest,
 } from "./distributable-package-contract.mjs";
-import { normalizedDependencyLock } from "./dependency-lock-compatibility.mjs";
+import { materializeMergedR8ADependencies, snapshotMergedR8ACurrentInputs } from "./merged-r8a-fixture-dependencies.mjs";
 import {
   MERGED_R8A_BUILD_ID,
   MERGED_R8A_COMMIT,
@@ -178,6 +178,9 @@ let packageRoot = null;
 let packageManifest = null;
 let mergedR8ABuildIdentity = null;
 let mergedR8AFixtureBuildConfiguration = null;
+let mergedR8ADependencyMaterialization = null;
+let currentRuntimeParserVerified = false;
+let assertCurrentDependencyInputsUnchanged = null;
 let fakePackageManagerSentinel = null;
 let suiteError = null;
 let cleanupError = null;
@@ -201,6 +204,7 @@ if (
 }
 
 try {
+  assertCurrentDependencyInputsUnchanged = snapshotMergedR8ACurrentInputs(repositoryRoot);
   assertContractRejectsForbiddenPayloads();
   const packageStartedAt = Date.now();
   const packageResult = await runCapturedProcess({
@@ -223,6 +227,7 @@ try {
   packageRoot = findPackageRoot(unpackRoot);
   assertOutsideRepository(packageRoot, "unpacked package root");
   packageManifest = validatePackageContents(packageRoot);
+  await assertPackagedNativeHostImports(packageRoot);
   applyRestrictiveExtractionModes(packageRoot, packageManifest);
   await assertPostPreflightSupervisorReplacementRefused(
     packageRoot,
@@ -312,6 +317,7 @@ try {
 } finally {
   networkGuard.restore();
   const cleanupErrors = [];
+  try { assertCurrentDependencyInputsUnchanged?.(); } catch (error) { cleanupErrors.push(error); }
   if (packageRoot && existsSync(packageRoot)) {
     for (const { scenario, environment } of cleanupRuntimeEnvironments.values()) {
       if (!existsSync(scenario.root)) continue;
@@ -424,6 +430,8 @@ if (focusedScenario !== null) {
         merged_r8a_build_identity:
           focusedScenario === "v1-handoff" ? mergedR8ABuildIdentity : null,
         merged_r8a_fixture_build_configuration: mergedR8AFixtureBuildConfiguration,
+        merged_r8a_dependency_materialization: mergedR8ADependencyMaterialization,
+        current_native_host_parser_import_graph_loaded_inside_package: currentRuntimeParserVerified,
         external_network_attempts:
           networkGuard.attempts.length + childNetworkEvidence.blockedAttempts,
         owned_processes_after: 0,
@@ -460,6 +468,8 @@ if (focusedScenario !== null) {
       compatible_different_build_handoff_verified: true,
       actual_merged_r8a_package_handoff_verified: true,
       merged_r8a_fixture_build_configuration: mergedR8AFixtureBuildConfiguration,
+      merged_r8a_dependency_materialization: mergedR8ADependencyMaterialization,
+      current_native_host_parser_import_graph_loaded_inside_package: currentRuntimeParserVerified,
       packaged_old_schema_update_verified: true,
       verified_recovery_backup_and_atomic_restore: true,
       product_recovery_action_verified: true,
@@ -1963,8 +1973,8 @@ async function buildMergedR8APackage() {
       .version,
     MERGED_R8A_APPLICATION_VERSION,
   );
-  assertDependencyLockCompatibility(sourceRoot, repositoryRoot);
-  copyIsolatedPackageDependencies(sourceRoot, repositoryRoot);
+  const dependencyMaterialization = materializeMergedR8ADependencies({ historicalRoot: sourceRoot, currentRoot: repositoryRoot });
+  mergedR8ADependencyMaterialization = dependencyMaterialization.evidence;
   const dependencySnapshot = packageDependencySnapshot(sourceRoot);
 
   const legacyNetworkGuardImport = createChildNetworkGuard(
@@ -1997,6 +2007,8 @@ async function buildMergedR8APackage() {
   );
   assert.equal(packaged.output.includes(PRIVATE_BUILD_SENTINEL), false);
   assert.deepEqual(packageDependencySnapshot(sourceRoot), dependencySnapshot);
+  dependencyMaterialization.assertUnchanged();
+  dependencyMaterialization.assertHistoricalViewUnchanged();
   assert.deepEqual(
     listBuildTemporaryEntries(temporaryRoot),
     [],
@@ -2066,61 +2078,44 @@ async function validateMergedR8APackageContents(root) {
   return manifest;
 }
 
-function assertDependencyLockCompatibility(legacyRoot, currentRoot) {
-  for (const relativePath of [
-    "package-lock.json",
-    path.join("apps", "augnes_apps", "package-lock.json"),
-  ]) {
-    assert.deepEqual(
-      normalizedDependencyLockFromFile(path.join(legacyRoot, relativePath)),
-      normalizedDependencyLockFromFile(path.join(currentRoot, relativePath)),
-      `${relativePath} dependency graph changed since merged #1118`,
-    );
-  }
-}
-
-function normalizedDependencyLockFromFile(filePath) {
-  return normalizedDependencyLock(
-    JSON.parse(readFileSync(filePath, "utf8")),
-  );
-}
-
-function copyIsolatedPackageDependencies(legacyRoot, currentRoot) {
-  for (const relativePath of [
-    "node_modules",
-    path.join("apps", "augnes_apps", "node_modules"),
-  ]) {
-    const source = path.join(currentRoot, relativePath);
-    const target = path.join(legacyRoot, relativePath);
-    const sourceStats = lstatSync(source, { bigint: true });
-    assert.equal(sourceStats.isDirectory(), true);
-    assert.equal(sourceStats.isSymbolicLink(), false);
-    cpSync(source, target, {
-      recursive: true,
-      force: false,
-      errorOnExist: true,
-      preserveTimestamps: true,
-      verbatimSymlinks: true,
-    });
-    const targetStats = lstatSync(target, { bigint: true });
-    assert.equal(targetStats.isDirectory(), true);
-    assert.equal(targetStats.isSymbolicLink(), false);
-    const sentinelPackage =
-      relativePath === "node_modules" ? "next" : "esbuild";
-    const sourceSentinel = lstatSync(
-      path.join(source, sentinelPackage, "package.json"),
-      { bigint: true },
-    );
-    const targetSentinel = lstatSync(
-      path.join(target, sentinelPackage, "package.json"),
-      { bigint: true },
-    );
-    assert.notEqual(
-      `${sourceSentinel.dev}:${sourceSentinel.ino}`,
-      `${targetSentinel.dev}:${targetSentinel.ino}`,
-      "merged R8A dependencies must be copied, not shared by inode",
-    );
-  }
+async function assertPackagedNativeHostImports(root) {
+  // Next bundles the static smol-toml import into the native-host route graph;
+  // it is not a promised bare require('smol-toml') API in the standalone tree.
+  // Load the actual packaged consumer in a fresh guarded Node process, and
+  // exercise its existing disabled read boundary without auth, DB or execution.
+  const scenario = createRuntimeScenario("native-host-imports");
+  const environment = runtimeEnvironment(scenario, { uiPort: 20000, bridgePort: 24000 });
+  const script = `
+    const assert = require('node:assert/strict');
+    const path = require('node:path');
+    const fs = require('node:fs');
+    const root = fs.realpathSync(process.cwd());
+    const route = require(path.join(root, '.next/server/app/api/vnext/operator/host-round-trip/route.js'));
+    (async () => {
+      const handler = route.routeModule.userland.GET;
+      assert.equal(typeof handler, 'function');
+      const response = await handler(new Request('http://localhost/api/vnext/operator/host-round-trip'));
+      assert.equal(response.status, 404);
+      const body = await response.json();
+      assert.equal(body.error_code, 'not_found');
+      assert.equal(body.route_version, 'vnext_operator_host_round_trip_route.v0.3');
+      assert.equal(body.semantic_authority_granted, false);
+      for (const file of Object.keys(require.cache)) {
+        const physical = fs.realpathSync(file);
+        assert(physical.startsWith(root + path.sep) || physical === process.env.AUGNES_CANONICAL_TEST_NODE_IMPORT,
+          'packaged native-host import escaped its package');
+      }
+      console.log(JSON.stringify({ native_host_import_graph_loaded: true, parser_packaging: 'Next bundled static import',
+        checkout_dependency_resolution: false, model_calls: 0 }));
+    })().catch(error => { console.error(error); process.exitCode = 1; });
+  `;
+  const result = await runCapturedProcess({ command: process.execPath, args: ["-e", script], cwd: root,
+    environment, label: "packaged native-host import graph", timeoutMs: 30_000 });
+  assert.equal(result.code, 0, result.output);
+  assert.equal(JSON.parse(result.stdout.trim()).native_host_import_graph_loaded, true);
+  assert.equal(existsSync(scenario.packageManagerSentinel), false);
+  assert.equal(existsSync(scenario.databasePath), false, "disabled packaged read must not open a database");
+  currentRuntimeParserVerified = true;
 }
 
 function packageDependencySnapshot(root) {
