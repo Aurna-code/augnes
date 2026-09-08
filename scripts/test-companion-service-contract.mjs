@@ -2450,28 +2450,52 @@ function differentCanonicalStatIdentity(value) {
 async function assertSupervisorOutputTransport() {
   const owned = new Set();
   try {
+    const observerPath = path.join(root, "output-descriptor-observer.node");
+    if (process.platform === "darwin") {
+      const compiled = spawnSync("/usr/bin/clang", [
+        "-Wall", "-Werror", "-bundle", "-undefined", "dynamic_lookup",
+        "-I", path.resolve(path.dirname(process.execPath), "../include/node"),
+        "scripts/fixtures/runtime-output-descriptor-observer.c", "-o", observerPath,
+      ], { cwd: repositoryRoot, encoding: "utf8", timeout: 5000 });
+      assert.equal(compiled.status, 0, compiled.stderr);
+    }
     for (const scenario of [
+      ...(process.platform === "darwin" ? ["reader-paused-nonblocking", "reader-paused"] : []),
       "reader-closed", "reader-closed-coexisting", "attached",
       "invalid-descriptor", "unrelated-stderr",
     ]) {
+      const paused = scenario.startsWith("reader-paused");
       const child = spawn(process.execPath, [
-        "--import", "tsx", "scripts/fixtures/runtime-output-transport-child.mjs",
+        "scripts/fixtures/runtime-output-transport-child.mjs",
         scenario === "reader-closed-coexisting" ? "coexisting" : "plain",
+        scenario,
+        observerPath,
       ], {
         cwd: repositoryRoot,
-        env: buildCanonicalChildEnvironment({
-          ambientEnvironment: process.env,
-          temporaryRoot: root,
-        }),
+        env: {
+          ...buildCanonicalChildEnvironment({
+            ambientEnvironment: process.env,
+            temporaryRoot: root,
+          }),
+          // The source validator's esbuild worker inherits stderr on macOS,
+          // incidentally clearing its nonblocking mode. Its supported sync
+          // alternative avoids that side effect; no descriptor flags are set.
+          ...(scenario === "reader-paused-nonblocking" ? { ESBUILD_WORKER_THREADS: "0" } : {}),
+        },
         detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe", "pipe", "ipc"],
       });
       const tracked = registerOwnedChild(owned, child, { label: `output-${scenario}` });
       let output = "";
+      let receivedBytes = 0;
       let observations = "";
       child.stdout.resume();
       child.stderr.setEncoding("utf8");
-      child.stderr.on("data", (chunk) => { output = `${output}${chunk}`.slice(-65536); });
+      child.stderr.on("data", (chunk) => {
+        receivedBytes += Buffer.byteLength(chunk);
+        output = `${output}${chunk}`.slice(-65536);
+      });
+      if (paused) child.stderr.pause();
       child.stdio[3].setEncoding("utf8");
       child.stdio[3].on("data", (chunk) => { observations = `${observations}${chunk}`.slice(-4096); });
       const waitFor = async (predicate, label) => {
@@ -2498,7 +2522,51 @@ async function assertSupervisorOutputTransport() {
           child.removeListener("exit", exited);
         }
       };
-      await waitFor(() => observations.includes('"armed"'), "armed");
+      if (paused) {
+        await waitFor(() => observations.includes('"before-stderr"'), "before stderr initialization");
+        const before = JSON.parse(observations.trim()).descriptor;
+        child.send("initialize-stderr");
+        await waitFor(() => observations.includes('"armed"'), "armed");
+        const armed = observations.trim().split("\n").map(JSON.parse).find((row) => row.event === "armed");
+        const after = armed.descriptor;
+        console.log(`supervisor output descriptor: ${JSON.stringify({scenario, before, after_getter: armed.descriptor_after_getter, after_write: after, stderr_type: armed.stderr_type})}`);
+        if (scenario === "reader-paused-nonblocking") {
+          assert.equal(after.nonblocking, true);
+          assert.equal(after.socket_nonblocking, true);
+        }
+        child.send("paused-input");
+        await waitFor(() => observations.includes('"input-complete"'), "finite input while reader remains open and paused");
+        const completed = observations.trim().split("\n").map(JSON.parse).find((row) => row.event === "input-complete");
+        assert.equal(child.stderr.destroyed, false);
+        assert.equal(receivedBytes, 0);
+        assert.equal(completed.descriptor.writable, false,
+          "must reach actual kernel sink pressure");
+        assert.equal(completed.descriptor.terminal_poll_flags, 0);
+        assert.equal(completed.descriptor.nonblocking, after.nonblocking);
+        assert.equal(completed.descriptor.socket_nonblocking, after.socket_nonblocking);
+        assert.equal(completed.inputs, 1024);
+        assert.ok(completed.peak_pending_bytes <= 32768);
+        assert.equal(completed.tail_characters, 32768);
+        assert.ok(completed.dropped_bytes > 0);
+        assert.ok(completed.backpressure_errors <= completed.inputs,
+          "no automatic retry writes beyond finite fresh input");
+        if (scenario === "reader-paused-nonblocking") {
+          assert.ok(completed.backpressure_errors > 0, "actual nonblocking write pressure");
+        }
+        child.stderr.resume();
+        child.send("inspect-drained");
+        await waitFor(() => observations.includes('"drained"'), "private writer drains after resume");
+        const drained = observations.trim().split("\n").map(JSON.parse).find((row) => row.event === "drained");
+        assert.equal(drained.accepted_bytes + drained.dropped_bytes,
+          completed.inputs * Buffer.byteLength(`[augnes:ui] ${"x".repeat(32768)}`));
+        await waitFor(() => receivedBytes === drained.accepted_bytes + armed.shared_bytes,
+          "all accepted bytes reach the reader after resume");
+        child.send("forward");
+        await waitFor(() => output.includes("[augnes:ui] attached-marker"), "fresh output after reader resumes");
+        console.log(`supervisor output pressure: ${JSON.stringify(completed)}`);
+      } else {
+        await waitFor(() => observations.includes('"armed"'), "armed");
+      }
       if (scenario.startsWith("reader-closed") || scenario === "unrelated-stderr") {
         const closed = once(child.stderr, "close");
         child.stderr.destroy();
@@ -2522,7 +2590,7 @@ async function assertSupervisorOutputTransport() {
         await waitFor(() => observations.includes('"bounded"'), "bounded burst");
         const bounded = observations.trim().split("\n").map(JSON.parse).find((row) => row.event === "bounded");
         assert.ok(bounded.pending_bytes <= 32768, JSON.stringify(bounded));
-      } else {
+      } else if (scenario === "invalid-descriptor") {
         child.send("invalid-descriptor");
         const exit = await waitForOwnedProcessExit(tracked, 5000);
         assert.equal(exit.code, 1);
@@ -2534,6 +2602,10 @@ async function assertSupervisorOutputTransport() {
       const exit = await waitForOwnedProcessExit(tracked, 5000);
       assert.equal(exit.code, 0, `${scenario}: ${observations}`);
       assert.equal(exit.signal, null);
+      if (paused) {
+        await waitFor(() => output.includes("shared-after-optional-finish"),
+          "shared stderr still writes after optional writer finishes");
+      }
       console.log(`supervisor output: ${scenario} passed`);
     }
   } finally {

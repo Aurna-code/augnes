@@ -10,7 +10,6 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   closeSync,
-  createWriteStream,
   existsSync,
   fsyncSync,
   lstatSync,
@@ -20,9 +19,11 @@ import {
   renameSync,
   rmdirSync,
   unlinkSync,
+  write,
   writeFileSync,
 } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
+import { Writable } from "node:stream";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -2029,13 +2030,37 @@ export function forwardRuntimeChildOutput(runtime, record, role, chunk) {
   if (!runtime.childOutputTransport) {
     // Own only optional child-output forwarding. Using process.stderr's shared
     // Writable would also invoke unrelated listeners (which may throw). This
-    // stream borrows the same descriptor, never closes it, and creates no new
-    // transport that a replacement Companion manager could reattach to.
-    const output = createWriteStream(null, {
-      fd: 2,
-      autoClose: false,
+    // writer borrows fd 2 without another socket handle or descriptor owner.
+    // fs.WriteStream requires a blocking fd: its retry-on-EAGAIN loop can fail
+    // fatally on an open, non-draining pipe. Attempt each accepted chunk once;
+    // temporary pressure or a partial write drops optional bytes, never retries.
+    const output = new Writable({
       highWaterMark: OUTPUT_TAIL_BYTES,
+      write(bytes, _encoding, callback) {
+        write(2, bytes, 0, bytes.length, null, (error, written = 0) => {
+          if (error) {
+            if (error.code !== "EAGAIN" && error.code !== "EWOULDBLOCK") {
+              callback(error);
+              return;
+            }
+            output.backpressureErrors = Math.min(
+              Number.MAX_SAFE_INTEGER, output.backpressureErrors + 1,
+            );
+          }
+          const accepted = error ? 0 : written;
+          output.bytesWritten = Math.min(
+            Number.MAX_SAFE_INTEGER, output.bytesWritten + accepted,
+          );
+          recordDroppedChildOutput(output, bytes.length - accepted);
+          callback();
+        });
+      },
     });
+    // Bounded in-process counters describe incomplete optional output. They
+    // are not durable logs and do not imply reattachment by a later manager.
+    output.bytesWritten = 0;
+    output.droppedBytes = 0;
+    output.backpressureErrors = 0;
     output.on("error", (error) => {
       if (error.code !== "EPIPE") throw error;
       childOutputTransportLost = true;
@@ -2047,14 +2072,23 @@ export function forwardRuntimeChildOutput(runtime, record, role, chunk) {
   const output = runtime.childOutputTransport;
   if (output.errored || output.writableEnded) return;
   const available = OUTPUT_TAIL_BYTES - output.writableLength;
-  if (available <= 0) return;
   // Bound queued diagnostics even when a manager is attached but not draining.
   const text = `[augnes:${role}] ${chunk}`;
-  const bytes = Buffer.allocUnsafe(Math.min(available, Buffer.byteLength(text)));
+  const inputBytes = Buffer.byteLength(text);
+  if (available <= 0) {
+    recordDroppedChildOutput(output, inputBytes);
+    return;
+  }
+  const bytes = Buffer.allocUnsafe(Math.min(available, inputBytes));
   const written = bytes.write(text);
+  recordDroppedChildOutput(output, inputBytes - written);
   // I/O errors arrive on this private stream; synchronous programming failures
   // still propagate normally rather than entering an EPIPE recovery path.
   output.write(bytes.subarray(0, written));
+}
+
+function recordDroppedChildOutput(output, bytes) {
+  output.droppedBytes = Math.min(Number.MAX_SAFE_INTEGER, output.droppedBytes + bytes);
 }
 
 async function waitForChildReadiness({ runtime, record, url, isReady }) {
