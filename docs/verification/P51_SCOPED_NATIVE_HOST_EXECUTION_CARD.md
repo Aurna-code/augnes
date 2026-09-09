@@ -463,3 +463,31 @@ configuration and fresh normal scope. It continues to request `gpt-6-astra` /
 ceiling, smaller RPC/settlement limits, no retry and no X-to-B progression.
 This task does not execute or renew that allowance. No historical fingerprint
 is rewritten or transferred to the new source.
+
+
+### PR #1239 ordinary-keyring and verification follow-up
+
+The reviewed candidate credential connection resolves the selected ordinary
+source in the existing broker. Direct macOS keyring uses the pinned User-domain
+lookup with interaction disabled, validates ordinary TokenData, and provisions
+only a private owner-only candidate snapshot. Secrets/auto fallback, managed or
+unrepresented account restrictions refuse. Historical file-profile meanings,
+source configuration, source no-writeback, private refresh and cleanup remain.
+Availability is not a grant; the genuine candidate preparation binds current
+source metadata, and consumption revalidates that binding.
+
+The 2026-09-09 real User-domain prerequisite returned a noninteractive read
+refusal before any candidate claim, host or turn. OS lock/ACL/unavailability
+were not individually diagnosed. The earlier preliminary search-list lookup
+was not the pinned User-domain contract and is retained separately. No
+credential, prompt, keychain mutation or provider operation resulted. The
+canary remains unconsumed. No qualification, registry/selection adoption or
+managed-store installation follows from this refusal; production stays 0.152.1.
+The pending post-adoption incident is still unexecuted and must later use actual
+reviewed managed/runtime/configuration bindings and a genuine fresh scope.
+
+The verification executor now leaves shared generated state untouched when
+preflight refuses or maintenance acquisition fails. Successful acquisition
+retains normal partial/success cleanup and restoration. Existing receipt fields
+report actual presence/removal; an untouched build is not reported as removed.
+The prior failed receipt and later recovery remain separate historical evidence.

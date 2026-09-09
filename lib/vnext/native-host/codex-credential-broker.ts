@@ -13,6 +13,8 @@ import {
   fsyncSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
+  rmSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -22,6 +24,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { parse as parseToml } from "smol-toml";
 import { CANDIDATE_CONFIG_OVERRIDE_ARGS_V01 } from "./codex-ordinary-runtime-candidate";
 import { claimCodexCandidateOrdinaryBrokerContextV01, type CodexCandidateCanaryBindingV01 } from "./codex-rolling-stable-candidate";
 
@@ -54,40 +57,138 @@ const MACOS_KEYCHAIN_READ_TIMEOUT_MS_V01 = 60_000;
 const CHILD_ROLLBACK_TIMEOUT_MS_V01 = 5_000;
 const CREDENTIAL_EXPIRY_SAFETY_MARGIN_SECONDS_V01 = 60;
 
-/** A distinct ordinary profile; the existing isolated Agent Identity profile
- * and its private launch/attestation owners remain unchanged. No argv input. */
+type OrdinaryCandidateRouteV01 = "ordinary_chatgpt_auth_file" | "ordinary_chatgpt_auth_keyring_direct";
+interface OrdinaryCandidateSourceV01 {
+  home: string;
+  route: OrdinaryCandidateRouteV01;
+  assert_current: () => void;
+}
+const ORDINARY_SOURCE_BINDINGS_V01 = new WeakMap<object, OrdinaryCandidateSourceV01>();
+const SYNTHETIC_ORDINARY_KEYRING_V01 = new Map<string, { read: () => string; selection: () => string }>();
+
+/** The historical file profile is unchanged. A direct-keyring source has its
+ * own profile; neither profile grants source access or candidate execution. */
 export function codexCandidateOrdinaryBrokerProfileFingerprintV01(): string {
-  return createProtocolSha256V01(canonicalizeProtocolValueV01({
+  try { return ordinaryProfileV01(resolveOrdinaryCandidateSourceV01().route); }
+  catch { throw new CodexCredentialBrokerErrorV01("codex_candidate_ordinary_auth_source_refused"); }
+}
+function ordinaryProfileV01(route: OrdinaryCandidateRouteV01): string {
+  const profile = {
     profile: "brokered_private_home_ordinary_canary.v0.1",
     auth_storage: "AuthDotJson.Chatgpt.TokenData",
     projection: "tokens_and_optional_last_refresh_only",
     source_writeback: false,
     child_state: "private_history_empty",
     args: [...CANDIDATE_CONFIG_OVERRIDE_ARGS_V01, "app-server", "--stdio"],
+  };
+  return createProtocolSha256V01(canonicalizeProtocolValueV01(route === "ordinary_chatgpt_auth_file" ? profile : {
+    ...profile, source_route: route, source_backend: "macos_direct_Codex_Auth_canonical_home",
+    source_interaction: "SecKeychainFindGenericPassword_UserDomain_UIOff", source_contract: "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
   }));
 }
 
-/** Read-only prerequisite for the same file-backed ordinary broker. No token,
- * account, path, expiry, or credential hash leaves this owner. This observation
- * is not a grant: consumption re-reads and validates the source independently. */
-export function readCodexCandidateOrdinaryAuthAvailabilityV01(): {
-  status: "available" | "unavailable";
-  route: "ordinary_chatgpt_auth_file";
-  credential_profile_fingerprint: string;
-} {
-  let status: "available" | "unavailable" = "unavailable";
+/** Capture selection/physical metadata, never credentials. The opaque object is
+ * private candidate preparation input, not a launch or credential grant. */
+export function bindCodexCandidateOrdinarySourceV01(): object {
   try {
-    const home = realpathSync(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
-    const policy = codexAuthFilePlatformPolicyV01(process.platform === "win32" ? "non_unix" : "unix");
-    ordinaryCandidateAuthDotJsonV01(JSON.parse(readExactCodexAuthFileV01(home, policy, null)));
-    status = "available";
-  } catch { /* Closed prerequisite status; never expose private parse errors. */ }
-  return Object.freeze({ status, route: "ordinary_chatgpt_auth_file",
-    credential_profile_fingerprint: codexCandidateOrdinaryBrokerProfileFingerprintV01() });
+    const binding = Object.freeze({});
+    ORDINARY_SOURCE_BINDINGS_V01.set(binding, resolveOrdinaryCandidateSourceV01());
+    return binding;
+  } catch { throw new CodexCredentialBrokerErrorV01("codex_candidate_ordinary_auth_source_refused"); }
 }
 
-/** Credential values never leave this broker. Only an already-consumed exact
- * candidate binding can provision a snapshot; paths and argv are not inputs. */
+function resolveOrdinaryCandidateSourceV01(): OrdinaryCandidateSourceV01 {
+  const home = realpathSync(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
+  const directory = lstatSync(home, { bigint: true });
+  if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error("ordinary_source_invalid");
+  const configPath = path.join(home, "config.toml");
+  const forbiddenSources = ["/etc/codex/config.toml", "/etc/codex/requirements.toml", "/etc/codex/managed_config.toml",
+    path.join(home, "managed_config.toml"), "/Library/Managed Preferences/com.openai.codex.plist",
+    path.join(os.homedir(), "Library/Managed Preferences/com.openai.codex.plist")];
+  if (forbiddenSources.some(p => existsSync(p))) throw new Error("ordinary_managed_source_requires_review");
+  const metadata = candidateProtectedFileMetadataV01(configPath);
+  let config: Record<string, unknown> = {};
+  if (metadata !== "absent") {
+    const st = lstatSync(configPath);
+    if (!st.isFile() || st.isSymbolicLink() || st.size > 1024 * 1024 ||
+        (process.getuid && st.uid !== process.getuid()) || (st.mode & 0o022) !== 0)
+      throw new Error("ordinary_config_invalid");
+    config = parseToml(readFileSync(configPath, "utf8"));
+  }
+  if (["profile", "chatgpt_base_url", "auth_keyring_backend", "auth", "managed_auth"].some(k => config[k] != null))
+    throw new Error("ordinary_auth_configuration_requires_review");
+  const features = config.features;
+  if (features != null && !isPlainObjectV01(features)) throw new Error("ordinary_config_invalid");
+  const secrets = isPlainObjectV01(features) ? features.secret_auth_storage : undefined;
+  const mode = config.cli_auth_credentials_store ?? "file";
+  // Auto's fallback-on-denial is deliberately unsupported: a denial never
+  // authorizes reading a stale file. Secrets requires a separate storage owner.
+  if (!["file", "keyring"].includes(mode as string)) throw new Error("ordinary_storage_unsupported");
+  if (secrets != null && typeof secrets !== "boolean") throw new Error("ordinary_config_invalid");
+  if (mode === "keyring" && (secrets === true || process.platform !== "darwin"))
+    throw new Error("ordinary_keyring_backend_unsupported");
+  if (config.forced_login_method != null && config.forced_login_method !== "chatgpt")
+    throw new Error("ordinary_login_restricted");
+  const workspaceConfig = config.forced_chatgpt_workspace_id;
+  const workspaces = workspaceConfig == null ? [] : typeof workspaceConfig === "string" ? [workspaceConfig] : workspaceConfig;
+  if (!Array.isArray(workspaces) || workspaces.length > 64 || workspaces.some(w => typeof w !== "string" || w.length > 512))
+    throw new Error("ordinary_workspace_policy_invalid");
+  // Do not drop a source workspace restriction during private AuthManager
+  // refresh. This bounded route refuses it rather than exporting account IDs
+  // into launch arguments or adding a new private configuration contract.
+  if (workspaces.some(w => w.trim())) throw new Error("ordinary_workspace_policy_requires_review");
+  const route = mode === "file" ? "ordinary_chatgpt_auth_file" : "ordinary_chatgpt_auth_keyring_direct";
+  const keychainSelection = route === "ordinary_chatgpt_auth_keyring_direct" ? ordinaryKeychainSelectionV01(home) : null;
+  const authMetadata = route === "ordinary_chatgpt_auth_file" ? candidateProtectedFileMetadataV01(path.join(home, "auth.json")) : null;
+  const assertCurrent = () => {
+    try {
+      const currentHome = realpathSync(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
+      const current = lstatSync(home, { bigint: true });
+      if (currentHome !== home || !current.isDirectory() || current.isSymbolicLink() || current.dev !== directory.dev ||
+          current.ino !== directory.ino || current.mode !== directory.mode ||
+          forbiddenSources.some(p => existsSync(p)) || candidateProtectedFileMetadataV01(configPath) !== metadata ||
+          (keychainSelection !== null && ordinaryKeychainSelectionV01(home) !== keychainSelection) ||
+          (authMetadata !== null && candidateProtectedFileMetadataV01(path.join(home, "auth.json")) !== authMetadata))
+        throw new Error("changed");
+    } catch { throw new CodexCredentialBrokerErrorV01("codex_candidate_auth_source_integrity_failed"); }
+  };
+  assertCurrent();
+  return { home, route, assert_current: assertCurrent };
+}
+
+function readOrdinaryCandidateSourceV01(source: OrdinaryCandidateSourceV01): string {
+  source.assert_current();
+  const raw = source.route === "ordinary_chatgpt_auth_file"
+    ? readExactCodexAuthFileV01(source.home, codexAuthFilePlatformPolicyV01(process.platform === "win32" ? "non_unix" : "unix"), null)
+    : readOrdinaryDirectKeyringV01(source.home);
+  if (!boundedCodexAuthStorageMaterialV01(raw)) throw new Error("ordinary_material_invalid");
+  const material = JSON.parse(raw) as unknown;
+  const serialized = ordinaryCandidateAuthDotJsonV01(material);
+  source.assert_current();
+  return serialized;
+}
+
+/** Bounded read-only metadata; no credential/account/path/hash is returned. */
+export function readCodexCandidateOrdinaryAuthAvailabilityV01(): {
+  status: "available" | "unavailable";
+  route: OrdinaryCandidateRouteV01 | null;
+  credential_profile_fingerprint: string | null;
+  reason: "validated" | "source_refused" | "credential_refused" | "keyring_noninteractive_read_refused" | "keyring_item_missing" | "keyring_reader_unavailable";
+} {
+  let source: OrdinaryCandidateSourceV01;
+  try { source = resolveOrdinaryCandidateSourceV01(); }
+  catch { return Object.freeze({ status: "unavailable", route: null, credential_profile_fingerprint: null, reason: "source_refused" }); }
+  try {
+    readOrdinaryCandidateSourceV01(source);
+    return Object.freeze({ status: "available", route: source.route, credential_profile_fingerprint: ordinaryProfileV01(source.route), reason: "validated" });
+  } catch (error) {
+    const code = error instanceof CodexCredentialBrokerErrorV01 ? error.code : "";
+    const reason = code === "keyring_noninteractive_read_refused" || code === "keyring_item_missing" || code === "keyring_reader_unavailable" ? code : "credential_refused";
+    return Object.freeze({ status: "unavailable", route: source.route, credential_profile_fingerprint: ordinaryProfileV01(source.route), reason });
+  }
+}
+
+/** Only an already-consumed exact candidate binding can provision a snapshot. */
 export function provisionCodexCandidateOrdinaryAuthV01(binding: CodexCandidateCanaryBindingV01): {
   assert_before_launch: () => void;
   assert_source_integrity: () => void;
@@ -95,30 +196,17 @@ export function provisionCodexCandidateOrdinaryAuthV01(binding: CodexCandidateCa
   const context = claimCodexCandidateOrdinaryBrokerContextV01(binding);
   try {
     const destination = exactLaunchStateDirectoryV01(context.root, context.codex_home);
-    const sourceHome = realpathSync(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
-    if (sourceHome === context.root || sourceHome.startsWith(`${context.root}${path.sep}`) ||
-        context.root.startsWith(`${sourceHome}${path.sep}`)) throw new Error("source_overlap");
-    const policy = codexAuthFilePlatformPolicyV01(process.platform === "win32" ? "non_unix" : "unix");
-    const source = exactCodexAuthFileIdentityV01(path.join(sourceHome, "auth.json"), policy);
-    const configPath = path.join(sourceHome, "config.toml");
-    const configMetadata = candidateProtectedFileMetadataV01(configPath);
-    const sourceDirectory = lstatSync(sourceHome, { bigint: true });
+    const source = ORDINARY_SOURCE_BINDINGS_V01.get(context.source_binding);
+    if (!source || source.home === context.root || source.home.startsWith(`${context.root}${path.sep}`) ||
+        context.root.startsWith(`${source.home}${path.sep}`)) throw new Error("source_overlap_or_unbound");
+    const serialized = readOrdinaryCandidateSourceV01(source);
     const assertSource = () => {
-      let fd = -1;
-      try {
-        const current = lstatSync(sourceHome, { bigint: true });
-        if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== sourceDirectory.dev ||
-            current.ino !== sourceDirectory.ino || current.mode !== sourceDirectory.mode ||
-            realpathSync(sourceHome) !== sourceHome || candidateProtectedFileMetadataV01(configPath) !== configMetadata)
-          throw new Error("source_changed");
-        fd = openSync(source.path, codexAuthFileOpenFlagsV01(policy));
-        assertExactCodexAuthFileIdentityV01(source, fd);
-      } catch { throw new CodexCredentialBrokerErrorV01("codex_candidate_auth_source_integrity_failed"); }
-      finally { if (fd >= 0) closeSync(fd); }
+      source.assert_current();
+      // Compare in broker memory only; never hash, export, or write the source.
+      // Private candidate refresh may replace its file without source writeback.
+      if (source.route === "ordinary_chatgpt_auth_keyring_direct" && readOrdinaryCandidateSourceV01(source) !== serialized)
+        throw new CodexCredentialBrokerErrorV01("codex_candidate_auth_source_integrity_failed");
     };
-    const material = JSON.parse(readExactCodexAuthFileV01(sourceHome, policy, null)) as unknown;
-    const serialized = ordinaryCandidateAuthDotJsonV01(material);
-    assertSource();
     const snapshot = writePrivateAuthSnapshotV01({ codex_home: destination, serialized_auth_dot_json: serialized });
     const assertBeforeLaunch = () => {
       try {
@@ -132,11 +220,93 @@ export function provisionCodexCandidateOrdinaryAuthV01(binding: CodexCandidateCa
     assertBeforeLaunch();
     return Object.freeze({ assert_before_launch: assertBeforeLaunch, assert_source_integrity: assertSource });
   } catch {
-    // Never propagate parse, filesystem, credential, or private-path messages.
-    // Consumption's rollback owner removes the entire private tree on failure.
     throw new CodexCredentialBrokerErrorV01("codex_candidate_ordinary_auth_projection_refused");
   }
 }
+
+/** Synthetic substitution is restricted to an owned temporary source and never
+ * changes the real Keychain or supplies a production credential getter. */
+export function installCodexCandidateKeyringForTestV01(read: () => string, selection: () => string = () => "synthetic-user-domain"): () => void {
+  const home = realpathSync(process.env.CODEX_HOME!);
+  if (process.env.AUGNES_CODEX_ORDINARY_CANDIDATE_TEST_MODE !== "1" ||
+      !home.startsWith(realpathSync(os.tmpdir()) + path.sep) ||
+      (lstatSync(home).mode & 0o077) !== 0 || SYNTHETIC_ORDINARY_KEYRING_V01.has(home))
+    throw new Error("codex_candidate_keyring_test_refused");
+  SYNTHETIC_ORDINARY_KEYRING_V01.set(home, { read, selection });
+  return () => { SYNTHETIC_ORDINARY_KEYRING_V01.delete(home); };
+}
+
+/** Only User-domain selection metadata; no item/password query. Keep the path
+ * and inode inside the broker and reuse its existing physical-file validator. */
+function ordinaryKeychainSelectionV01(home: string): string {
+  const synthetic = SYNTHETIC_ORDINARY_KEYRING_V01.get(home);
+  if (synthetic) return synthetic.selection();
+  const result = spawnSync(MACOS_SECURITY_PATH_V01, ["default-keychain", "-d", "user"], {
+    stdio: ["ignore", "pipe", "pipe"], timeout: 10_000, killSignal: "SIGKILL", maxBuffer: 4096,
+    env: { NODE_ENV: "production", PATH: "/usr/bin:/bin" },
+  });
+  try {
+    if (result.error || result.status !== 0) throw new Error("ordinary_keychain_selection_refused");
+    const selected = JSON.parse(result.stdout.toString("utf8").trim()) as unknown;
+    if (typeof selected !== "string" || !path.isAbsolute(selected)) throw new Error("ordinary_keychain_selection_refused");
+    const identity = exactPrivateKeychainIdentityV01(selected);
+    const stat = lstatSync(identity.path);
+    if ((process.getuid && stat.uid !== process.getuid()) || (stat.mode & 0o022) !== 0)
+      throw new Error("ordinary_keychain_selection_refused");
+    return [identity.path, identity.device, identity.inode, stat.uid, stat.mode].join(":");
+  } finally { result.stdout?.fill(0); result.stderr?.fill(0); }
+}
+
+/** No-interaction Direct backend read. /usr/bin/security cannot prohibit UI;
+ * the bounded Security.framework query uses the pinned User-domain keychain
+ * (not the broader default search list) and exact service/home key,
+ * with interaction disabled in this helper process only. No keychain mutation. */
+function readOrdinaryDirectKeyringV01(home: string): string {
+  const synthetic = SYNTHETIC_ORDINARY_KEYRING_V01.get(home);
+  if (synthetic) return synthetic.read();
+  const root = mkdtempSync(path.join(os.tmpdir(), "augnes-ordinary-keyring-read-"));
+  try {
+    const executable = path.join(root, "read");
+    const compiled = spawnSync("/usr/bin/clang", ["-x", "c", "-", "-framework", "Security", "-framework", "CoreFoundation", "-o", executable], {
+      input: ORDINARY_KEYRING_READER_V01, stdio: ["pipe", "pipe", "pipe"], timeout: 10_000, killSignal: "SIGKILL",
+      maxBuffer: 64 * 1024, env: { NODE_ENV: "production", PATH: "/usr/bin:/bin", HOME: root, TMPDIR: root },
+    });
+    if (compiled.error || compiled.status !== 0) throw new CodexCredentialBrokerErrorV01("keyring_reader_unavailable");
+    const result = spawnSync(executable, [], {
+      input: `cli|${createHash("sha256").update(home).digest("hex").slice(0, 16)}`,
+      stdio: ["pipe", "pipe", "pipe"], timeout: 10_000, killSignal: "SIGKILL", maxBuffer: MAX_BROKER_OUTPUT_BYTES_V01,
+      env: { NODE_ENV: "production", PATH: "/usr/bin:/bin", TMPDIR: root },
+    });
+    try {
+      if (result.error || result.status !== 0) throw new CodexCredentialBrokerErrorV01(result.status === 20 ? "keyring_item_missing" : result.status === 21 ? "keyring_noninteractive_read_refused" : "keyring_reader_unavailable");
+      return result.stdout.toString("utf8");
+    } finally { result.stdout?.fill(0); result.stderr?.fill(0); }
+  } finally { rmSync(root, { recursive: true, force: false }); }
+}
+const ORDINARY_KEYRING_READER_V01 = `
+#include <Security/Security.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <stdio.h>
+#include <string.h>
+int main(void) {
+  char account[21] = {0};
+  if (fread(account, 1, 20, stdin) != 20 || getchar() != EOF || strncmp(account, "cli|", 4)) return 23;
+  for (int i = 4; i < 20; i++) if (!((account[i] >= '0' && account[i] <= '9') || (account[i] >= 'a' && account[i] <= 'f'))) return 23;
+  if (SecKeychainSetUserInteractionAllowed(false) != errSecSuccess) return 21;
+  SecKeychainRef keychain = NULL;
+  if (SecKeychainCopyDomainDefault(kSecPreferencesDomainUser, &keychain) != errSecSuccess) return 21;
+  const void *keychains[] = { keychain };
+  CFArrayRef search = CFArrayCreate(NULL, keychains, 1, &kCFTypeArrayCallBacks);
+  UInt32 length = 0; void *password = NULL;
+  OSStatus status = SecKeychainFindGenericPassword(search, 10, "Codex Auth", 20, account, &length, &password, NULL);
+  CFRelease(search); CFRelease(keychain);
+  if (status != errSecSuccess) return status == errSecItemNotFound ? 20 : 21;
+  if (length < 2 || length > 65536) { SecKeychainItemFreeContent(NULL, password); return 23; }
+  size_t written = fwrite(password, 1, length, stdout);
+  SecKeychainItemFreeContent(NULL, password);
+  return written == length ? 0 : 22;
+}
+`;
 
 function candidateProtectedFileMetadataV01(file: string): string {
   try {

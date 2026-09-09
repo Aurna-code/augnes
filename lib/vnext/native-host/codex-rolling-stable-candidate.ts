@@ -12,7 +12,7 @@ import { CODEX_APP_SERVER_ADAPTER_VERSION_V01, probeCodexCredentialFreeExactProf
 import { observeReviewedCandidateCodexAppServerUserAgentV01 } from "./codex-app-server-user-agent";
 import { extractDiscoveredCodexCandidateArchiveV01 } from "./codex-managed-runtime-store";
 import { CANDIDATE_CONFIG_OVERRIDE_ARGS_V01, observeCandidateConfigPolicyV01 } from "./codex-ordinary-runtime-candidate";
-import { codexCandidateOrdinaryBrokerProfileFingerprintV01, provisionCodexCandidateOrdinaryAuthV01 } from "./codex-credential-broker";
+import { bindCodexCandidateOrdinarySourceV01, codexCandidateOrdinaryBrokerProfileFingerprintV01, provisionCodexCandidateOrdinaryAuthV01 } from "./codex-credential-broker";
 import {
   CODEX_QUALIFIED_RUNTIME_REGISTRY_FINGERPRINT_V01,
   CODEX_QUALIFIED_RUNTIME_REGISTRY_V01,
@@ -520,6 +520,7 @@ interface CanaryStateV01 {
   credential_profile_fingerprint: string;
   state: "prepared" | "consumed" | "closed";
   broker_claimed?: boolean;
+  source_binding: object;
   assert_source_integrity?: () => void;
   fixture?: "success" | "config_mismatch" | "user_agent_mismatch" | "server_request" | "effect" | "descendant_cleanup" | "prethread_request" | "provider_mismatch" | "sqlite_mismatch" | "model_mismatch" | "effort_mismatch";
   fixture_file?: { path: string; hash: string };
@@ -594,6 +595,7 @@ export async function prepareCodexCandidateCanaryV01(input: {
       kind: "ordinary_candidate_canary.v0.1", execution_root: path.join(root, "execution"), receipt_fingerprint,
     });
     CANARY_BINDINGS_V01.set(binding, { receipt, root, directories, command: native.native_executable,
+      source_binding: bindCodexCandidateOrdinarySourceV01(),
       credential_profile_fingerprint: input.review.credential_profile_fingerprint,
       executable_hash: native.native_executable_sha256, claim: `${receiptPath}.ordinary-canary-claimed`, state: "prepared" });
     return binding;
@@ -637,7 +639,7 @@ export function claimCodexCandidateOrdinaryBrokerContextV01(binding: CodexCandid
   if (readdirSync(codexHome).length !== 0)
     throw new Error("codex_candidate_canary_private_home_not_empty");
   state.broker_claimed = true;
-  return { root: state.root, codex_home: codexHome };
+  return { root: state.root, codex_home: codexHome, source_binding: state.source_binding };
 }
 /** Dispose an unused preparation only; an active child remains adapter-owned. */
 export function disposeCodexCandidateCanaryV01(binding: CodexCandidateCanaryBindingV01): void {

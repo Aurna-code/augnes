@@ -10,7 +10,7 @@ import {
   emulateCodexCandidateCanaryForTestV01, type CodexRollingReceiptV01,
   consumeCodexCandidateCanaryV01, claimCodexCandidateOrdinaryBrokerContextV01,
 } from "../lib/vnext/native-host/codex-rolling-stable-candidate";
-import { codexCandidateOrdinaryBrokerProfileFingerprintV01, provisionCodexCandidateOrdinaryAuthV01, containsCodexCredentialSecretShapeV01, readCodexCandidateOrdinaryAuthAvailabilityV01 } from "../lib/vnext/native-host/codex-credential-broker";
+import { codexCandidateOrdinaryBrokerProfileFingerprintV01, provisionCodexCandidateOrdinaryAuthV01, bindCodexCandidateOrdinarySourceV01, installCodexCandidateKeyringForTestV01, containsCodexCredentialSecretShapeV01, readCodexCandidateOrdinaryAuthAvailabilityV01 } from "../lib/vnext/native-host/codex-credential-broker";
 import { assertCurrentCodexQualifiedRuntimeSelectionV01, CODEX_QUALIFIED_RUNTIME_REGISTRY_FINGERPRINT_V01, selectPinnedCodexQualifiedRuntimeV01 } from "../lib/vnext/native-host/codex-qualified-runtime-registry";
 import type { NativeHostInvocationControlV01, NativeHostRequestV01 } from "../types/vnext/native-host-adapter";
 
@@ -62,7 +62,7 @@ export async function testCodexCandidateCanaryBindingV01(root: string, initial: 
   try {
     const beforeAvailability = metadata(sourceAuth);
     assert.deepEqual(readCodexCandidateOrdinaryAuthAvailabilityV01(), { status: "available", route: "ordinary_chatgpt_auth_file",
-      credential_profile_fingerprint: codexCandidateOrdinaryBrokerProfileFingerprintV01() });
+      credential_profile_fingerprint: codexCandidateOrdinaryBrokerProfileFingerprintV01(), reason: "validated" });
     assert.equal(metadata(sourceAuth), beforeAvailability);
     const invalidPath = path.join(root, `${receipt.candidate.release_tag}-darwin-arm64.json`);
     writeFileSync(invalidPath, JSON.stringify(receipt), { mode: 0o600 });
@@ -241,6 +241,88 @@ export async function testCodexCandidateCanaryBindingV01(root: string, initial: 
       const retry = createCodexAppServerAdapterV01({ candidate_canary: reminted }).invoke(request(reminted.execution_root), control());
       assert.notEqual((await retry.result).outcome, "completed"); await retry.settled;
       assert.equal(existsSync(reminted.execution_root), false);
+    }
+    if (process.platform === "darwin") {
+      const configPath = path.join(sourceHome, "config.toml");
+      const fileProfile = review.credential_profile_fingerprint;
+      assert.equal(fileProfile, "sha256:00fc8ac374128518207717ab18f29949b5ec776f0eca38398a47a57f9a6bbc85");
+      const configureKeyring = () => writeFileSync(configPath, 'cli_auth_credentials_store = "keyring"\n[features]\nsecret_auth_storage = false\n');
+      let keyringMaterial = JSON.stringify(syntheticAuth);
+      let deny = false;
+      let reads = 0;
+      let keychainSelection = "synthetic-first-user-keychain";
+      const restoreKeyring = installCodexCandidateKeyringForTestV01(() => {
+        reads++;
+        if (deny) throw new Error("SYNTHETIC_PRIVATE_DENIAL_MUST_NOT_ESCAPE");
+        return keyringMaterial;
+      }, () => keychainSelection);
+      try {
+        configureKeyring();
+        writeFileSync(sourceAuth, JSON.stringify({ OPENAI_API_KEY: "sk-synthetic-stale-file-never-selected" }));
+        const fileBefore = metadata(sourceAuth), configBefore = metadata(configPath);
+        const available = readCodexCandidateOrdinaryAuthAvailabilityV01();
+        assert.equal(available.status, "available");
+        assert.equal(available.route, "ordinary_chatgpt_auth_keyring_direct");
+        assert.notEqual(available.credential_profile_fingerprint, fileProfile);
+        review.credential_profile_fingerprint = available.credential_profile_fingerprint!;
+        const { binding } = await prepare(); emulateCodexCandidateCanaryForTestV01(binding, "success");
+        const invocation = createCodexAppServerAdapterV01({ candidate_canary: binding }).invoke(request(binding.execution_root), control());
+        assert.equal((await invocation.result).outcome, "completed"); await invocation.settled;
+        assert.equal(existsSync(binding.execution_root), false);
+        assert.equal(metadata(sourceAuth), fileBefore); assert.equal(metadata(configPath), configBefore);
+        assert.ok(reads >= 3, "availability, consumption and launch/cleanup independently revalidate");
+        for (const raw of ["malformed", JSON.stringify({ auth_mode: "agentIdentity", agent_identity: "synthetic" }), JSON.stringify({ ...syntheticAuth, tokens: null })]) {
+          keyringMaterial = raw;
+          assert.equal(readCodexCandidateOrdinaryAuthAvailabilityV01().status, "unavailable");
+        }
+        keyringMaterial = JSON.stringify(syntheticAuth); deny = true;
+        assert.equal(JSON.stringify(readCodexCandidateOrdinaryAuthAvailabilityV01()).includes("SYNTHETIC_PRIVATE"), false);
+        const denied = await prepare(); emulateCodexCandidateCanaryForTestV01(denied.binding, "success");
+        assert.throws(() => consumeCodexCandidateCanaryV01(denied.binding), /projection_refused/);
+        assert.equal(existsSync(denied.binding.execution_root), false); deny = false;
+        const domainDrift = await prepare(); emulateCodexCandidateCanaryForTestV01(domainDrift.binding, "success");
+        keychainSelection = "synthetic-replaced-user-keychain";
+        assert.throws(() => consumeCodexCandidateCanaryV01(domainDrift.binding), /projection_refused/);
+        assert.equal(existsSync(domainDrift.binding.execution_root), false);
+        keychainSelection = "synthetic-first-user-keychain";
+        const selectionDrift = await prepare(); emulateCodexCandidateCanaryForTestV01(selectionDrift.binding, "success");
+        configureKeyring(); // same values, different actual observation: not the bound source
+        assert.throws(() => consumeCodexCandidateCanaryV01(selectionDrift.binding), /projection_refused/);
+        assert.equal(existsSync(selectionDrift.binding.execution_root), false);
+        const snapshot = await prepare(); emulateCodexCandidateCanaryForTestV01(snapshot.binding, "success");
+        const launch = consumeCodexCandidateCanaryV01(snapshot.binding);
+        const authPath = path.join(launch.environment.CODEX_HOME!, "auth.json");
+        assert.equal(lstatSync(authPath).mode & 0o777, 0o600);
+        assert.deepEqual(JSON.parse(readFileSync(authPath, "utf8")).tokens, syntheticAuth.tokens);
+        assert.equal(containsCodexCredentialSecretShapeV01(JSON.stringify(launch)), false);
+        keyringMaterial = JSON.stringify({ ...syntheticAuth, tokens: { ...syntheticAuth.tokens, refresh_token: "synthetic-concurrent-refresh" } });
+        assert.throws(() => launch.cleanup(), /source_integrity_failed/);
+        assert.equal(existsSync(snapshot.binding.execution_root), false);
+        keyringMaterial = JSON.stringify(syntheticAuth);
+        for (const config of [
+          'cli_auth_credentials_store = "keyring"\n[features]\nsecret_auth_storage = true\n',
+          'cli_auth_credentials_store = "auto"\n',
+          'cli_auth_credentials_store = "ephemeral"\n',
+          'cli_auth_credentials_store = "unknown"\n',
+          'cli_auth_credentials_store = "keyring"\nforced_login_method = "api"\n',
+          'cli_auth_credentials_store = "keyring"\nforced_chatgpt_workspace_id = "synthetic-other-account"\n',
+        ]) {
+          writeFileSync(configPath, config); resetAuth();
+          assert.equal(readCodexCandidateOrdinaryAuthAvailabilityV01().status, "unavailable");
+        }
+        writeFileSync(configPath, 'cli_auth_credentials_store = "SYNTHETIC_PRIVATE_PARSE_SENTINEL');
+        for (const sourceRead of [codexCandidateOrdinaryBrokerProfileFingerprintV01, bindCodexCandidateOrdinarySourceV01])
+          assert.throws(sourceRead, error => String(error) === "CodexCredentialBrokerErrorV01: codex_candidate_ordinary_auth_source_refused");
+        assert.equal(JSON.stringify(readCodexCandidateOrdinaryAuthAvailabilityV01()).includes("SYNTHETIC_PRIVATE"), false);
+        writeFileSync(configPath, '# file source parity\n'); resetAuth();
+        const priorReads = reads;
+        assert.equal(readCodexCandidateOrdinaryAuthAvailabilityV01().status, "available");
+        assert.equal(reads, priorReads, "file selection must never query keyring");
+        assert.equal(codexCandidateOrdinaryBrokerProfileFingerprintV01(), fileProfile);
+      } finally {
+        restoreKeyring(); writeFileSync(configPath, '# synthetic private config\n'); resetAuth();
+        review.credential_profile_fingerprint = fileProfile;
+      }
     }
     // A reviewed re-entry binds the requested model/effort, without changing
     // historical/default canary args, broker profile, or candidate authority.

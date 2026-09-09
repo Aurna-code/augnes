@@ -21,6 +21,7 @@ import {
   CANONICAL_NODE_VERSION,
   assertAuthorizedRepositoryIdentity,
   assertCommitExists,
+  assertDecidingEnvironment,
   assertExactSha,
   evaluateNodePolicy,
 } from "./local-canonical-environment.mjs";
@@ -642,6 +643,69 @@ assert.ok(generatedNextPreRemovalIndex > maintenanceAcquireIndex);
 assert.ok(phaseExecutionIndex > generatedNextPreRemovalIndex);
 assert.ok(generatedNextFinalRemovalIndex > phaseExecutionIndex);
 assert.ok(maintenanceReleaseIndex > generatedNextFinalRemovalIndex);
+
+// Exercise the actual executor acquisition/finally block with disposable
+// generated state and mocked service/process owners. No live executor, service
+// maintenance or phase command is started by this regression.
+const ownedBlockStart = executorSource.indexOf("  const generatedNextManaged =");
+const ownedBlockEnd = executorSource.indexOf("\n  const serviceLifecycleRestored =", ownedBlockStart);
+assert.ok(ownedBlockStart > 0 && ownedBlockEnd > ownedBlockStart);
+const ownedBlock = executorSource.slice(ownedBlockStart, ownedBlockEnd);
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+for (const scenario of ["wrong_npm", "acquisition_failure", "owned_failure", "success"]) {
+  const root = mkdtempSync(path.join(tmpdir(), "augnes-canonical-ownership-"));
+  try {
+    const next = path.join(root, ".next"), windows = path.join(root, "windows-helper");
+    mkdirSync(next); writeFileSync(path.join(next, "live-build"), "pre-existing build");
+    mkdirSync(windows); writeFileSync(path.join(windows, "live-helper"), "pre-existing helper");
+    const calls = { acquire: 0, release: 0, phases: 0, remove: 0 };
+    const preflightIssues = [];
+    if (scenario === "wrong_npm") {
+      try {
+        assertDecidingEnvironment({ host: { operating_system: "macOS", architecture: "arm64", node_version: "24.18.0", path_node_version: "24.18.0", npm_version: "11.12.1" }, nodePolicy: evaluateNodePolicy("24.18.0"), diskMinimumBytes: 0 });
+      } catch (error) { preflightIssues.push(error.code); }
+      assert.deepEqual(preflightIssues, ["canonical_npm_mismatch"]);
+    }
+    const context = {
+      plan: { selected_plan: "full-canonical" }, OWNER_TARGETED_PLAN: "owner-targeted",
+      preflightIssues, phaseDefinitions: [{ id: "synthetic" }], phaseReceipts: [{ id: "synthetic", status: "not_run" }],
+      repositoryRoot: root, runLogRoot: root, runId: "synthetic", mode: "changed", hostResult: {},
+      process: { platform: "win32", arch: "x64" }, generatedWindowsHelperRoot: windows,
+      dependencyMaintenance: null, dependencyMaintenanceRelease: null, serviceLifecycleAfter: null,
+      console: { log() {}, error() {} }, RECEIPT_RETENTION: 20, LOG_RUN_RETENTION: 20,
+      managesGeneratedNextState, generatedNextEntryPresent: () => existsSync(next), existsSync,
+      removeBoundedGeneratedNextState: () => { calls.remove++; return removeBoundedGeneratedNextState({ root }); },
+      rmSync: (p, options) => { assert.equal(p, windows); calls.remove++; rmSync(p, options); },
+      ensureBoundedLocalDirectory() {}, enforceArtifactRetention() {},
+      safeErrorCode: error => error.code ?? "synthetic_failure", boundedLifecycleState: value => value,
+      inspectCompanionService: async () => ({ status: "live" }),
+      acquireCompanionServiceMaintenance: async () => { calls.acquire++; if (scenario === "acquisition_failure") throw Object.assign(new Error(), { code: "synthetic_acquisition_failure" }); return { acquired: true, lease: {} }; },
+      releaseCompanionServiceMaintenance: async () => { calls.release++; return { released: true }; },
+      runPhasesSequentially, executePhase: async () => {
+        calls.phases++; mkdirSync(next); writeFileSync(path.join(next, "partial-build"), "owned");
+        mkdirSync(windows); writeFileSync(path.join(windows, "partial-helper"), "owned");
+        return { status: scenario === "owned_failure" ? "fail" : "pass", duration_ms: 1, failure_code: "synthetic" };
+      },
+    };
+    const result = await new AsyncFunction(...Object.keys(context), ownedBlock + "\nreturn { nextState, windowsHelperState, sharedGeneratedStateOwned, cleanupComplete, executionFailure }; ")(...Object.values(context));
+    if (["wrong_npm", "acquisition_failure"].includes(scenario)) {
+      assert.equal(calls.phases, 0); assert.equal(calls.remove, 0); assert.equal(calls.release, 0);
+      assert.equal(result.sharedGeneratedStateOwned, false);
+      assert.equal(result.nextState.removed_after_execution, false);
+      assert.equal(result.windowsHelperState.removed_after_execution, false);
+      assert.equal(readFileSync(path.join(next, "live-build"), "utf8"), "pre-existing build");
+      assert.equal(readFileSync(path.join(windows, "live-helper"), "utf8"), "pre-existing helper");
+      assert.equal(calls.acquire, scenario === "wrong_npm" ? 0 : 1);
+    } else {
+      assert.equal(calls.phases, 1); assert.equal(calls.release, 1);
+      assert.equal(result.sharedGeneratedStateOwned, true); assert.equal(result.cleanupComplete, true);
+      assert.equal(result.nextState.removed_after_execution, true);
+      assert.equal(result.windowsHelperState.removed_after_execution, true);
+      assert.equal(existsSync(next), false); assert.equal(existsSync(windows), false);
+      assert.equal(result.executionFailure, scenario === "owned_failure");
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
 
 assert.deepEqual(listWorkflowFiles(), []);
 for (const forbiddenPath of [

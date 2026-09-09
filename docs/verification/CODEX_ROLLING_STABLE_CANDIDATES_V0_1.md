@@ -68,7 +68,7 @@ receipt before execution. Do not remove or relocate evidence to renew a budget.
 An unused preparation can be disposed without invoking the adapter.
 
 The later invocation uses the #1207 ordinary credential broker to validate a
-file-backed ordinary AuthDotJson and reconstruct only its required TokenData
+selected ordinary AuthDotJson and reconstruct only its required TokenData
 and optional refresh timestamp inside a private home. Credential values never
 leave that owner and refreshed child credentials are not written back. The
 source home, configuration and history are not copied. HOME, SQLite, temporary
@@ -113,20 +113,40 @@ increase it. Candidate canaries still cannot combine `scoped_task`, incident
 hooks, launch overrides or Strict-lane authority. The ordinary category recorder
 can retain the existing bounded failure diagnostic after settlement.
 
-`readCodexCandidateOrdinaryAuthAvailabilityV01` is a read-only prerequisite of
-the same broker. It exposes only available/unavailable, the file route and the
-source-owned broker-profile fingerprint. It does not provision credentials,
-consume a claim, inspect keyring values or guarantee a later login. Consumption
-still revalidates the real source and private snapshot.
+`readCodexCandidateOrdinaryAuthAvailabilityV01` uses the same source resolver
+and validator as provisioning. It returns only a closed availability/reason,
+route and broker-profile fingerprint. Availability reads the selected source
+but is not a grant. Preparation binds opaque source/physical/configuration
+metadata; consumption revalidates it and the ordinary material before creating
+a private snapshot. No credential-content hash is made.
 
-The 2026-09-09 local check found keyring configured and no ordinary `auth.json`
-at the broker's resolved user-default home. Thus the implemented file-backed
-candidate route is unavailable on that observation. No authenticated canary
-was started and no new claim was consumed. Supporting ordinary keyring
-projection would need the separate authentication-contract review explicitly
-required by [the dispatched scope](https://github.com/hynk-studio/augnes/issues/1234#issuecomment-5600880587).
-This is not evidence that ordinary desktop authentication is broken. No login,
-storage mode, keyring, configuration or production selection was changed.
+The original file-only observation remains historical. The follow-up under
+[PR #1239 review](https://github.com/hynk-studio/augnes/pull/1239#pullrequestreview-5154321040)
+adds only the selected macOS Direct keyring source. Pinned source
+`3d2ee51ca2d5db578f328aa75e20aa22c0197c9a` selects this backend when
+`features.secret_auth_storage` is false (the macOS default). It uses service
+`Codex Auth`, the canonical-home-derived store key, and the User-domain
+keychain selected by pinned keyring 3.6.3. A short-lived source-owned native
+reader uses the same Security.framework lookup with interaction disabled;
+`/usr/bin/security` cannot enforce that no-prompt requirement. Compilation and
+read each have a 10-second bound. The reader and all its output remain private
+to the broker and are removed before it returns. This does not use Strict
+Agent Identity, create/delete keychain entries or expose a public getter.
+
+File selection never queries keyring; keyring selection never falls back to a
+stale file. Secrets, auto fallback, ephemeral, selected profiles, custom auth
+routes, managed configuration and nonempty workspace restrictions remain
+explicit prelaunch refusals. The bounded route does not drop workspace rules
+when private AuthManager refreshes. No real source configuration or storage
+mode is changed. The old file profile/fingerprints are unchanged; Direct
+keyring has a distinct profile. Locked/denied/unavailable reads return a closed
+refusal without waiting for OS interaction. No different source is tried.
+
+Only minimum validated ordinary TokenData/optional last_refresh is written to
+the owner-only candidate snapshot. Normal child refresh remains private;
+source no-writeback, integrity checks, rollback removal and the existing
+single-use claim remain mandatory. A failed real source prerequisite leaves
+the canary unconsumed and does not authorize login repair or a source switch.
 
 The exact 0.153.4 archive/native passed the scoped credential-free sandbox,
 configuration and command-environment checks. Ordinary qualification and
