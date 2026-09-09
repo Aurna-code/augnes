@@ -21,7 +21,6 @@ import {
 } from "@/lib/vnext/native-host/codex-managed-runtime-store";
 import {
   assertCurrentCodexQualifiedRuntimeSelectionV01,
-  legacyExactCodexQualificationEvidenceV01,
   selectPinnedCodexQualifiedRuntimeV01,
   type CodexQualifiedRuntimeSelectionV01,
   type CodexRuntimeLaunchShapeV01,
@@ -52,7 +51,8 @@ export interface CodexProductionRuntimeIdentityV01 {
   upstream_tag: string;
   upstream_source_commit: string;
   upstream_target_triple: string;
-  semantic_profile_fingerprint: string;
+  /** Historical isolated-auth evidence only; reviewed ordinary entries have no such attestation. */
+  semantic_profile_fingerprint: string | null;
   qualified_runtime_entry_id: string;
   compatibility_profile_id: string;
   compatibility_profile_fingerprint: string;
@@ -199,9 +199,7 @@ export function assertCodexProductionRuntimeIdentityUnchangedV01(
       identity.cli_version !==
         identity.qualified_runtime_selection.artifact.version ||
       identity.semantic_profile_fingerprint !==
-        legacyExactCodexQualificationEvidenceV01(
-          identity.qualified_runtime_selection.artifact,
-        ).semantic_profile_fingerprint ||
+        legacySemanticProfileFingerprintV01(identity.qualified_runtime_selection) ||
       (identity.registry_authority === "checked_in_human_reviewed_manifest" &&
         identity.executable_fingerprint !==
           identity.qualified_runtime_selection.artifact
@@ -332,9 +330,7 @@ function resolveCodexProductionRuntimeWithDependenciesV01(
     upstream_target_triple:
       dependencies.qualified_runtime_selection.artifact.upstream_target_triple,
     semantic_profile_fingerprint:
-      legacyExactCodexQualificationEvidenceV01(
-        dependencies.qualified_runtime_selection.artifact,
-      ).semantic_profile_fingerprint,
+      legacySemanticProfileFingerprintV01(dependencies.qualified_runtime_selection),
     qualified_runtime_entry_id:
       dependencies.qualified_runtime_selection.artifact.entry_id,
     compatibility_profile_id:
@@ -362,6 +358,15 @@ function resolveCodexProductionRuntimeWithDependenciesV01(
   return Object.freeze(identity);
 }
 
+function legacySemanticProfileFingerprintV01(
+  selection: CodexQualifiedRuntimeSelectionV01,
+): string | null {
+  const evidence = selection.artifact.qualification_evidence;
+  return evidence.kind === "legacy_exact_ordinary_qualified_v0_1"
+    ? evidence.semantic_profile_fingerprint
+    : null;
+}
+
 function managedProductionIdentityV01(
   managedRoot: string,
   managedSelection: CodexManagedRuntimeSelectionV01,
@@ -382,8 +387,7 @@ function managedProductionIdentityV01(
     upstream_source_commit: qualified.artifact.tagged_source_commit,
     upstream_target_triple: qualified.artifact.upstream_target_triple,
     semantic_profile_fingerprint:
-      legacyExactCodexQualificationEvidenceV01(qualified.artifact)
-        .semantic_profile_fingerprint,
+      legacySemanticProfileFingerprintV01(qualified),
     qualified_runtime_entry_id: qualified.artifact.entry_id,
     compatibility_profile_id: qualified.compatibility_profile.profile_id,
     compatibility_profile_fingerprint:

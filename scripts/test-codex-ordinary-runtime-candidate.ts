@@ -63,7 +63,7 @@ async function mainV01(): Promise<void> {
         candidate_entry_id: CODEX_0_153_2_CANDIDATE_ENTRY_ID_V01,
         ordinary_lane: "candidate",
         strict_lane: "hold",
-        production_selected_version: "0.152.1",
+        production_selected_version: "0.153.4",
         emulated_exact_evidence_available: false,
         provider_model_calls: 0,
         keychain_accesses: 0,
@@ -92,15 +92,15 @@ async function mainV01(): Promise<void> {
 
 function exactCandidateMetadataV01(): void {
   const registry = CODEX_QUALIFIED_RUNTIME_REGISTRY_V01;
-  assert.equal(registry.artifacts.length, 2);
+  assert.equal(registry.artifacts.length, 3);
   const production = registry.artifacts.find(
-    ({ entry_id }) => entry_id === "codex-rust-v0.152.1-darwin-arm64",
+    ({ entry_id }) => entry_id === "codex-rust-v0.153.4-darwin-arm64",
   )!;
   const candidate = registry.artifacts.find(
     ({ entry_id }) => entry_id === CODEX_0_153_2_CANDIDATE_ENTRY_ID_V01,
   )!;
   assert.equal(registry.production_selection.entry_id, production.entry_id);
-  assert.equal(production.version, "0.152.1");
+  assert.equal(production.version, "0.153.4");
   assert.equal(candidate.version, "0.153.2");
   assert.equal(candidate.release_tag, "rust-v0.153.2");
   assert.equal(
@@ -305,7 +305,7 @@ function evidenceAndLaneConflictsFailClosedV01(): void {
   const selected = selectPinnedCodexQualifiedRuntimeV01({
     lane: "ordinary_chatgpt_auth",
   });
-  assert.equal(selected.artifact.version, "0.152.1");
+  assert.equal(selected.artifact.version, "0.153.4");
   assert.throws(
     () =>
       selectPinnedCodexQualifiedRuntimeV01({

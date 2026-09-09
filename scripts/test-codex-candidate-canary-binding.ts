@@ -327,6 +327,18 @@ enabled=true
   try {
     configure("keyring");
     const before = [metadata(auth), metadata(database)];
+    // This exact native-auth profile is historical after 0.153.4 adoption.
+    // Preserve the single-use/newer-candidate gate: current qualification is
+    // not authority to replay its former candidate canary.
+    if (selected.artifact.version === receipt.candidate.version) {
+      await assert.rejects(prepare(), /codex_candidate_canary_evidence_or_review_invalid/);
+      assert.deepEqual([metadata(auth), metadata(database)], before);
+      const directory = path.join(root, "native-canary-0");
+      assert.deepEqual(readdirSync(directory), ["rust-v0.153.4-darwin-arm64.json"]);
+      console.log(JSON.stringify({ native_canary: "already_selected_candidate_refused_before_claim_or_launch",
+        historical_native_auth_positive_cases: "retained_at_accepted_1239_head", provider_model_calls: 0 }));
+      return;
+    }
     await assert.rejects(prepare([]), /unapproved_instructions/);
     process.env.CODEX_SQLITE_HOME = path.join(root, "fresh-private-sqlite");
     await assert.rejects(prepare(), /state_context_mismatch/); delete process.env.CODEX_SQLITE_HOME;

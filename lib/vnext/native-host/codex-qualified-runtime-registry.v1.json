@@ -443,11 +443,134 @@
       "revocation": null,
       "not_after": null,
       "security_floor": null
+    },
+    {
+      "entry_id": "codex-rust-v0.153.4-darwin-arm64",
+      "version": "0.153.4",
+      "release_tag": "rust-v0.153.4",
+      "tagged_source_commit": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+      "platform": "darwin",
+      "architecture": "arm64",
+      "upstream_target_triple": "aarch64-apple-darwin",
+      "official_release": {
+        "repository": "openai/codex",
+        "release_id": 383061770,
+        "url": "https://github.com/openai/codex/releases/tag/rust-v0.153.4"
+      },
+      "qualified_provenance_asset": {
+        "acquisition_route": "standalone_release_tarball",
+        "asset_id": 545043537,
+        "asset_name": "codex-aarch64-apple-darwin.tar.gz",
+        "size_bytes": 87323149,
+        "digest": "sha256:8cf911ea676523bfb2121ec561848d2aba564890ad536db4d8a3353f2b9850b1",
+        "digest_mechanism": "official_github_release_asset_digest_sha256"
+      },
+      "native_executable_sha256": "sha256:b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3",
+      "provenance_method": {
+        "method": "official_github_release_metadata_and_asset_digest",
+        "post_extraction_native_sha256_required": true,
+        "upstream_macos_signature_claimed": false
+      },
+      "admitted_discovery_launch_shapes": [
+        {
+          "shape": "direct_native",
+          "contract": "reviewed_standalone_archive_regular_macos_arm64_native_resolving_to_exact_sha256"
+        }
+      ],
+      "unsupported_acquisition_routes": [
+        {
+          "route": "codex_package_archive",
+          "example_asset_name": "codex-package-aarch64-apple-darwin.tar.gz",
+          "status": "unsupported"
+        }
+      ],
+      "compatibility_profile_id": "codex_app_server_augnes_operator.v0.1",
+      "compatibility_profile_fingerprint": "sha256:a4cfb0e38fd6a2af0d29a467c2c5db2579cdc784e93a820f3482fa2c8a1d663a",
+      "lanes": {
+        "ordinary_chatgpt_auth": {
+          "status": "qualified",
+          "qualified_at": "2026-09-09T22:19:54Z",
+          "reason": "reviewed_exact_native_ordinary_canary_and_compatibility",
+          "evidence_refs": [
+            "rolling_candidate_receipt_fingerprint:sha256:47ddc938886a5da308f9fa9d30330730ed4417f4e6b8731b84101591b13a40f5",
+            "native_ordinary_canary_terminal_outcome_fingerprint:sha256:b2abd85cf69105484f07a3209f6e57d68cef0eaaf2a11f26d651fc3d6975dc9d",
+            "native_auth_state_profile_fingerprint:sha256:0e88b70eda8ffd3957f47de7d3661830c4a00130fa68dea1c289abd3f2f291aa",
+            "canary_augnes_source:b843ddec19a6638af5b1909d9351517953968528",
+            "model_free_compatibility_and_native_auth_review:github_pr:https://github.com/hynk-studio/augnes/pull/1239",
+            "application_local_canonical_receipt_fingerprint:244965ffd2c7ad9b3ee50e52a838a443e80c8e9ff3eec224647eeeb7ddb7d355",
+            "application_verification_head:f7ef9fc373ea5c0d16a9368d05b9520782ffddfc"
+          ],
+          "review_refs": [
+            "github_pr_review:https://github.com/hynk-studio/augnes/pull/1239#pullrequestreview-5157817339",
+            "github_issue_comment:https://github.com/hynk-studio/augnes/issues/1234#issuecomment-5609525836"
+          ]
+        },
+        "strict_agent_identity": {
+          "status": "hold",
+          "qualified_at": null,
+          "reason": "not_evaluated_no_documented_restart_trigger",
+          "evidence_refs": [
+            "github_issue:https://github.com/hynk-studio/augnes/issues/1195",
+            "github_pr:https://github.com/hynk-studio/augnes/pull/1239"
+          ],
+          "review_refs": [
+            "github_issue_comment:https://github.com/hynk-studio/augnes/issues/1234#issuecomment-5609525836"
+          ]
+        }
+      },
+      "qualification_evidence": {
+        "kind": "reviewed_exact_ordinary_qualified_v0_1",
+        "ordinary_deciding_receipt_fingerprint": "47ddc938886a5da308f9fa9d30330730ed4417f4e6b8731b84101591b13a40f5",
+        "source_schema_review": {
+          "review_version": "codex_runtime_candidate_source_schema_review.v0.1",
+          "baseline": {
+            "release_tag": "rust-v0.152.1",
+            "tagged_source_commit": "5adb68a49933ae446bf11935662c83dba55a0804",
+            "source_tree": "3e643e5ef6195a3881be9f8d6b394019786155ee"
+          },
+          "candidate": {
+            "release_tag": "rust-v0.153.4",
+            "tagged_source_commit": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+            "source_tree": "c527c7a5f5f199231dc0d819264e9e2180eb126a",
+            "release_published_at": "2026-09-04T23:25:48Z",
+            "archive_member_name": "codex-aarch64-apple-darwin",
+            "extracted_native_size_bytes": 220584000,
+            "executable_format": "Mach-O 64-bit arm64"
+          },
+          "compatibility_profile_decision": "reuse_supported_pending_authenticated_ordinary_canary",
+          "deltas": [
+            {
+              "area": "adapter_protocol_and_scoped_configuration",
+              "classification": "behavior_preserving_after_exact_source_review_and_focused_verification",
+              "evidence": "Accepted #1239: initialize/thread-start/turn-start/error/config-read schemas and shell filter/merge/command-environment/seatbelt files unchanged; changed permission context and thread readback covered by exact 0.153.4 model-free checks."
+            },
+            {
+              "area": "ambient_feature_suppression",
+              "classification": "behavior_preserving_after_exact_source_review_and_focused_verification",
+              "evidence": "Accepted #1239 exact scoped tuple additionally disables context_management and mcp_oauth_refresh_coordination; actual effective configuration, command filtering, filesystem/symlink/write/network refusal and cleanup passed."
+            },
+            {
+              "area": "ordinary_native_auth_and_runtime_state",
+              "classification": "behavior_preserving_after_exact_source_review_and_focused_verification",
+              "evidence": "Accepted #1239 native-auth audit: all 22 auth files and 52 SQL migrations unchanged; two state metadata consumers changed without schema migration. Native AuthManager uses coherent ordinary home/SQLite, approved generic instructions and host-owned refresh."
+            },
+            {
+              "area": "qualification_scope",
+              "classification": "additive_unused_bounded_non_authoritative",
+              "evidence": "Source review permitted existing adapter profile reuse; separate native-auth profile and one actual non-tool canary are referenced by the ordinary lane. No scoped-task success, Strict qualification, backend identity or minimum compatible version is inferred."
+            }
+          ],
+          "fingerprint": "sha256:1ae0c2751ce7be9cef597853d603955553c0d22c1a7ba35b23935ae79e9164ab"
+        }
+      },
+      "revocation": null,
+      "not_after": null,
+      "security_floor": null
     }
   ],
   "production_selection": {
     "mode": "pinned_exact",
     "lane": "ordinary_chatgpt_auth",
-    "entry_id": "codex-rust-v0.152.1-darwin-arm64"
+    "entry_id": "codex-rust-v0.153.4-darwin-arm64"
   }
 }

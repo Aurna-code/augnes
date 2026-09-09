@@ -12,7 +12,7 @@ import { assertCodexScopedTaskCurrentV01, createCodexScopedTaskV01, createCodexF
 import { inspectNativeHostPhysicalRootIdentityV01 } from "@/lib/vnext/native-host/project-root-identity";
 import { resolveCodexProductionRuntimeV01 } from "@/lib/vnext/native-host/codex-production-runtime";
 import { extractDiscoveredCodexCandidateArchiveV01 } from "@/lib/vnext/native-host/codex-managed-runtime-store";
-import { selectPinnedCodexQualifiedRuntimeV01 } from "@/lib/vnext/native-host/codex-qualified-runtime-registry";
+import { getCodexReviewedRuntimeArtifactV01, selectPinnedCodexQualifiedRuntimeV01 } from "@/lib/vnext/native-host/codex-qualified-runtime-registry";
 import { observeReviewedCandidateCodexAppServerUserAgentV01 } from "@/lib/vnext/native-host/codex-app-server-user-agent";
 import { stopOwnedProcessTreeV01 } from "@/lib/vnext/native-host/owned-process-tree";
 import { LiveNativeHostRunServiceV01 } from "@/lib/vnext/runtime/live-native-host-run-service";
@@ -508,7 +508,10 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
   const candidateLaunch = prepareScopedCodexLaunchV01(scope, environment, candidate);
   assert.equal((candidateLaunch.settings.features as Record<string, unknown>).context_management, false);
   assert.equal((candidateLaunch.settings.features as Record<string, unknown>).mcp_oauth_refresh_coordination, false);
-  assert.equal((launch.settings.features as Record<string, unknown>).context_management, undefined, "old extension projection stays exact");
+  assert.deepEqual(launch.settings, candidateLaunch.settings, "the adopted pin selects the reviewed exact scoped projection");
+  const rollbackLaunch = prepareScopedCodexLaunchV01(scope, environment,
+    getCodexReviewedRuntimeArtifactV01({ entry_id: "codex-rust-v0.152.1-darwin-arm64" }).artifact);
+  assert.equal((rollbackLaunch.settings.features as Record<string, unknown>).context_management, undefined, "old extension projection stays exact");
   for (const changed of [{ version: "0.153.5" }, { version: "0.152.1" }, { native_executable_sha256: "sha256:wrong" },
     { tagged_source_commit: "0".repeat(40) }, { compatibility_profile_fingerprint: "sha256:wrong" }])
     assert.throws(() => prepareScopedCodexLaunchV01(scope, environment, { ...candidate, ...changed }), /runtime_extension_unqualified/);

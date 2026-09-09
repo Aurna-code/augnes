@@ -35,6 +35,7 @@ process.env.AUGNES_CODEX_PRODUCTION_RUNTIME_TEST_MODE = "1";
 
 try {
   directNativeIsAdmittedV01();
+  reviewedOrdinaryIdentityHasNoLegacyAttestationV01();
   launchShapeAuthorityIsExactV01();
   symlinkNativeIsCanonicalizedV01();
   staleAndNewerVersionsAreRejectedV01();
@@ -600,7 +601,7 @@ function canonicalFakeRouteRemainsUnchangedV01(): void {
   assert.equal(launch.production_runtime_identity, undefined);
   assert.equal(
     launch.qualified_runtime_selection?.artifact.version,
-    "0.152.1",
+    "0.153.4",
   );
   assert.equal(
     launch.qualified_runtime_selection?.compatibility_profile.fingerprint,
@@ -611,13 +612,13 @@ function canonicalFakeRouteRemainsUnchangedV01(): void {
 function ordinaryPostSpawnIdentityIsExactV01(): void {
   assert.equal(
     observeOrdinaryCodexAppServerUserAgentV01(
-      "augnes/0.152.1 (Mac OS 15.7.1; arm64) fake-terminal/1.0 (augnes; codex_app_server_adapter.v0.1)",
+      "augnes/0.153.4 (Mac OS 15.7.1; arm64) fake-terminal/1.0 (augnes; codex_app_server_adapter.v0.1)",
     ),
-    "0.152.1",
+    "0.153.4",
   );
   for (const userAgent of [
     "augnes/0.151.0 (Mac OS 15.7.1; arm64) fake-terminal/1.0 (augnes; codex_app_server_adapter.v0.1)",
-    "codex-cli/fake-0.152.1",
+    "codex-cli/fake-0.153.4",
   ]) {
     expectRuntimeCodeV01(
       () => observeOrdinaryCodexAppServerUserAgentV01(userAgent),
@@ -637,7 +638,7 @@ function resolveFixtureV01(input: {
     environment: { NODE_ENV: "test", PATH: input.path_value },
     cwd: root,
     expected_executable_fingerprint: input.expected_fingerprint,
-    qualified_runtime_registry: input.qualified_runtime_registry,
+    qualified_runtime_registry: input.qualified_runtime_registry ?? legacyRegistryV01(),
     read_cli_version: input.read_cli_version,
     before_final_identity_check: input.before_final_identity_check,
   });
@@ -650,7 +651,7 @@ function registryWithShapesV01(
     "nested_platform_package" | "bundled_vendor"
   >,
 ): unknown {
-  const value = structuredClone(CODEX_QUALIFIED_RUNTIME_REGISTRY_V01) as any;
+  const value = legacyRegistryV01();
   value.artifacts[0].admitted_discovery_launch_shapes =
     value.artifacts[0].admitted_discovery_launch_shapes
       .filter((candidate: { shape: (typeof shapes)[number] }) =>
@@ -699,4 +700,32 @@ function expectRuntimeCodeV01(action: () => unknown, code: string): void {
     (error: unknown) =>
       error instanceof CodexProductionRuntimeErrorV01 && error.code === code,
   );
+}
+
+// Historical wrapper/rollback fixtures keep their explicit reviewed 0.152.1 base.
+function legacyRegistryV01(): any {
+  const value = structuredClone(CODEX_QUALIFIED_RUNTIME_REGISTRY_V01);
+  return { ...value, production_selection: {
+    ...value.production_selection, entry_id: "codex-rust-v0.152.1-darwin-arm64",
+  } };
+}
+
+function reviewedOrdinaryIdentityHasNoLegacyAttestationV01(): void {
+  const directory = fixtureDirectoryV01("reviewed-ordinary");
+  const executable = nativeFixtureV01(path.join(directory, "codex"), "reviewed-ordinary");
+  const identity = resolveFixtureV01({
+    path_value: directory, expected_fingerprint: sha256V01(executable),
+    qualified_runtime_registry: CODEX_QUALIFIED_RUNTIME_REGISTRY_V01,
+    read_cli_version: () => "0.153.4",
+  });
+  assert.equal(identity.qualified_runtime_entry_id, "codex-rust-v0.153.4-darwin-arm64");
+  assert.equal(identity.semantic_profile_fingerprint, null);
+  assert.equal(identity.compatibility_profile_fingerprint,
+    "sha256:a4cfb0e38fd6a2af0d29a467c2c5db2579cdc784e93a820f3482fa2c8a1d663a");
+  assertCodexProductionRuntimeIdentityUnchangedV01(identity);
+  assert.throws(() => assertCodexProductionRuntimeIdentityUnchangedV01({
+    ...identity, semantic_profile_fingerprint:
+      "sha256:0e88b70eda8ffd3957f47de7d3661830c4a00130fa68dea1c289abd3f2f291aa",
+  }), (error: unknown) => error instanceof CodexProductionRuntimeErrorV01 &&
+    error.code === "codex_production_runtime_identity_changed");
 }

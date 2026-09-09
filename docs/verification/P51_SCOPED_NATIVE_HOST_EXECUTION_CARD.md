@@ -590,3 +590,85 @@ After reviewed adoption, the pending single-turn scoped incident must freshly
 bind the then-current source, managed artifact, configuration and genuine scope.
 It was not executed here. No second canary, qualification transfer to changed
 launch/auth code, or automatic diagnostic follows from this success.
+
+### Exact 0.153.4 adoption implementation (#1234)
+
+The adoption change registers the exact artifact above as ordinary-qualified
+and changes the intended checked-in ordinary pin to
+`codex-rust-v0.153.4-darwin-arm64`. This is a source change for review, not
+activation of the live service. The prior two registry entries and historical
+candidate HOLDs/claims are unchanged. Strict's frozen 0.152.1 profile and HOLD
+now resolve their exact entry independently of the ordinary pin.
+
+The existing `reviewed_exact_ordinary_qualified_v0_1` shape references the actual
+rolling candidate receipt
+`47ddc938886a5da308f9fa9d30330730ed4417f4e6b8731b84101591b13a40f5`.
+That receipt's automatic delta HOLD remains historical; it is not itself a
+successful authenticated completion. Separate typed evidence references retain
+the accepted source/model-free review, actual native canary terminal outcome
+`sha256:b2abd85cf69105484f07a3209f6e57d68cef0eaaf2a11f26d651fc3d6975dc9d`,
+native-auth/state profile
+`sha256:0e88b70eda8ffd3957f47de7d3661830c4a00130fa68dea1c289abd3f2f291aa`,
+and #1239 application Canonical receipt
+`244965ffd2c7ad9b3ee50e52a838a443e80c8e9ff3eec224647eeeb7ddb7d355`.
+The application receipt is not substituted for candidate evidence. No historical
+record is rewritten or new canary result created.
+
+The production resolver admits the existing reviewed evidence shape without
+requiring a legacy isolated-auth attestation: its internal legacy
+`semantic_profile_fingerprint` is null for this entry. Adapter compatibility
+remains the unchanged `sha256:a4cfb0e38fd6a2af0d29a467c2c5db2579cdc784e93a820f3482fa2c8a1d663a`,
+distinct from the native-auth/state profile. Ordinary post-spawn user-agent
+validation uses the existing version-bound parser after exact registry
+currentness validation; it returns the selected observed version instead of
+Strict's historical version label. Authentication, permission, source, result,
+receipt, diagnostic, cancellation and settlement owners are otherwise unchanged.
+
+Inactive staging uses `ensurePinnedCodexManagedRuntimeV01` with its optional
+`reviewed_archive_bytes` input. Local bytes replace only acquisition; the same
+exact archive size/digest, safe extraction, native size/hash/format/version,
+atomic publication and sealed-manifest validation still apply. Invalid local
+bytes refuse without downloading a replacement. Omitting the option preserves
+the existing official download route. This does not change global configuration
+or add a runtime-selection override.
+
+On 2026-09-09, the retained official archive was installed into the separate
+inactive managed store at
+`<managed-root>/inactive-adoptions/codex-rust-v0.153.4-darwin-arm64`.
+Actual production-owner readback verified the exact native hash above and
+manifest `sha256:bb835e7cff0c791f840baedfc1f00a65818b5084d19c8f3e7358d93dfa2b9406`;
+staging locks and temporary staging entries were empty. No host, thread or
+turn was started. The current active store's 0.152.1 bytes and manifest
+`sha256:75fbadaf3ccd237fc573af6096335a78b39b4eeca5c1faed34aac0a5699922c4`
+were unchanged. No last-known-good invocation record was manufactured.
+The inactive store is not passed to the installed service. This separation
+also prevents the older registry's retention owner from encountering an
+unregistered future artifact in its active `artifacts` directory.
+
+After this adoption change is reviewed and merged, the remaining activation
+procedure uses existing owners:
+
+1. Verify the clean accepted merged source/root and stop the exact installed
+   Companion through `augnes:service:stop` before changing its source checkout.
+2. On the accepted adoption source, resolve the normal managed root through
+   `resolveAugnesLocalPaths`. Call `ensurePinnedCodexManagedRuntimeV01` for that
+   active root with the retained reviewed archive bytes. This validates and
+   installs through the same owner; do not manually move binaries/manifests or
+   point production at the inactive store. Read back the pin, manifest and native
+   identity through normal selection/resolution.
+3. Start the installed Companion through `augnes:service:start`, then verify
+   exact lifecycle/UI/bridge/Core identity, existing-data continuity and the
+   accepted-source runtime selection. Service activation is distinct from a
+   worker/model invocation.
+
+The existing qualified 0.152.1 entry and active-store bytes remain eligible
+rollback material. Rollback requires a reviewed exact pin/source change through
+the same owners; it neither promises Astra compatibility nor rolls back native
+credentials/state. Existing last-known-good and retention semantics are not
+redefined by staging.
+
+The pending scoped incident remains **not_run**. After actual adoption it must
+freshly bind the then-current source, managed 0.153.4 artifact, ordinary native
+authentication/configuration, genuine stage-1 scope and reviewed capture. Its
+single-turn limits and authorization boundary remain separate from registration,
+staging, activation and the already consumed successful canary.

@@ -261,6 +261,8 @@ export function extractReviewedCodexCandidateArchiveV01(input: {
 export async function ensurePinnedCodexManagedRuntimeV01(input: {
   root: string;
   environment?: NodeJS.ProcessEnv;
+  /** Optional local acquisition; the same exact archive/native checks still apply. */
+  reviewed_archive_bytes?: Buffer;
 }): Promise<CodexManagedRuntimeSelectionV01> {
   const dependencies = productionValidationDependenciesV01(
     input.environment ?? process.env,
@@ -270,7 +272,9 @@ export async function ensurePinnedCodexManagedRuntimeV01(input: {
     registry: CODEX_QUALIFIED_RUNTIME_REGISTRY_V01,
     dependencies,
     observed_at: () => new Date().toISOString(),
-    download_reviewed_archive: downloadReviewedArchiveV01,
+    download_reviewed_archive: input.reviewed_archive_bytes === undefined
+      ? downloadReviewedArchiveV01
+      : async () => Buffer.from(input.reviewed_archive_bytes!),
   });
 }
 
