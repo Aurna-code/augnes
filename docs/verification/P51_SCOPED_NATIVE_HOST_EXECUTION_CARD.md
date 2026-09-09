@@ -540,3 +540,53 @@ checks occur inside that counted startup. The outcome and exact exercised source
 are reported in the PR's local evidence appendix. Production stays on 0.152.1;
 qualification/adoption require actual canary completion and settlement plus review.
 The pending scoped incident remains unexecuted and requires post-adoption bindings.
+
+### Native-auth canary outcome and adoption proposal (#1239)
+
+At `2026-09-09T16:20:16.274Z`, the single authorized reviewed re-entry ran on
+Augnes source `b843ddec19a6638af5b1909d9351517953968528`, tree
+`7b34d6891b803dd58a1ead14ad81054c705907a8`. The exact official 0.153.4 native
+completed `AUGNES_CANARY_OK`: one authenticated host, one confirmed fresh turn,
+`gpt-6-astra` / `max`, no task tools/effects. Execution and settlement took
+10,240.799 ms within 60,000 ms. Adapter settlement passed, category capture
+closed/read back nine observations, and no failed-terminal incident hook was
+expected or observed. Owned candidate directories were removed; the disposable
+operator session was revoked and its separate preparation DB closed and retained.
+
+The prospective native-auth profile fingerprint is
+`sha256:0e88b70eda8ffd3957f47de7d3661830c4a00130fa68dea1c289abd3f2f291aa`.
+The pre-outcome freeze is
+`ad19a7469cb21db0d5f6ccc148be0faedea51b96fee37df44a9ccd975ff1b414`;
+terminal outcome fingerprint is
+`sha256:b2abd85cf69105484f07a3209f6e57d68cef0eaaf2a11f26d651fc3d6975dc9d`.
+These bind the local candidate evidence, not a Core RunReceipt, scoped-task
+execution, independent evaluation, backend identity or general P5.1 usefulness.
+The new allowance is consumed. Earlier HOLDs, failures and claims are unchanged.
+Provider rounds, tokens and cost were not observed; shared subscription quota
+was unreserved and no additional PAYG was authorized.
+
+The following is an **unapplied adoption proposal for review**. No registry
+qualification or production-selection change is performed by this PR:
+
+| Owner | Exact proposed action after review |
+| --- | --- |
+| Qualified registry | Add `codex-rust-v0.153.4-darwin-arm64`, source `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`, official release 383061770 / standalone asset 545043537. Preserve old entries and HOLD evidence. |
+| Artifact | Archive SHA-256 `8cf911ea676523bfb2121ec561848d2aba564890ad536db4d8a3353f2b9850b1`, 87,323,149 bytes; native SHA-256 `b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3`, 220,584,000 bytes. Direct native only; no arbitrary PATH or Node-launcher admission. |
+| Ordinary qualification | Use the existing `reviewed_exact_ordinary_qualified_v0_1` evidence shape after accepting source/schema review, focused model-free compatibility, this native-profile canary, and the PR's final exact-head deciding receipt. Preserve the distinction between the existing adapter compatibility profile and this prospective authentication/state profile. Strict remains HOLD. |
+| Managed selection | After separate user adoption, stage through `ensurePinnedCodexManagedRuntimeV01` using the reviewed exact registry selection, then validate the immutable manifest/native bytes through normal selection. The retained verified archive is preparation evidence; candidate staging was removed and 0.153.4 is not yet present in the production store. |
+| Rollback | Keep the existing eligible 0.152.1 entry and bytes. Read-only selection at `2026-09-09T16:27:30.701Z` verified native SHA-256 `8194ea3181f330e63023b234b0b231855e5874e0331c5ef7cbc490591497a7bf` and store manifest `sha256:75fbadaf3ccd237fc573af6096335a78b39b4eeca5c1faed34aac0a5699922c4`. Use existing last-known-good/retention owners at actual adoption; this observation does not create rollback state or promise Astra compatibility. |
+
+Auth implementation files and all 52 SQL migrations are unchanged between the
+pinned 0.152.1 and 0.153.4 sources. The reviewed state changes handle newly added
+metadata records without a schema change; existing WAL/busy-timeout ownership
+remains. Native AuthManager used the existing selected keyring context without
+an Augnes secret read/copy, fresh private SQLite, transcript replay, or startup
+rehearsal. Compatible incidental refresh/cache writes are host-owned effects;
+the ordinary home is not claimed byte-identical. The same installed Companion
+remained live after the canary; later deciding verification restoration is
+separate evidence and need not retain its process generation.
+
+After reviewed adoption, the pending single-turn scoped incident must freshly
+bind the then-current source, managed artifact, configuration and genuine scope.
+It was not executed here. No second canary, qualification transfer to changed
+launch/auth code, or automatic diagnostic follows from this success.

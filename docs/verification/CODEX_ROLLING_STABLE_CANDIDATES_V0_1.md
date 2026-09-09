@@ -109,9 +109,10 @@ does not change historical/default canary settings, its fixed non-tool prompt,
 result schema, read-only policy, exclusive claim or terminal/settlement owners.
 The existing smaller execution ceiling is **60,000 ms**, with the existing
 10,000 ms RPC and stop-settlement limits; the 180,000 ms authorization does not
-increase it. Candidate canaries still cannot combine `scoped_task`, incident
-hooks, launch overrides or Strict-lane authority. The ordinary category recorder
-can retain the existing bounded failure diagnostic after settlement.
+increase it. Historical/default candidate canaries cannot combine `scoped_task`,
+incident hooks, launch overrides or Strict-lane authority. The native profile
+below admits the reviewed local incident hook through its genuine candidate
+binding; it does not admit a scoped-task grant or a launch override.
 
 `readCodexCandidateOrdinaryAuthAvailabilityV01` uses the same source resolver
 and validator as provisioning. It returns only a closed availability/reason,
@@ -120,9 +121,11 @@ but is not a grant. Preparation binds opaque source/physical/configuration
 metadata; consumption revalidates it and the ordinary material before creating
 a private snapshot. No credential-content hash is made.
 
-The original file-only observation remains historical. The follow-up under
+### Superseded unmerged reader experiment
+
+The original file-only observation remains historical. The earlier follow-up under
 [PR #1239 review](https://github.com/hynk-studio/augnes/pull/1239#pullrequestreview-5154321040)
-adds only the selected macOS Direct keyring source. Pinned source
+attempted the selected macOS Direct keyring source. Pinned source
 `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a` selects this backend when
 `features.secret_auth_storage` is false (the macOS default). It uses service
 `Codex Auth`, the canonical-home-derived store key, and the User-domain
@@ -145,15 +148,17 @@ refusal without waiting for OS interaction. No different source is tried.
 Only minimum validated ordinary TokenData/optional last_refresh is written to
 the owner-only candidate snapshot. Normal child refresh remains private;
 source no-writeback, integrity checks, rollback removal and the existing
-single-use claim remain mandatory. A failed real source prerequisite leaves
-the canary unconsumed and does not authorize login repair or a source switch.
+single-use claim remained mandatory. Its real source prerequisite refused before
+consumption. The later native-auth dispatch supersedes this unmerged reader;
+its implementation has been removed from this PR. These paragraphs describe the
+historical experiment, not a current product prerequisite or setup instruction.
 
 The exact 0.153.4 archive/native passed the scoped credential-free sandbox,
-configuration and command-environment checks. Ordinary qualification and
-managed adoption remain blocked without the required authenticated completion.
-The registry and default managed selection remain 0.152.1; the old 0.153.4 HOLD
-and consumed claim remain historical. The retained post-adoption diagnostic is
-a distinct, unexecuted allowance.
+configuration and command-environment checks. The native-profile authenticated
+canary subsequently completed as recorded in the execution card. Registry and
+managed adoption still require review; the default selection remains 0.152.1.
+The old 0.153.4 HOLD and consumed claim remain historical. The retained
+post-adoption diagnostic is a distinct, unexecuted allowance.
 
 ## Bounded outcomes
 
