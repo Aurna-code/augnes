@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import {
   classifyCodexRollingDeltaV01, codexRollingFingerprintV01, freezeCodexRollingIdentityV01,
-  isNewerCodexRollingStableV01, runCodexRollingCheapGateV01, runCodexRollingCandidateGatesV01, runCodexRollingStableCandidateV01,
+  isNewerCodexRollingStableV01, runCodexRollingCheapGateV01, runCodexRollingCandidateGatesV01, runCodexRollingStableCandidateV01, runCodexReviewedCandidateReentryV01,
 } from "../lib/vnext/native-host/codex-rolling-stable-candidate";
 import { extractDiscoveredCodexCandidateArchiveV01 } from "../lib/vnext/native-host/codex-managed-runtime-store";
 import { CODEX_QUALIFIED_RUNTIME_REGISTRY_V01, selectPinnedCodexQualifiedRuntimeV01 } from "../lib/vnext/native-host/codex-qualified-runtime-registry";
@@ -182,6 +182,41 @@ async function fullFailureAndReplay(): Promise<void> {
   assert.equal(receipt_fingerprint, codexRollingFingerprintV01(material));
   assert.equal(JSON.parse(readFileSync(first.receipt_path, "utf8")).receipt_fingerprint, receipt_fingerprint);
   await testCodexCandidateCanaryBindingV01(root, first.receipt, archive);
+  // Distinct explicit review after a consumed terminal canary. Synthetic
+  // evidence only; the deliberately non-runnable native makes the new cheap
+  // gate HOLD. No historical file, claim, or follow_stable policy is changed.
+  const historyRoot = path.join(root, "reviewed-history"); mkdirSync(historyRoot, { mode: 0o700 });
+  const history = path.join(historyRoot, "rust-v9.8.7-darwin-arm64.json");
+  const prior = { ...first.receipt, attempts: [pass()], disposition: "HOLD_INCOMPATIBLE_OR_UNCLEAR_DELTA" as const };
+  const { receipt_fingerprint: _prior, ...priorMaterial } = prior; void _prior;
+  prior.receipt_fingerprint = codexRollingFingerprintV01(priorMaterial);
+  const resultMaterial = { candidate_receipt_fingerprint: prior.receipt_fingerprint, candidate: prior.candidate, native: prior.native,
+    disposition: "HOLD_AUTHENTICATED_CANARY_CONTRACT", binding_consumed: true, adapter_settlement_passed: true,
+    disposable_state_removed: true, owned_processes_remaining: 0 };
+  const result = { ...resultMaterial, fingerprint: codexRollingFingerprintV01(resultMaterial) };
+  const historicalFiles = new Map([[history, JSON.stringify(prior)],
+    [`${history}.ordinary-canary-claimed`, `${prior.receipt_fingerprint}\n`],
+    [`${history}.ordinary-canary-result.json`, JSON.stringify(result)]]);
+  for (const [file, value] of historicalFiles) writeFileSync(file, value, { mode: 0o600 });
+  const reentry = { augnes_source: input.augnes_source, historical_receipt_path: history,
+    authorization_ref: "https://github.com/hynk-studio/augnes/issues/1234#issuecomment-123",
+    prior_receipt_fingerprint: prior.receipt_fingerprint, prior_canary_result_fingerprint: result.fingerprint, archive_bytes: archive };
+  for (const changed of [{ authorization_ref: "worker-supplied" }, { prior_receipt_fingerprint: "wrong" }, { prior_canary_result_fingerprint: "wrong" }])
+    await assert.rejects(runCodexReviewedCandidateReentryV01({ ...reentry, ...changed }));
+  writeFileSync(`${history}.ordinary-canary-claimed`, "unconsumed\n");
+  await assert.rejects(runCodexReviewedCandidateReentryV01(reentry), /history_invalid/);
+  writeFileSync(`${history}.ordinary-canary-claimed`, historicalFiles.get(`${history}.ordinary-canary-claimed`)!);
+  reads = []; releaseReads = commitReads = 0;
+  const entered = await runCodexReviewedCandidateReentryV01(reentry);
+  assert.equal(entered.receipt.reviewed_reentry?.prior_receipt_fingerprint, prior.receipt_fingerprint);
+  assert.equal(entered.receipt.reviewed_reentry?.requested_model, "gpt-6-astra");
+  assert.equal(entered.receipt.disposition, "HOLD_PROVIDER_FREE_CONTRACT");
+  assert.equal(entered.receipt.authority.qualified, false);
+  assert.equal(reads.some(url => url.endsWith("/latest") || url.includes("/releases/download/")), false);
+  const count = reads.length;
+  await assert.rejects(runCodexReviewedCandidateReentryV01(reentry), /EEXIST/);
+  assert.equal(reads.length, count);
+  for (const [file, value] of historicalFiles) assert.equal(readFileSync(file, "utf8"), value);
   reads = []; latestVersion = selectedVersion; releaseReads = commitReads = 0;
   const replay = await runCodexRollingStableCandidateV01(input);
   assert.equal(replay.reused, true); assert.deepEqual(replay.receipt, first.receipt);

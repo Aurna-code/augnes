@@ -67,6 +67,25 @@ export function codexCandidateOrdinaryBrokerProfileFingerprintV01(): string {
   }));
 }
 
+/** Read-only prerequisite for the same file-backed ordinary broker. No token,
+ * account, path, expiry, or credential hash leaves this owner. This observation
+ * is not a grant: consumption re-reads and validates the source independently. */
+export function readCodexCandidateOrdinaryAuthAvailabilityV01(): {
+  status: "available" | "unavailable";
+  route: "ordinary_chatgpt_auth_file";
+  credential_profile_fingerprint: string;
+} {
+  let status: "available" | "unavailable" = "unavailable";
+  try {
+    const home = realpathSync(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
+    const policy = codexAuthFilePlatformPolicyV01(process.platform === "win32" ? "non_unix" : "unix");
+    ordinaryCandidateAuthDotJsonV01(JSON.parse(readExactCodexAuthFileV01(home, policy, null)));
+    status = "available";
+  } catch { /* Closed prerequisite status; never expose private parse errors. */ }
+  return Object.freeze({ status, route: "ordinary_chatgpt_auth_file",
+    credential_profile_fingerprint: codexCandidateOrdinaryBrokerProfileFingerprintV01() });
+}
+
 /** Credential values never leave this broker. Only an already-consumed exact
  * candidate binding can provision a snapshot; paths and argv are not inputs. */
 export function provisionCodexCandidateOrdinaryAuthV01(binding: CodexCandidateCanaryBindingV01): {

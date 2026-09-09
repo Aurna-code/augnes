@@ -67,10 +67,13 @@ in-memory token and an exclusive `.ordinary-canary-claimed` marker beside the
 receipt before execution. Do not remove or relocate evidence to renew a budget.
 An unused preparation can be disposed without invoking the adapter.
 
-The later invocation uses only official ordinary AuthManager access through
-the ordinary credential-owner directory. Augnes does not read or project
-credentials. HOME, SQLite, temporary state, and the empty execution root are
-private and disposable; PATH is controlled. Exact CLI/user-agent identity,
+The later invocation uses the #1207 ordinary credential broker to validate a
+file-backed ordinary AuthDotJson and reconstruct only its required TokenData
+and optional refresh timestamp inside a private home. Credential values never
+leave that owner and refreshed child credentials are not written back. The
+source home, configuration and history are not copied. HOME, SQLite, temporary
+state, and the empty execution root are private and disposable; PATH is
+controlled. Exact CLI/user-agent identity,
 ordinary account availability, and `observeCandidateConfigPolicyV01` must pass
 before thread creation. The existing candidate overrides, including
 `features.shell_snapshot_v2=false`, remain mandatory.
@@ -85,6 +88,52 @@ if a terminal result arrived. Unsettled children retain disposable state for
 separate cleanup rather than claiming successful removal. Neither preparation
 nor a future successful canary qualifies or adopts a runtime. Actual
 authenticated execution always requires separate authority.
+
+## Explicit reviewed re-entry under #1234
+
+`runCodexReviewedCandidateReentryV01` is a trusted local entry in the same
+candidate owner. It requires an explicit issue-comment authorization, the exact
+historical receipt and failed canary-result fingerprints, a consumed historical
+claim, settled cleanup and the same candidate tuple. It does not discover a
+different release or change `follow_stable`. It exclusively reserves a new
+directory next to the historical receipt, then uses the existing acquisition,
+extraction, provider-free gates, source comparison and cleanup. Verified local
+archive bytes avoid another download; frozen official metadata is still
+revalidated. Interrupted reservations cannot be retried or moved to renew them.
+
+The new receipt retains its predecessor and authorization references. It binds
+the fixed `gpt-6-astra` / `max` request to the canary's thread configuration and
+turn parameters, with provider fallback disabled and contradictory exposed
+model/effort values refused. Unexposed backend identity remains unknown. This
+does not change historical/default canary settings, its fixed non-tool prompt,
+result schema, read-only policy, exclusive claim or terminal/settlement owners.
+The existing smaller execution ceiling is **60,000 ms**, with the existing
+10,000 ms RPC and stop-settlement limits; the 180,000 ms authorization does not
+increase it. Candidate canaries still cannot combine `scoped_task`, incident
+hooks, launch overrides or Strict-lane authority. The ordinary category recorder
+can retain the existing bounded failure diagnostic after settlement.
+
+`readCodexCandidateOrdinaryAuthAvailabilityV01` is a read-only prerequisite of
+the same broker. It exposes only available/unavailable, the file route and the
+source-owned broker-profile fingerprint. It does not provision credentials,
+consume a claim, inspect keyring values or guarantee a later login. Consumption
+still revalidates the real source and private snapshot.
+
+The 2026-09-09 local check found keyring configured and no ordinary `auth.json`
+at the broker's resolved user-default home. Thus the implemented file-backed
+candidate route is unavailable on that observation. No authenticated canary
+was started and no new claim was consumed. Supporting ordinary keyring
+projection would need the separate authentication-contract review explicitly
+required by [the dispatched scope](https://github.com/hynk-studio/augnes/issues/1234#issuecomment-5600880587).
+This is not evidence that ordinary desktop authentication is broken. No login,
+storage mode, keyring, configuration or production selection was changed.
+
+The exact 0.153.4 archive/native passed the scoped credential-free sandbox,
+configuration and command-environment checks. Ordinary qualification and
+managed adoption remain blocked without the required authenticated completion.
+The registry and default managed selection remain 0.152.1; the old 0.153.4 HOLD
+and consumed claim remain historical. The retained post-adoption diagnostic is
+a distinct, unexecuted allowance.
 
 ## Bounded outcomes
 

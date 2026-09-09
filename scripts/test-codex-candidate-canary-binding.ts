@@ -10,7 +10,7 @@ import {
   emulateCodexCandidateCanaryForTestV01, type CodexRollingReceiptV01,
   consumeCodexCandidateCanaryV01, claimCodexCandidateOrdinaryBrokerContextV01,
 } from "../lib/vnext/native-host/codex-rolling-stable-candidate";
-import { codexCandidateOrdinaryBrokerProfileFingerprintV01, provisionCodexCandidateOrdinaryAuthV01, containsCodexCredentialSecretShapeV01 } from "../lib/vnext/native-host/codex-credential-broker";
+import { codexCandidateOrdinaryBrokerProfileFingerprintV01, provisionCodexCandidateOrdinaryAuthV01, containsCodexCredentialSecretShapeV01, readCodexCandidateOrdinaryAuthAvailabilityV01 } from "../lib/vnext/native-host/codex-credential-broker";
 import { assertCurrentCodexQualifiedRuntimeSelectionV01, CODEX_QUALIFIED_RUNTIME_REGISTRY_FINGERPRINT_V01, selectPinnedCodexQualifiedRuntimeV01 } from "../lib/vnext/native-host/codex-qualified-runtime-registry";
 import type { NativeHostInvocationControlV01, NativeHostRequestV01 } from "../types/vnext/native-host-adapter";
 
@@ -60,6 +60,10 @@ export async function testCodexCandidateCanaryBindingV01(root: string, initial: 
     return { binding: await prepareCodexCandidateCanaryV01({ receipt_path: receiptPath, review, archive_bytes: archive }), receiptPath };
   };
   try {
+    const beforeAvailability = metadata(sourceAuth);
+    assert.deepEqual(readCodexCandidateOrdinaryAuthAvailabilityV01(), { status: "available", route: "ordinary_chatgpt_auth_file",
+      credential_profile_fingerprint: codexCandidateOrdinaryBrokerProfileFingerprintV01() });
+    assert.equal(metadata(sourceAuth), beforeAvailability);
     const invalidPath = path.join(root, `${receipt.candidate.release_tag}-darwin-arm64.json`);
     writeFileSync(invalidPath, JSON.stringify(receipt), { mode: 0o600 });
     await assert.rejects(prepareCodexCandidateCanaryV01({ receipt_path: invalidPath, review: { ...review, receipt_fingerprint: "wrong" }, archive_bytes: archive }));
@@ -108,6 +112,7 @@ export async function testCodexCandidateCanaryBindingV01(root: string, initial: 
       "invalid-json",
     ]) {
       writeFileSync(sourceAuth, typeof material === "string" ? material : JSON.stringify(material));
+      assert.equal(readCodexCandidateOrdinaryAuthAvailabilityV01().status, "unavailable");
       const { binding, receiptPath } = await prepare();
       emulateCodexCandidateCanaryForTestV01(binding, "success");
       assert.throws(() => consumeCodexCandidateCanaryV01(binding), /^CodexCredentialBrokerErrorV01: codex_candidate_ordinary_auth_projection_refused$/);
@@ -236,6 +241,29 @@ export async function testCodexCandidateCanaryBindingV01(root: string, initial: 
       const retry = createCodexAppServerAdapterV01({ candidate_canary: reminted }).invoke(request(reminted.execution_root), control());
       assert.notEqual((await retry.result).outcome, "completed"); await retry.settled;
       assert.equal(existsSync(reminted.execution_root), false);
+    }
+    // A reviewed re-entry binds the requested model/effort, without changing
+    // historical/default canary args, broker profile, or candidate authority.
+    const reentered = structuredClone(receipt);
+    reentered.reviewed_reentry = { authorization_ref: "https://github.com/hynk-studio/augnes/issues/1234#issuecomment-123",
+      reason: "new_host_reported_client_version_rejection", prior_receipt_fingerprint: receipt.receipt_fingerprint,
+      prior_canary_result_fingerprint: codexRollingFingerprintV01("synthetic-prior-result"), requested_model: "gpt-6-astra", requested_effort: "max" };
+    const { receipt_fingerprint: _old, ...reentryMaterial } = reentered; void _old;
+    reentered.receipt_fingerprint = codexRollingFingerprintV01(reentryMaterial);
+    for (const scenario of ["success", "model_mismatch", "effort_mismatch"] as const) {
+      const directory = path.join(root, `reentered-${scenario}`); mkdirSync(directory, { mode: 0o700 });
+      const file = path.join(directory, `${receipt.candidate.release_tag}-darwin-arm64.json`);
+      writeFileSync(file, JSON.stringify(reentered), { mode: 0o600 });
+      const binding = await prepareCodexCandidateCanaryV01({ receipt_path: file,
+        review: { ...review, receipt_fingerprint: reentered.receipt_fingerprint }, archive_bytes: archive });
+      emulateCodexCandidateCanaryForTestV01(binding, scenario);
+      const invocation = createCodexAppServerAdapterV01({ candidate_canary: binding }).invoke(request(binding.execution_root), control());
+      const result = await invocation.result.catch(() => null); await invocation.settled;
+      assert.equal(result?.outcome === "completed", scenario === "success");
+      const rows = readFileSync(`${file}.ordinary-canary-claimed.synthetic-trace`, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      assert.deepEqual(rows.find(r => r.kind === "candidate_model_request").value, { model: "gpt-6-astra", effort: "max" });
+      assert.equal(rows.filter(r => r.kind === "received" && r.value.method === "turn/start").length, scenario === "success" ? 1 : 0);
+      assert.equal(existsSync(binding.execution_root), false);
     }
     // Normal launch admission is still production-qualified, never candidate.
     const fakeQualified = structuredClone(selected);

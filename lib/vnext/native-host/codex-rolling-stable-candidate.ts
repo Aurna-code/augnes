@@ -79,6 +79,14 @@ export interface CodexRollingReceiptV01 {
   cleanup: { disposable_staging_removed: boolean; process_settled: boolean; streams_closed: boolean };
   authority: { candidate_evidence_only: true; qualified: false; production_adoption: false; provider_turn_authorized: false };
   receipt_fingerprint: string;
+  reviewed_reentry?: {
+    authorization_ref: string;
+    reason: "new_host_reported_client_version_rejection";
+    prior_receipt_fingerprint: string;
+    prior_canary_result_fingerprint: string;
+    requested_model: "gpt-6-astra";
+    requested_effort: "max";
+  };
 }
 
 export function codexRollingFingerprintV01(value: unknown): string {
@@ -257,8 +265,70 @@ export async function runCodexRollingStableCandidateV01(input: {
 }): Promise<{ receipt: CodexRollingReceiptV01; receipt_path: string; reused: boolean }> {
   if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("codex_rolling_platform_unsupported");
   if (Object.values(input.augnes_source).some((value) => !SHA.test(value))) throw new Error("codex_rolling_augnes_source_invalid");
+  return runCodexCandidateCycleV01(input, await discoverCodexRollingStableV01());
+}
+
+/** Trusted local, explicit review only. No updater/worker/UI calls this entry.
+ * The old failed receipt and consumed claim remain immutable. A new exclusive
+ * claim adjacent to that receipt prevents changing output directories from
+ * renewing this review's allowance. follow_stable still skips terminal history. */
+export async function runCodexReviewedCandidateReentryV01(input: {
+  augnes_source: CodexRollingReceiptV01["augnes_source"];
+  historical_receipt_path: string;
+  authorization_ref: string;
+  prior_receipt_fingerprint: string;
+  prior_canary_result_fingerprint: string;
+  archive_bytes: Buffer;
+}): Promise<{ receipt: CodexRollingReceiptV01; receipt_path: string; reused: boolean }> {
+  const historical = input.historical_receipt_path;
+  if (Object.values(input.augnes_source).some((value) => !SHA.test(value))) throw new Error("codex_rolling_augnes_source_invalid");
+  const read = (file: string) => {
+    const s = lstatSync(file);
+    if (!s.isFile() || s.isSymbolicLink() || (s.mode & 0o077) !== 0 || s.size > 16 * 1024 * 1024 || realpathSync.native(file) !== file)
+      throw new Error("codex_candidate_reentry_history_invalid");
+    return readFileSync(file, "utf8");
+  };
+  if (!/^https:\/\/github\.com\/hynk-studio\/augnes\/issues\/1234#issuecomment-[1-9][0-9]*$/u.test(input.authorization_ref))
+    throw new Error("codex_candidate_reentry_review_invalid");
+  const prior = JSON.parse(read(historical)) as CodexRollingReceiptV01;
+  const { receipt_fingerprint, ...priorMaterial } = prior;
+  const result = record(JSON.parse(read(`${historical}.ordinary-canary-result.json`)));
+  const { fingerprint, ...resultMaterial } = result;
+  if (prior.receipt_version !== CODEX_ROLLING_CANDIDATE_VERSION_V01 || prior.reviewed_reentry ||
+      !prior.native || prior.attempts?.length !== 1 || !passed(prior.attempts[0]!) ||
+      !["AUTHENTICATED_CANARY_REQUIRED", "HOLD_EXPLICIT_SEMANTIC_REVIEW_REQUIRED", "HOLD_INCOMPATIBLE_OR_UNCLEAR_DELTA"].includes(prior.disposition) ||
+      receipt_fingerprint !== input.prior_receipt_fingerprint || receipt_fingerprint !== codexRollingFingerprintV01(priorMaterial) ||
+      fingerprint !== input.prior_canary_result_fingerprint || fingerprint !== codexRollingFingerprintV01(resultMaterial) ||
+      result.candidate_receipt_fingerprint !== receipt_fingerprint || result.binding_consumed !== true ||
+      result.disposition !== "HOLD_AUTHENTICATED_CANARY_CONTRACT" || result.adapter_settlement_passed !== true ||
+      result.disposable_state_removed !== true || result.owned_processes_remaining !== 0 ||
+      codexRollingFingerprintV01(result.candidate) !== codexRollingFingerprintV01(prior.candidate) ||
+      codexRollingFingerprintV01(result.native) !== codexRollingFingerprintV01(prior.native) ||
+      read(`${historical}.ordinary-canary-claimed`) !== `${receipt_fingerprint}\n` ||
+      !isNewerCodexRollingStableV01(prior.candidate.version, selectPinnedCodexQualifiedRuntimeV01().artifact.version))
+    throw new Error("codex_candidate_reentry_history_invalid");
+  const reentry: NonNullable<CodexRollingReceiptV01["reviewed_reentry"]> = {
+    authorization_ref: input.authorization_ref, reason: "new_host_reported_client_version_rejection",
+    prior_receipt_fingerprint: receipt_fingerprint, prior_canary_result_fingerprint: input.prior_canary_result_fingerprint,
+    requested_model: "gpt-6-astra", requested_effort: "max",
+  };
+  const directory = `${historical}.reviewed-reentry-${codexRollingFingerprintV01(reentry).slice(7)}`;
+  // mkdir is an exclusive persistent reservation, including interrupted gates.
+  // Never remove or reuse it to retry. A future review is a distinct entry.
+  mkdirSync(directory, { mode: 0o700 });
+  return runCodexCandidateCycleV01({ augnes_source: input.augnes_source, evidence_directory: directory },
+    prior.candidate, { provenance: reentry, archive_bytes: input.archive_bytes });
+}
+
+async function runCodexCandidateCycleV01(input: {
+  augnes_source: CodexRollingReceiptV01["augnes_source"];
+  evidence_directory: string;
+}, candidate: CodexRollingIdentityV01, reentry?: {
+  provenance: NonNullable<CodexRollingReceiptV01["reviewed_reentry"]>; archive_bytes: Buffer;
+}): Promise<{ receipt: CodexRollingReceiptV01; receipt_path: string; reused: boolean }> {
+  if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("codex_rolling_platform_unsupported");
+  if (Object.values(input.augnes_source).some((value) => !SHA.test(value))) throw new Error("codex_rolling_augnes_source_invalid");
   const production = selectPinnedCodexQualifiedRuntimeV01({ lane: "ordinary_chatgpt_auth" });
-  const candidate = await discoverCodexRollingStableV01();
   const directory = realpathSync.native(input.evidence_directory);
   const dirStat = lstatSync(input.evidence_directory);
   if (directory !== path.resolve(input.evidence_directory) || !dirStat.isDirectory() || dirStat.isSymbolicLink() || (dirStat.mode & 0o077) !== 0)
@@ -289,6 +359,7 @@ export async function runCodexRollingStableCandidateV01(input: {
     candidate, native: null, attempts: [], delta: null, disposition: "HOLD_INTERRUPTED_OR_INCOMPLETE", authenticated_canary: "not_reached", failure_reason: null,
     cleanup: { disposable_staging_removed: false, process_settled: true, streams_closed: true },
     authority: { candidate_evidence_only: true, qualified: false, production_adoption: false, provider_turn_authorized: false }, receipt_fingerprint: "",
+    ...(reentry ? { reviewed_reentry: reentry.provenance } : {}),
   };
   const persist = (initial = false) => {
     const { receipt_fingerprint: ignored, ...material } = receipt;
@@ -317,7 +388,7 @@ export async function runCodexRollingStableCandidateV01(input: {
       previousVersions.push(previous.candidate.version);
   }
   persist(true); // Exclusive exact-identity claim before any acquisition or launch.
-  if (!previousVersions.every((version) => isNewerCodexRollingStableV01(candidate.version, version))) {
+  if (!reentry && !previousVersions.every((version) => isNewerCodexRollingStableV01(candidate.version, version))) {
     receipt.disposition = "NO_NEWER_STABLE";
     receipt.cleanup.disposable_staging_removed = true;
     persist();
@@ -330,7 +401,7 @@ export async function runCodexRollingStableCandidateV01(input: {
     const extractionRoot = path.join(root, "artifact"), stateParent = path.join(root, "state"), executionRoot = path.join(root, "execution"), emptyPath = path.join(root, "path");
     for (const target of [extractionRoot, stateParent, executionRoot, emptyPath]) mkdirSync(target, { mode: 0o700 });
     await reverifyCodexRollingIdentityV01(candidate);
-    const archive = await boundedFetch(`https://github.com/openai/codex/releases/download/${candidate.release_tag}/${ASSET}`,
+    const archive = reentry?.archive_bytes ?? await boundedFetch(`https://github.com/openai/codex/releases/download/${candidate.release_tag}/${ASSET}`,
       candidate.qualified_provenance_asset.size_bytes, "application/octet-stream", 120_000);
     const native = extractDiscoveredCodexCandidateArchiveV01({ artifact: candidate, archive_bytes: archive, destination: extractionRoot });
     receipt.native = { native_executable_sha256: native.native_executable_sha256,
@@ -450,7 +521,7 @@ interface CanaryStateV01 {
   state: "prepared" | "consumed" | "closed";
   broker_claimed?: boolean;
   assert_source_integrity?: () => void;
-  fixture?: "success" | "config_mismatch" | "user_agent_mismatch" | "server_request" | "effect" | "descendant_cleanup" | "prethread_request" | "provider_mismatch" | "sqlite_mismatch";
+  fixture?: "success" | "config_mismatch" | "user_agent_mismatch" | "server_request" | "effect" | "descendant_cleanup" | "prethread_request" | "provider_mismatch" | "sqlite_mismatch" | "model_mismatch" | "effort_mismatch";
   fixture_file?: { path: string; hash: string };
 }
 const CANARY_BINDINGS_V01 = new WeakMap<CodexCandidateCanaryBindingV01, CanaryStateV01>();
@@ -473,6 +544,10 @@ export async function prepareCodexCandidateCanaryV01(input: {
   const { receipt_fingerprint, ...material } = receipt;
   const selected = selectPinnedCodexQualifiedRuntimeV01({ lane: "ordinary_chatgpt_auth" });
   const probe = receipt.attempts?.[0];
+  if (receipt.reviewed_reentry && (receipt.reviewed_reentry.requested_model !== "gpt-6-astra" ||
+      receipt.reviewed_reentry.requested_effort !== "max" ||
+      receipt.reviewed_reentry.reason !== "new_host_reported_client_version_rejection"))
+    throw new Error("codex_candidate_canary_reentry_binding_invalid");
   if (receipt.receipt_version !== CODEX_ROLLING_CANDIDATE_VERSION_V01 ||
       receipt_fingerprint !== codexRollingFingerprintV01(material) ||
       path.basename(receiptPath) !== `${receipt.candidate.release_tag}-darwin-arm64.json` ||
@@ -615,6 +690,8 @@ export function consumeCodexCandidateCanaryV01(binding: CodexCandidateCanaryBind
     return {
       command: state.command, args: [...prefix, ...CANDIDATE_CONFIG_OVERRIDE_ARGS_V01, "app-server", "--stdio"], environment,
       version: state.receipt.candidate.version,
+      requested_model: state.receipt.reviewed_reentry?.requested_model ?? null,
+      requested_effort: state.receipt.reviewed_reentry?.requested_effort ?? null,
       profile_fingerprint: state.receipt.compatibility_profile_fingerprint, synthetic: Boolean(state.fixture),
       policy_fingerprint: state.receipt.attempts[0]!.observed_policy_fingerprint,
       cleanup: () => removeCanaryStateV01(state),
@@ -626,7 +703,7 @@ export function consumeCodexCandidateCanaryV01(binding: CodexCandidateCanaryBind
  * no caller-supplied executable, environment, credential owner, or launch args. */
 export function emulateCodexCandidateCanaryForTestV01(binding: CodexCandidateCanaryBindingV01, scenario: NonNullable<CanaryStateV01["fixture"]>): void {
   if (process.env.AUGNES_CODEX_ORDINARY_CANDIDATE_TEST_MODE !== "1" ||
-      !["success", "config_mismatch", "user_agent_mismatch", "server_request", "effect", "descendant_cleanup", "prethread_request", "provider_mismatch", "sqlite_mismatch"].includes(scenario))
+      !["success", "config_mismatch", "user_agent_mismatch", "server_request", "effect", "descendant_cleanup", "prethread_request", "provider_mismatch", "sqlite_mismatch", "model_mismatch", "effort_mismatch"].includes(scenario))
     throw new Error("codex_candidate_canary_test_controls_refused");
   const state = canaryStateV01(binding);
   state.fixture = scenario;

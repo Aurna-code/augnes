@@ -6,6 +6,7 @@ import { parse } from "smol-toml";
 
 import { canonicalizeProtocolValueV01, createProtocolSha256V01 } from "@/lib/vnext/protocol-primitives";
 import { inspectNativeHostPhysicalRootIdentityV01 } from "@/lib/vnext/native-host/project-root-identity";
+import { selectPinnedCodexQualifiedRuntimeV01 } from "./codex-qualified-runtime-registry";
 import type { NativeHostPhysicalRootIdentityV01, NativeHostRequestV01 } from "@/types/vnext/native-host-adapter";
 import type { NativeHostTimeoutSchedulerV01 } from "@/lib/vnext/runtime/direct-native-host-round-trip";
 
@@ -30,6 +31,26 @@ const consumed = new WeakSet<CodexScopedTaskV01>();
 export const SCOPED_CODEX_MODEL_V01 = "gpt-6-astra";
 export const SCOPED_CODEX_EFFORT_V01 = "max";
 export const SCOPED_CODEX_CONTRACT_V01 = "codex_synthetic_read_scope.v0.1";
+
+/** Extension compatibility, not ordinary qualification or execution authority.
+ * The ordinary adapter still requires the separate qualified managed selector;
+ * credential-free candidate checks may exercise these exact artifact tuples. */
+export interface CodexScopedRuntimeArtifactV01 {
+  version: string;
+  native_executable_sha256: string;
+  tagged_source_commit: string;
+  compatibility_profile_fingerprint: string;
+}
+export function assertCodexScopedRuntimeArtifactV01(artifact: CodexScopedRuntimeArtifactV01): void {
+  const tuples = [
+    ["0.152.1", "sha256:8194ea3181f330e63023b234b0b231855e5874e0331c5ef7cbc490591497a7bf", "5adb68a49933ae446bf11935662c83dba55a0804"],
+    ["0.153.4", "sha256:b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3", "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"],
+  ];
+  if (artifact.compatibility_profile_fingerprint !== "sha256:a4cfb0e38fd6a2af0d29a467c2c5db2579cdc784e93a820f3482fa2c8a1d663a" ||
+      !tuples.some(([version, hash, source]) => artifact.version === version &&
+        artifact.native_executable_sha256 === hash && artifact.tagged_source_commit === source))
+    refuse("runtime_extension_unqualified");
+}
 
 export class CodexScopedTaskErrorV01 extends Error {
   constructor(readonly code: string) { super(code); this.name = "CodexScopedTaskErrorV01"; }
@@ -250,7 +271,12 @@ export interface ScopedCodexLaunchV01 {
 
 /** Reads local configuration only to suppress sources before process startup.
  * Never returns config contents, credentials, prompts, or personal memory. */
-export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environment: NodeJS.ProcessEnv): ScopedCodexLaunchV01 {
+export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environment: NodeJS.ProcessEnv,
+  runtime: CodexScopedRuntimeArtifactV01 = selectPinnedCodexQualifiedRuntimeV01().artifact): ScopedCodexLaunchV01 {
+  assertCodexScopedRuntimeArtifactV01(runtime);
+  const runtimeVersion = runtime.version; // Detached; no mutable caller binding retained.
+  const disabledFeatures = runtimeVersion === "0.153.4"
+    ? [...DISABLED_FEATURES, "context_management", "mcp_oauth_refresh_coordination"] : DISABLED_FEATURES;
   const m = material(scope);
   const codexHome = path.resolve(environment.CODEX_HOME ?? path.join(environment.HOME ?? os.homedir(), ".codex"));
   const paths = configFiles(codexHome, m.root);
@@ -292,7 +318,7 @@ export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environme
     model: SCOPED_CODEX_MODEL_V01, model_provider: "openai", model_reasoning_effort: SCOPED_CODEX_EFFORT_V01,
     default_permissions: profileName, permissions: { [profileName]: profile }, web_search: "disabled",
     approval_policy: "never", approvals_reviewer: "user",
-    features: { ...Object.fromEntries(DISABLED_FEATURES.map(f => [f, false])), skip_host_skill_discovery: true },
+    features: { ...Object.fromEntries(disabledFeatures.map(f => [f, false])), skip_host_skill_discovery: true },
     memories: { use_memories: false, generate_memories: false },
     mcp_servers: Object.fromEntries([...servers].sort().map(name => [name, { enabled: false }])),
     skills: { bundled: { enabled: false }, include_instructions: false },
@@ -316,7 +342,7 @@ export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environme
     for (const key of ["model", "model_provider", "model_reasoning_effort", "default_permissions", "web_search", "project_doc_max_bytes", "allow_login_shell"])
       if (!equal(c[key], settings[key])) refuse("effective_configuration_mismatch");
     const features = record(c.features);
-    for (const key of DISABLED_FEATURES) {
+    for (const key of disabledFeatures) {
       const val = features[key];
       if (val !== false && (val == null || typeof val !== "object" || record(val).enabled !== false)) refuse("ambient_feature_enabled");
     }
@@ -350,7 +376,7 @@ export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environme
     const r = record(response), thread = record(r.thread);
     assertProfile(r);
     if (r.model !== SCOPED_CODEX_MODEL_V01 || r.modelProvider !== "openai" || r.reasoningEffort !== SCOPED_CODEX_EFFORT_V01 ||
-      r.cwd !== m.root || thread.cwd !== m.root || thread.modelProvider !== "openai" || thread.cliVersion !== "0.152.1" ||
+      r.cwd !== m.root || thread.cwd !== m.root || thread.modelProvider !== "openai" || thread.cliVersion !== runtimeVersion ||
       r.approvalPolicy !== "never" || r.approvalsReviewer !== "user" ||
       record(r.sandbox).type !== "readOnly" || record(r.sandbox).networkAccess !== false ||
       thread.ephemeral !== true || !Array.isArray(thread.turns) || thread.turns.length ||

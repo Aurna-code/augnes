@@ -35,6 +35,8 @@ const scopedScenario = scenario.startsWith("scoped_");
 let scopedConfig = null;
 let scopedPermissions = null;
 const candidateCanaryVersion = process.env.FAKE_CODEX_CANARY_VERSION;
+let candidateRequestedModel = null;
+let candidateRequestedEffort = null;
 const threadId =
   process.env.FAKE_CODEX_THREAD_ID ?? "01900000-0000-7000-8000-000000000001";
 const sessionId =
@@ -537,6 +539,11 @@ async function handle(message) {
       return;
     }
     if (message.method === "thread/start") {
+      if (candidateCanaryScenario) {
+        candidateRequestedModel = message.params?.model ?? null;
+        candidateRequestedEffort = message.params?.config?.model_reasoning_effort ?? null;
+        trace("candidate_model_request", { model: candidateRequestedModel, effort: candidateRequestedEffort });
+      }
       if (scopedScenario && (!scopedConfig || message.params?.permissions !== scopedPermissions ||
           Object.hasOwn(message.params, "sandbox") || message.params?.ephemeral !== true || message.params?.allowProviderModelFallback !== false)) {
         respondError(message.id, -32602, "scoped_thread_policy_required");
@@ -1629,11 +1636,16 @@ function completeDiagnosticFailure() {
   }
   completed = true; turnActive = false;
   persistState({ threadId, sessionId, turnId, status: "failed" });
-  notify("turn/completed", { threadId: name === "foreign_thread" ? "foreign-thread" : threadId,
-    turn: name === "foreign_turn" ? { ...value, id: "foreign-turn" } : value });
-  if (name === "duplicate") notify("turn/completed", { threadId, turn: value });
-  if (name === "conflict") notify("turn/completed", { threadId,
-    turn: { ...value, error: { ...privateFields, codexErrorInfo: "badRequest" } } });
+  const messages = [{ method: "turn/completed", params: { threadId: name === "foreign_thread" ? "foreign-thread" : threadId,
+    turn: name === "foreign_turn" ? { ...value, id: "foreign-turn" } : value } }];
+  if (name === "duplicate") messages.push({ method: "turn/completed", params: { threadId, turn: value } });
+  if (name === "conflict") messages.push({ method: "turn/completed", params: { threadId,
+    turn: { ...value, error: { ...privateFields, codexErrorInfo: "badRequest" } } } });
+  // The accepted-terminal contract settles already admitted notifications.
+  // One write exercises that batch boundary; separate writes race acceptance
+  // and do not establish a before-acceptance conflict.
+  messages.forEach(message => trace("sent", minimized(message)));
+  process.stdout.write(`${messages.map(message => JSON.stringify(message)).join("\n")}\n`);
 }
 
 function completeInterrupted() {
@@ -1781,7 +1793,8 @@ function threadResponse(options = {}) {
   const isolated = isolatedAuthScenario || candidateCanaryScenario || scopedScenario;
   return {
     thread: thread({ ...options, ephemeral: isolated }),
-    model: scopedScenario && scenario !== "scoped_model_mismatch" ? "gpt-6-astra" : "configured-default",
+    model: candidateCanaryScenario && scenario !== "candidate_canary_model_mismatch" ? candidateRequestedModel ?? "configured-default" :
+      scopedScenario && scenario !== "scoped_model_mismatch" ? "gpt-6-astra" : "configured-default",
     modelProvider:
       isolated && scenario !== "isolated_auth_provider_mismatch"
         ? "openai"
@@ -1801,7 +1814,8 @@ function threadResponse(options = {}) {
       excludeTmpdirEnvVar: true,
       excludeSlashTmp: true,
     },
-    reasoningEffort: scopedScenario && scenario !== "scoped_effort_mismatch" ? "max" : null,
+    reasoningEffort: candidateCanaryScenario && scenario !== "candidate_canary_effort_mismatch" ? candidateRequestedEffort :
+      scopedScenario && scenario !== "scoped_effort_mismatch" ? "max" : null,
     ...(scopedScenario ? { activePermissionProfile: { id: scenario === "scoped_profile_mismatch" ? "wrong" : scopedPermissions } } : {}),
   };
 }

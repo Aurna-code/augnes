@@ -414,3 +414,52 @@ owner includes it as well. No authenticated diagnostic or study runs in these
 tests. Rollback removes this opt-in hook/helper while preserving local evidence
 and the prior category-only route. No dependency, auth/config/runtime selection,
 sandbox, registry, qualification, packaging or Core/schema change is required.
+# Managed-runtime candidate compatibility addendum (#1234)
+
+The [reviewed 0.153.4 re-entry](https://github.com/hynk-studio/augnes/issues/1234#issuecomment-5600880587)
+is separate from every historical study and the pending post-adoption incident.
+The original task material, cutoff, packet/GuideBrief preparation and consumed
+attempts are unchanged. No new scope, X result, successor or B exposure follows
+from this addendum.
+
+The scoped extension admits two closed artifact tuples, not a semver range:
+
+| Version | Native SHA-256 | Tagged source |
+| --- | --- | --- |
+| 0.152.1 | `8194ea3181f330e63023b234b0b231855e5874e0331c5ef7cbc490591497a7bf` | `5adb68a49933ae446bf11935662c83dba55a0804` |
+| 0.153.4 | `b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3` | `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a` |
+
+Both require the unchanged implemented compatibility profile
+`sha256:a4cfb0e38fd6a2af0d29a467c2c5db2579cdc784e93a820f3482fa2c8a1d663a`.
+The actual ordinary adapter must additionally select an eligible qualified
+managed artifact through its existing owner. Extension compatibility does not
+qualify a candidate or make a candidate grant usable as a scoped-task grant.
+Thread readback must match the selected tuple's exact CLI version.
+
+The 0.152.1 launch projection is unchanged. For 0.153.4 only, the two newly
+introduced features `context_management` and `mcp_oauth_refresh_coordination`
+are explicitly disabled before startup and checked in effective readback.
+Upstream initialize/thread-start/turn-start/error/config-read schemas, shell
+filter/merge/command-environment and macOS seatbelt files are unchanged at the
+two source commits. Changed permission-context materialization and thread model
+readback were reviewed; actual 0.153.4 credential-free checks covered named
+permissions, final filtering, approved reads, denied held reads, symlink escape,
+writes, command network and finite cleanup. This is not cold isolation, Strict
+qualification or evidence of an actual scoped model task.
+
+**Current disposition: HOLD / not_run.** On 2026-09-09 the candidate broker's
+supported file-backed source was absent while ordinary storage was configured
+as keyring. The new candidate canary and retained incident were not executed.
+No new qualification or registry/production-selection change is prepared on
+the strength of model-free checks alone. The separate authentication-contract
+boundary must be reviewed before using that candidate allowance. Production
+remains managed 0.152.1. Its retained rollback eligibility does not promise
+restored Astra compatibility.
+
+After the required candidate evidence and reviewed adoption, the pending
+one-turn incident must bind the then-current exact source, managed executable,
+configuration and fresh normal scope. It continues to request `gpt-6-astra` /
+`max`, use the developer-readable incident consumer, and retain the 180,000 ms
+ceiling, smaller RPC/settlement limits, no retry and no X-to-B progression.
+This task does not execute or renew that allowance. No historical fingerprint
+is rewritten or transferred to the new source.

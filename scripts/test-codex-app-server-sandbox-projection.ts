@@ -7,10 +7,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { genericCliBuilderInputFixture } from "@/fixtures/vnext/protocol/task-context-packet-v0-1";
-import { createCodexAppServerAdapterV01, type CodexAppServerAdapterOptionsV01 } from "@/lib/vnext/native-host/codex-app-server-adapter";
+import { createCodexAppServerAdapterV01, CODEX_APP_SERVER_ADAPTER_VERSION_V01, type CodexAppServerAdapterOptionsV01 } from "@/lib/vnext/native-host/codex-app-server-adapter";
 import { assertCodexScopedTaskCurrentV01, createCodexScopedTaskV01, createCodexFeasibilityWindowV01, prepareScopedCodexLaunchV01 } from "@/lib/vnext/native-host/codex-scoped-task";
 import { inspectNativeHostPhysicalRootIdentityV01 } from "@/lib/vnext/native-host/project-root-identity";
 import { resolveCodexProductionRuntimeV01 } from "@/lib/vnext/native-host/codex-production-runtime";
+import { extractDiscoveredCodexCandidateArchiveV01 } from "@/lib/vnext/native-host/codex-managed-runtime-store";
+import { selectPinnedCodexQualifiedRuntimeV01 } from "@/lib/vnext/native-host/codex-qualified-runtime-registry";
+import { observeReviewedCandidateCodexAppServerUserAgentV01 } from "@/lib/vnext/native-host/codex-app-server-user-agent";
 import { stopOwnedProcessTreeV01 } from "@/lib/vnext/native-host/owned-process-tree";
 import { LiveNativeHostRunServiceV01 } from "@/lib/vnext/runtime/live-native-host-run-service";
 import { scheduleNativeHostTimeoutV01 } from "@/lib/vnext/runtime/direct-native-host-round-trip";
@@ -499,6 +502,16 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
   await assert.rejects(assertCodexScopedTaskCurrentV01({ ...scope }, request), /not_source_owned/);
   await assert.rejects(assertCodexScopedTaskCurrentV01(scope, { ...request, packet: { ...request.packet, packet_id: "wrong" } }), /binding_mismatch/);
   const launch = prepareScopedCodexLaunchV01(scope, environment);
+  const candidate = { version: "0.153.4", tagged_source_commit: "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    native_executable_sha256: "sha256:b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3",
+    compatibility_profile_fingerprint: selectPinnedCodexQualifiedRuntimeV01().compatibility_profile.fingerprint };
+  const candidateLaunch = prepareScopedCodexLaunchV01(scope, environment, candidate);
+  assert.equal((candidateLaunch.settings.features as Record<string, unknown>).context_management, false);
+  assert.equal((candidateLaunch.settings.features as Record<string, unknown>).mcp_oauth_refresh_coordination, false);
+  assert.equal((launch.settings.features as Record<string, unknown>).context_management, undefined, "old extension projection stays exact");
+  for (const changed of [{ version: "0.153.5" }, { version: "0.152.1" }, { native_executable_sha256: "sha256:wrong" },
+    { tagged_source_commit: "0".repeat(40) }, { compatibility_profile_fingerprint: "sha256:wrong" }])
+    assert.throws(() => prepareScopedCodexLaunchV01(scope, environment, { ...candidate, ...changed }), /runtime_extension_unqualified/);
   writeFileSync(configFile, '[shell_environment_policy.set]\nUNAPPROVED="synthetic-only"\n');
   assert.throws(() => launch.assert_sources_current(), /configuration_changed/);
   scopedShellEnvironmentV01(scope, environment, configFile);
@@ -516,7 +529,8 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
   await assert.rejects(assertCodexScopedTaskCurrentV01(scope), /file_unavailable_or_changed/);
   rmSync(path.join(stage, "TASK.txt")); writeFileSync(path.join(stage, "TASK.txt"), original);
   await clockBoundaryV01(scopeFor, request);
-  if (process.argv.includes("--pinned-host-sandbox")) await pinnedSandboxV01(testRoot, stage, held, environment, await scopeFor());
+  if (process.argv.includes("--pinned-host-sandbox") || process.argv.includes("--candidate-01534-archive"))
+    await pinnedSandboxV01(testRoot, stage, held, environment, await scopeFor());
   console.log(`codex scoped projection: ${scenarios.length} fake-host scenarios; source/ambient/clock refusals passed; study calls=0`);
 }
 
@@ -609,7 +623,31 @@ async function clockBoundaryV01(scopeFor: (stage?: 1 | 2, packet?: NativeHostReq
 
 async function pinnedSandboxV01(testRoot: string, stage: string, held: string, environment: NodeJS.ProcessEnv, scope: Awaited<ReturnType<typeof createCodexScopedTaskV01>>): Promise<void> {
   assert.equal(process.platform, "darwin", "This explicit check requires the pinned macOS host");
-  const identity = resolveCodexProductionRuntimeV01(); // Read-only selection; no install, login, qualification, or model turn.
+  // An explicit offline check of ONE exact candidate archive, not PATH or a
+  // forged qualified selection. The production/default check stays unchanged.
+  const archiveIndex = process.argv.indexOf("--candidate-01534-archive");
+  const runtime = archiveIndex < 0 ? selectPinnedCodexQualifiedRuntimeV01().artifact : {
+    version: "0.153.4", tagged_source_commit: "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    native_executable_sha256: "sha256:b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3",
+    compatibility_profile_fingerprint: "sha256:a4cfb0e38fd6a2af0d29a467c2c5db2579cdc784e93a820f3482fa2c8a1d663a",
+  };
+  let executable: string;
+  if (archiveIndex < 0) executable = resolveCodexProductionRuntimeV01().canonical_native_executable;
+  else {
+    assert.equal(process.argv.includes("--pinned-host-sandbox"), false);
+    assert.ok(process.argv[archiveIndex + 1]);
+    const destination = path.join(testRoot, "candidate-artifact"); mkdirSync(destination, { mode: 0o700 });
+    const native = extractDiscoveredCodexCandidateArchiveV01({ artifact: {
+      version: runtime.version, platform: "darwin", architecture: "arm64", upstream_target_triple: "aarch64-apple-darwin",
+      qualified_provenance_asset: { acquisition_route: "standalone_release_tarball", asset_id: 545043537,
+        asset_name: "codex-aarch64-apple-darwin.tar.gz", size_bytes: 87323149,
+        digest: "sha256:8cf911ea676523bfb2121ec561848d2aba564890ad536db4d8a3353f2b9850b1",
+        digest_mechanism: "official_github_release_asset_digest_sha256" },
+    }, archive_bytes: readFileSync(process.argv[archiveIndex + 1]!), destination });
+    assert.equal(native.native_executable_sha256, runtime.native_executable_sha256);
+    assert.equal(native.extracted_native_size_bytes, 220584000);
+    executable = native.native_executable;
+  }
   const startupMarker = path.join(testRoot, "unapproved-mcp-started");
   const configFile = path.join(environment.CODEX_HOME!, "config.toml");
   const authFile = path.join(environment.CODEX_HOME!, "auth.json");
@@ -618,16 +656,16 @@ async function pinnedSandboxV01(testRoot: string, stage: string, held: string, e
   for (const filter of ['include_only=["*"]\nexclude=["PATH"]', '[shell_environment_policy.filters]\n"*"="include"']) {
     writeFileSync(configFile, `[shell_environment_policy]\ninherit="all"\nexperimental_use_profile=true\n${filter}\n[shell_environment_policy.set]\nPATH="/synthetic/unapproved"\nSYNTHETIC_SECRET="secret-like-sentinel"\nORDINARY_SENTINEL="ordinary-sentinel"\nBASH_ENV="/synthetic/no-profile"\nCODEX_UNAPPROVED="not-runtime-metadata"\n[features]\nmemories=true\nchronicle=true\nplugins=true\n[mcp_servers.inherited]\ncommand="/usr/bin/touch"\nargs=[${JSON.stringify(startupMarker)}]\nenabled=true\n`);
     const original = readFileSync(configFile);
-    await pinnedConfigurationV01(identity.canonical_native_executable, prepareScopedCodexLaunchV01(scope, environment), environment, stage, testRoot);
+    await pinnedConfigurationV01(executable, prepareScopedCodexLaunchV01(scope, environment, runtime), environment, stage, testRoot, runtime.version);
     assert.deepEqual(readFileSync(configFile), original, "Diagnostic must leave original synthetic config unchanged");
     assert.deepEqual(readFileSync(authFile), authBefore, "Diagnostic must leave original synthetic auth unchanged");
   }
-  const launch = prepareScopedCodexLaunchV01(scope, environment);
+  const launch = prepareScopedCodexLaunchV01(scope, environment, runtime);
   assert.equal(statExistsV01(startupMarker), false, "Inherited MCP must be disabled before process startup");
   // The pinned diagnostic subcommand explicitly does not support strict-config.
   // Its named permission/profile projection is the same; App Server retains
   // strict-config and its separate configuration/handshake refusal checks.
-  const command = (args: string[], afterPolicyInstalled?: () => void) => boundedCommandV01(identity.canonical_native_executable, [...launch.args.filter(arg => arg !== "--strict-config"), "sandbox", "--permission-profile", launch.profile_name, "--cd", stage, "--", ...args], environment, stage, afterPolicyInstalled);
+  const command = (args: string[], afterPolicyInstalled?: () => void) => boundedCommandV01(executable, [...launch.args.filter(arg => arg !== "--strict-config"), "sandbox", "--permission-profile", launch.profile_name, "--cd", stage, "--", ...args], environment, stage, afterPolicyInstalled);
   const allowed = await command(["/bin/cat", path.join(stage, "TASK.txt")]);
   assert.equal(allowed.code, 0, allowed.stderr);
   assert.equal(allowed.stdout, "Synthetic approved read only.\n");
@@ -662,14 +700,14 @@ async function pinnedSandboxV01(testRoot: string, stage: string, held: string, e
     assert.notEqual(network.code, 0); assert.equal(requests, 1);
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   assert.equal(statExistsV01(startupMarker), false);
-  console.log("pinned 0.152.1 macOS sandbox: approved read allowed; held read, symlink, write, loopback command network denied; credential-free; model turns=0; cleanup settled");
+  console.log(`exact ${runtime.version} macOS sandbox: approved read allowed; held read, symlink, write, loopback command network denied; credential-free; model turns=0; cleanup settled`);
 }
 
 function statExistsV01(filename: string): boolean {
   try { statSync(filename); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 
-async function pinnedConfigurationV01(executable: string, launch: ReturnType<typeof prepareScopedCodexLaunchV01>, environment: NodeJS.ProcessEnv, stage: string, testRoot: string): Promise<void> {
+async function pinnedConfigurationV01(executable: string, launch: ReturnType<typeof prepareScopedCodexLaunchV01>, environment: NodeJS.ProcessEnv, stage: string, testRoot: string, version: string): Promise<void> {
   // Credential-free protocol/configuration check, with an outer OS network
   // denial even if a launch suppression regresses. Never start a thread/turn.
   // The diagnostic's synthetic HOME and file-only store cannot select the
@@ -696,7 +734,8 @@ async function pinnedConfigurationV01(executable: string, launch: ReturnType<typ
             const message = JSON.parse(line);
             if (message.error) throw new Error("scoped_pinned_rpc_refused");
             if (message.id === 1) {
-              assert.match(message.result.userAgent, /0\.152\.1/);
+              observeReviewedCandidateCodexAppServerUserAgentV01({ raw_user_agent: message.result.userAgent,
+                expected_client_name: "augnes", expected_client_version: CODEX_APP_SERVER_ADAPTER_VERSION_V01, expected_codex_cli_version: version });
               send({ method: "initialized", params: {} });
               send({ id: 2, method: "config/read", params: { includeLayers: true } });
             } else if (message.id === 2) {
@@ -726,7 +765,7 @@ async function pinnedConfigurationV01(executable: string, launch: ReturnType<typ
           }
         } catch (error) { reject(error); }
       });
-      send({ id: 1, method: "initialize", params: { clientInfo: { name: "augnes", version: "scoped-model-free-test" }, capabilities: { experimentalApi: true } } });
+      send({ id: 1, method: "initialize", params: { clientInfo: { name: "augnes", version: CODEX_APP_SERVER_ADAPTER_VERSION_V01 }, capabilities: { experimentalApi: true } } });
     });
   } finally {
     clearTimeout(timer); child.stdin.destroy();

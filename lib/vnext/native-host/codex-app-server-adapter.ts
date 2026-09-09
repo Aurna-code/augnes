@@ -1950,24 +1950,20 @@ class CodexAppServerInvocationV01 {
       }
       const launch =
         this.options.launch ?? resolveDefaultCodexAppServerLaunchV01();
+      const selectedRuntime = launch.qualified_runtime_selection ??
+        selectPinnedCodexQualifiedRuntimeV01({ lane: "ordinary_chatgpt_auth" });
+      assertCurrentCodexQualifiedRuntimeSelectionV01(selectedRuntime);
+      assertCodexAppServerCompatibilityImplementedV01(selectedRuntime);
       if (this.options.scoped_task) {
         // Custom transport is solely an existing credential-free fixture seam.
         if (this.options.launch && !(launch.environment?.NODE_ENV === "test" && launch.command === process.execPath &&
             launch.prefix_args?.length === 1 && launch.prefix_args[0] === path.join(process.cwd(), "scripts/fixtures/fake-codex-app-server.mjs")))
           throw new Error("codex_scoped_unmanaged_launch_refused");
         await consumeScopedCodexTaskV01(this.options.scoped_task, this.request);
-        this.scopedLaunch = prepareScopedCodexLaunchV01(this.options.scoped_task, launch.environment ?? boundedCodexChildEnvironmentV01(process.env, false));
+        this.scopedLaunch = prepareScopedCodexLaunchV01(this.options.scoped_task,
+          launch.environment ?? boundedCodexChildEnvironmentV01(process.env, false), selectedRuntime.artifact);
         if (this.control.cancellation_signal.aborted) throw new Error("codex_scoped_cancelled_before_spawn");
       }
-      const selectedRuntime =
-        launch.qualified_runtime_selection ??
-        selectPinnedCodexQualifiedRuntimeV01({
-          lane: "ordinary_chatgpt_auth",
-        });
-      assertCurrentCodexQualifiedRuntimeSelectionV01(selectedRuntime);
-      assertCodexAppServerCompatibilityImplementedV01(selectedRuntime);
-      if (this.options.scoped_task && selectedRuntime.artifact.version !== "0.152.1")
-        throw new Error("codex_scoped_runtime_extension_unqualified");
       if (launch.production_runtime_identity) {
         assertCodexProductionRuntimeIdentityUnchangedV01(
           launch.production_runtime_identity,
@@ -2162,6 +2158,8 @@ class CodexAppServerInvocationV01 {
             this.qualifiedRuntimeSelection.compatibility_profile.semantics
               .server_requests.approvals_reviewer,
           ...(this.scopedLaunch ? { permissions: this.scopedLaunch.profile_name, model: SCOPED_CODEX_MODEL_V01, modelProvider: "openai" } : { sandbox: this.sandboxProjection.thread_sandbox }),
+          ...(this.candidateCanary?.requested_model ? { model: this.candidateCanary.requested_model,
+            modelProvider: "openai", config: { model_reasoning_effort: this.candidateCanary.requested_effort } } : {}),
           ephemeral: this.options.isolated_authenticated_execution || this.candidateCanary || this.scopedLaunch
             ? true
             : false,
@@ -2176,6 +2174,10 @@ class CodexAppServerInvocationV01 {
     if (this.candidateCanary) {
       const thread = objectV01(response.thread, "codex_thread_start_binding_invalid");
       if (response.modelProvider !== "openai" || thread.modelProvider !== "openai" ||
+          (this.candidateCanary.requested_model && (response.model !== this.candidateCanary.requested_model ||
+            response.reasoningEffort !== this.candidateCanary.requested_effort ||
+            (thread.model != null && thread.model !== this.candidateCanary.requested_model) ||
+            (thread.reasoningEffort != null && thread.reasoningEffort !== this.candidateCanary.requested_effort))) ||
           thread.ephemeral !== true || thread.cliVersion !== this.candidateCanary.version ||
           !Array.isArray(thread.turns) || thread.turns.length !== 0 ||
           !Array.isArray(response.instructionSources) || response.instructionSources.length !== 0 ||
@@ -2520,6 +2522,8 @@ class CodexAppServerInvocationV01 {
             this.qualifiedRuntimeSelection.compatibility_profile.semantics
               .server_requests.approvals_reviewer,
           ...(this.scopedLaunch ? { permissions: this.scopedLaunch.profile_name, model: SCOPED_CODEX_MODEL_V01, effort: SCOPED_CODEX_EFFORT_V01, approvalPolicy: "never" } : { sandboxPolicy: this.sandboxProjection.turn_sandbox_policy }),
+          ...(this.candidateCanary?.requested_model ? { model: this.candidateCanary.requested_model,
+            effort: this.candidateCanary.requested_effort } : {}),
           outputSchema: CODEX_HOST_STRUCTURED_RESULT_SCHEMA_V01,
         },
       ),
