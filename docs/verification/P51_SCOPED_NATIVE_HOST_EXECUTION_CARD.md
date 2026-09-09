@@ -186,3 +186,115 @@ never fall back to the broader default profile.
 **Recommendation: review the bounded implementation; keep live execution
 BLOCKED/not_run.** P1/P5.1a closeouts, #1209/#1215 open status, #1221,
 qualification/HOLD, #1130/RW1B and CW1 dispositions remain unchanged.
+
+## Prospective failed-terminal diagnostic (#1234)
+
+The preparation and `not_run` language above is historical. The separately
+authorized attempt is consumed and terminal: one submitted turn, a settled
+`codex_turn_failed`, unknown backend usage, no completed X/B or Transition.
+The accepted postmortem is C: specific error information was not retained.
+This diagnostic connection neither reconstructs that error nor authorizes
+another attempt or use of its unused second slot. Original local artifacts,
+cutoff, receipts, terminal freeze and separate postmortem freeze stay unchanged.
+
+The adapter projects only after `finishFromTerminal` accepts a failed terminal,
+after the existing same-batch notification/conflict and stop checks. It carries
+one `failed_terminal_diagnostic` on the existing final `settled` observation.
+The earlier `terminal_observed` event is unchanged; it can precede a conflict
+and must not be interpreted as accepted diagnosis. A diagnostic is not proof of
+successful cleanup: `settlement_failed` and the actual settlement promise still
+own that result. Completed/interrupted turns have no failed-terminal diagnostic.
+
+Retained fields are:
+
+- `phase=accepted_failed_terminal`; exact source `turn/completed`, `thread/read`
+  or `thread/resume`, according to the existing terminal producer;
+- the existing request source binding (request ID plus request, packet-ref,
+  packet, physical-root-scope and operation-shape fingerprints), joined to the
+  observer's actual run/process/thread/turn IDs and time;
+- `error_field`: absent, null, object or malformed;
+- `category_disposition`: unavailable, absent, null, recognized, unrecognized
+  or malformed, with a closed recognized category or null;
+- `http_status_disposition`: not_applicable, absent, null, valid or invalid,
+  with an integer 100–599 only from a defined tagged HTTP variant, or null.
+
+The source is pinned upstream `5adb68a49933ae446bf11935662c83dba55a0804`,
+`app-server-protocol/schema/typescript/v2/TurnError.ts` and `CodexErrorInfo.ts`.
+Both string and tagged-object categories are supported. For example, synthetic
+`unauthorized` yields recognized/unauthorized and no HTTP status; synthetic
+`{httpConnectionFailed:{httpStatusCode:429}}` yields recognized/
+httpConnectionFailed and valid/429. These are host-reported categories, not
+root-cause findings. Legitimate `other` remains recognized/other; an unknown
+variant yields unrecognized/null without retaining its name. A string `"429"`
+is invalid status, not coerced. Missing terminal error information says nothing
+about whether an earlier standalone error notification occurred.
+
+No error message, additionalDetails, misalignment explanation, payload, prompt,
+stack, header, URL, credentials, arbitrary keys or hashes of discarded private
+values enter the projection. Extraction failure produces only the separate
+constant `failed_terminal_diagnostic_capture_failure=projection_failed`, with
+no change to the accepted failure. Existing terminal fingerprints and generic
+result/receipt, optional standalone error notifications, registry, qualification,
+cancellation, settlement and retry semantics are unchanged.
+
+### Local consumer connection and cleanup
+
+The executed local operator's recorder used
+`event('adapter', {stage, ...observation})` and synchronous JSONL append. Its
+frozen script is historical evidence and is not edited. The reviewed reusable
+connection is now `createRecordedCodexAppServerAdapterV01` in
+`scripts/codex-app-server-observation-recorder.ts`. It connects that same
+observation-to-JSONL shape directly to the adapter. It is an optional local
+collector, not a new desktop Start control or automatic production activation.
+
+For a separately authorized future disposable invocation, the existing service
+factory supplies the actual scope to this connection:
+
+```ts
+adapter_factory: (actualScope) => {
+  const capture = createRecordedCodexAppServerAdapterV01({
+    directory: freshInvocationEvidenceDirectory,
+    stage,
+    adapter_options: {
+      scoped_task: actualScope,
+      observe: existingOperatorObservationHandler,
+    },
+  });
+  captures.push(capture);
+  return capture.adapter;
+}
+```
+
+Use a fresh operator-owned capture directory per invocation, outside the worker
+scope. Complete the existing service shutdown/settlement in `try/finally`, then
+call `closeCapture()` even if shutdown failed. Include its returned status in
+the local terminal report separately from host cleanup. Read back `events.jsonl`
+and `adapter-capture-status.json` after shutdown; the recorder does not create
+a run, authorize Start, close a DB or attest cleanup. No historical directory,
+authorization or execution window can be reused by this example.
+
+The collector retains at most 64 observations of at most 16 KiB each; the
+diagnostic appears at most once per invocation. It creates files exclusively
+and never overwrites an existing attempt. Create/write/size/count failures
+stop capture with a closed public reason, not a private exception string.
+Status-artifact write failure is returned explicitly and must be reported by
+the caller; no artifact is claimed when writing failed. The operator's own
+observer remains outside the recorder's I/O catch and keeps its existing policy.
+
+Model-free evidence uses the existing fake host and finite adapter lifecycle:
+projection → observer → this collector → settled shutdown → disk readback,
+including secret-like exclusions and malformed/foreign/conflicting/duplicate
+cases. The normal live-service test owner additionally exercises two synthetic
+failures through persisted generic receipt, shutdown and capture readback. These
+are repository tests, not authenticated study executions or reproductions of
+the historical cause. Focused capture checks are available through
+`test-codex-app-server-sandbox-projection.ts --failed-terminal-diagnostic-only`;
+the default suite retains all its original sandbox responsibilities.
+
+Compatibility is an additive internal observation field and optional local
+recorder. No dependency, Core/wire schema, migration, auth/configuration,
+runtime selection, sandbox, smol-toml or packaging change is involved. Rollback
+removes this diagnostic/collector connection while preserving already written
+local evidence; generic failed-turn behavior remains available. Missing,
+unrecognized or `other` diagnostics can still leave the cause unresolved.
+Any future live execution requires separate authorization and distinct evidence.

@@ -382,6 +382,92 @@ export interface CodexAppServerAdapterObservationV01 {
   active_server_request_count: number;
   recent_resolved_server_request_count: number;
   public_reason?: string;
+  // Emitted once, on settled, only after the existing terminal owner accepts
+  // a failed turn (including same-batch conflict checks). Not task authority
+  // or proof that settlement succeeded; settlement_failed remains separate.
+  failed_terminal_diagnostic?: CodexFailedTerminalDiagnosticV01;
+  failed_terminal_diagnostic_capture_failure?: "projection_failed";
+}
+
+// Pinned 5adb68a49933ae446bf11935662c83dba55a0804:
+// app-server-protocol/schema/typescript/v2/{TurnError,CodexErrorInfo}.ts.
+const CODEX_ERROR_STRINGS_V01 = [
+  "contextWindowExceeded", "sessionBudgetExceeded", "usageLimitExceeded",
+  "rateLimitExceeded", "serverOverloaded", "cyberPolicy",
+  "misalignmentPolicyViolation", "internalServerError", "unauthorized",
+  "badRequest", "threadRollbackFailed", "sandboxError", "other",
+] as const;
+const CODEX_HTTP_ERRORS_V01 = [
+  "httpConnectionFailed", "responseStreamConnectionFailed",
+  "responseStreamDisconnected", "responseTooManyFailedAttempts",
+] as const;
+type CodexTerminalSourceV01 = "turn/completed" | "thread/read" | "thread/resume";
+export interface CodexFailedTerminalDiagnosticV01 {
+  phase: "accepted_failed_terminal";
+  source: CodexTerminalSourceV01;
+  request_source_binding: CodexAppServerRequestSourceBindingV01;
+  error_field: "absent" | "null" | "object" | "malformed";
+  category_disposition: "unavailable" | "absent" | "null" | "recognized" | "unrecognized" | "malformed";
+  category: typeof CODEX_ERROR_STRINGS_V01[number] | typeof CODEX_HTTP_ERRORS_V01[number] | "activeTurnNotSteerable" | null;
+  http_status_disposition: "not_applicable" | "absent" | "null" | "valid" | "invalid";
+  http_status: number | null;
+}
+
+// No error text, arbitrary names, coercion, serialization or payload hashes.
+// Only this fixed projection can cross the optional observation boundary.
+function projectFailedTerminalDiagnosticV01(
+  turn: Record<string, unknown>, source: CodexTerminalSourceV01,
+  request: NativeHostRequestV01,
+): CodexFailedTerminalDiagnosticV01 {
+  const diagnostic: CodexFailedTerminalDiagnosticV01 = {
+    phase: "accepted_failed_terminal", source,
+    request_source_binding: createCodexAppServerRequestSourceBindingV01(request),
+    error_field: "absent", category_disposition: "unavailable", category: null,
+    http_status_disposition: "not_applicable", http_status: null,
+  };
+  if (!Object.hasOwn(turn, "error")) return diagnostic;
+  if (turn.error === null) { diagnostic.error_field = "null"; return diagnostic; }
+  if (!isObjectV01(turn.error)) { diagnostic.error_field = "malformed"; return diagnostic; }
+  diagnostic.error_field = "object";
+  const error = turn.error;
+  if (!Object.hasOwn(error, "codexErrorInfo")) { diagnostic.category_disposition = "absent"; return diagnostic; }
+  const info = error.codexErrorInfo;
+  if (info === null) { diagnostic.category_disposition = "null"; return diagnostic; }
+  if (typeof info === "string") {
+    const category = CODEX_ERROR_STRINGS_V01.find(value => value === info);
+    diagnostic.category_disposition = category ? "recognized" :
+      CODEX_HTTP_ERRORS_V01.some(value => value === info) || info === "activeTurnNotSteerable" ? "malformed" : "unrecognized";
+    diagnostic.category = category ?? null;
+    return diagnostic;
+  }
+  diagnostic.category_disposition = "malformed";
+  if (!isObjectV01(info)) return diagnostic;
+  // Count at most two keys. Never retain a key or inspect unknown/private data.
+  let keys = 0;
+  for (const key in info) if (Object.hasOwn(info, key) && ++keys > 1) return diagnostic;
+  if (keys !== 1) return diagnostic;
+  const category = CODEX_HTTP_ERRORS_V01.find(value => Object.hasOwn(info, value));
+  if (category) {
+    const value = info[category];
+    if (!isObjectV01(value)) return diagnostic;
+    diagnostic.category = category;
+    diagnostic.category_disposition = "recognized";
+    if (!Object.hasOwn(value, "httpStatusCode")) diagnostic.http_status_disposition = "absent";
+    else if (value.httpStatusCode === null) diagnostic.http_status_disposition = "null";
+    else if (typeof value.httpStatusCode === "number" && Number.isInteger(value.httpStatusCode) && value.httpStatusCode >= 100 && value.httpStatusCode <= 599) {
+      diagnostic.http_status_disposition = "valid";
+      diagnostic.http_status = value.httpStatusCode;
+    } else diagnostic.http_status_disposition = "invalid";
+  } else if (Object.hasOwn(info, "activeTurnNotSteerable")) {
+    const value = info.activeTurnNotSteerable;
+    if (isObjectV01(value) && (value.turnKind === "review" || value.turnKind === "compact")) {
+      diagnostic.category_disposition = "recognized";
+      diagnostic.category = "activeTurnNotSteerable";
+    }
+  } else if (!CODEX_ERROR_STRINGS_V01.some(value => Object.hasOwn(info, value))) {
+    diagnostic.category_disposition = "unrecognized";
+  }
+  return diagnostic;
 }
 
 export interface CodexAppServerAdapterOptionsV01 {
@@ -1577,6 +1663,8 @@ class CodexAppServerInvocationV01 {
   private turnStartSent = false;
   private packetDeliveryInitiated = false;
   private terminalObserved: CodexTurnTerminalV01 | null = null;
+  private failedTerminalDiagnostic: CodexFailedTerminalDiagnosticV01 | undefined;
+  private failedTerminalDiagnosticCaptureFailure: "projection_failed" | undefined;
   private cleanupSettled = false;
   private fatalError: Error | null = null;
   private isolatedAuthObservation: CodexIsolatedAuthObservationV01 | null =
@@ -2193,7 +2281,7 @@ class CodexAppServerInvocationV01 {
         host_refs: this.currentHostRefs(),
         bounded_metadata: { resumed: true, terminal_read: true },
       });
-      this.resolveTerminalFromTurn(readTurn);
+      this.resolveTerminalFromTurn(readTurn, "thread/read");
       this.observe("thread_resumed");
       return;
     }
@@ -2232,7 +2320,7 @@ class CodexAppServerInvocationV01 {
         status ?? "",
       )
     ) {
-      this.resolveTerminalFromTurn(matchingTurn);
+      this.resolveTerminalFromTurn(matchingTurn, "thread/resume");
     } else if (
       status !== CURRENT_THREAD_TURN_COMPATIBILITY_V01.nonterminal_status
     ) {
@@ -2511,7 +2599,7 @@ class CodexAppServerInvocationV01 {
       return;
     }
     if (method === "turn/completed") {
-      this.resolveTerminalFromTurn(value.turn);
+      this.resolveTerminalFromTurn(value.turn, "turn/completed");
       return;
     }
     if (method === "thread/status/changed") {
@@ -3089,7 +3177,7 @@ class CodexAppServerInvocationV01 {
     });
   }
 
-  private resolveTerminalFromTurn(value: unknown): void {
+  private resolveTerminalFromTurn(value: unknown, source: CodexTerminalSourceV01): void {
     const turn = objectV01(value, "codex_turn_completed_invalid");
     if (this.candidateCanary && (!Array.isArray(turn.items) || turn.items.some((item) =>
       !isObjectV01(item) || !["userMessage", "agentMessage", "reasoning"].includes(String(item.type)))))
@@ -3111,7 +3199,7 @@ class CodexAppServerInvocationV01 {
       }
       return;
     }
-    const terminal = { turn, status, fingerprint } as CodexTurnTerminalV01;
+    const terminal = { turn, status, fingerprint, source } as CodexTurnTerminalV01;
     this.terminalObserved = terminal;
     this.observe("terminal_observed", status);
     this.terminalDeferred.resolve(terminal);
@@ -3143,9 +3231,17 @@ class CodexAppServerInvocationV01 {
       );
       return;
     }
-    this.resultDeferred.resolve(
-      this.buildBoundaryResult("failed", "codex_turn_failed"),
-    );
+    if (this.options.observe) {
+      try {
+        this.failedTerminalDiagnostic = projectFailedTerminalDiagnosticV01(
+          terminal.turn, terminal.source, this.request,
+        );
+      } catch {
+        // Optional extraction cannot change the accepted failure or its cleanup.
+        this.failedTerminalDiagnosticCaptureFailure = "projection_failed";
+      }
+    }
+    this.resultDeferred.resolve(this.buildBoundaryResult("failed", "codex_turn_failed"));
   }
 
   private buildCompletedResult(
@@ -3637,6 +3733,10 @@ class CodexAppServerInvocationV01 {
       recent_resolved_server_request_count:
         this.recentResolvedServerRequests.size,
       ...(publicReason ? { public_reason: publicReason } : {}),
+      ...(kind === "settled" && this.failedTerminalDiagnostic
+        ? { failed_terminal_diagnostic: this.failedTerminalDiagnostic } : {}),
+      ...(kind === "settled" && this.failedTerminalDiagnosticCaptureFailure
+        ? { failed_terminal_diagnostic_capture_failure: this.failedTerminalDiagnosticCaptureFailure } : {}),
     });
   }
 }
@@ -4140,6 +4240,7 @@ interface DeferredV01<T> {
 }
 
 interface CodexTurnTerminalV01 {
+  source: CodexTerminalSourceV01;
   turn: Record<string, unknown>;
   status: "completed" | "failed" | "interrupted";
   fingerprint: string;

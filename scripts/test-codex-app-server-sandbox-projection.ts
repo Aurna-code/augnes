@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { genericCliBuilderInputFixture } from "@/fixtures/vnext/protocol/task-context-packet-v0-1";
-import { createCodexAppServerAdapterV01 } from "@/lib/vnext/native-host/codex-app-server-adapter";
+import { createCodexAppServerAdapterV01, type CodexAppServerAdapterOptionsV01 } from "@/lib/vnext/native-host/codex-app-server-adapter";
 import { assertCodexScopedTaskCurrentV01, createCodexScopedTaskV01, createCodexFeasibilityWindowV01, prepareScopedCodexLaunchV01 } from "@/lib/vnext/native-host/codex-scoped-task";
 import { inspectNativeHostPhysicalRootIdentityV01 } from "@/lib/vnext/native-host/project-root-identity";
 import { resolveCodexProductionRuntimeV01 } from "@/lib/vnext/native-host/codex-production-runtime";
@@ -18,6 +18,7 @@ import {
   createProtocolSha256V01,
 } from "@/lib/vnext/protocol-primitives";
 import { buildTaskContextPacketV01 } from "@/lib/vnext/task-context-packet";
+import { createRecordedCodexAppServerAdapterV01 } from "./codex-app-server-observation-recorder";
 import type { ExternalRefV01 } from "@/types/vnext/external-ref";
 import type {
   NativeHostLifecycleEventV01,
@@ -29,6 +30,8 @@ async function main(): Promise<void> {
     mkdtempSync(path.join(tmpdir(), "augnes-codex-sandbox-test-")),
   );
   try {
+  await failedTerminalDiagnosticCaptureV01(testRoot);
+  if (process.argv.includes("--failed-terminal-diagnostic-only")) return;
   const runtimeRoot = path.join(testRoot, "runtime");
   const userHome = path.join(testRoot, "home");
   mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
@@ -115,6 +118,143 @@ async function main(): Promise<void> {
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }
+}
+
+async function failedTerminalDiagnosticCaptureV01(testRoot: string): Promise<void> {
+  const cases: Array<[string, string, string | null, string, number | null, string?]> = [
+    ["string", "recognized", "unauthorized", "not_applicable", null],
+    ["http", "recognized", "httpConnectionFailed", "valid", 429],
+    ["other", "recognized", "other", "not_applicable", null],
+    ["missing", "absent", null, "not_applicable", null],
+    ["null", "null", null, "not_applicable", null],
+    ["unknown", "unrecognized", null, "not_applicable", null],
+    ["unknown_tag", "unrecognized", null, "not_applicable", null],
+    ["malformed", "malformed", null, "not_applicable", null],
+    ["multiple_tags", "malformed", null, "not_applicable", null],
+    ["wrong_string_shape", "malformed", null, "not_applicable", null],
+    ["wrong_object_shape", "malformed", null, "not_applicable", null],
+    ["invalid_status", "recognized", "responseStreamDisconnected", "invalid", null],
+    ["invalid_range", "recognized", "responseStreamDisconnected", "invalid", null],
+    ["invalid_fraction", "recognized", "responseStreamDisconnected", "invalid", null],
+    ["status_null", "recognized", "responseTooManyFailedAttempts", "null", null],
+    ["status_missing", "recognized", "responseStreamConnectionFailed", "absent", null],
+    ["malformed_tag", "malformed", null, "not_applicable", null],
+    ["active_turn", "recognized", "activeTurnNotSteerable", "not_applicable", null],
+    ["malformed_active_turn", "malformed", null, "not_applicable", null],
+    ["error_absent", "unavailable", null, "not_applicable", null, "absent"],
+    ["error_null", "unavailable", null, "not_applicable", null, "null"],
+    ["error_malformed", "unavailable", null, "not_applicable", null, "malformed"],
+    ["ignored_notification", "null", null, "not_applicable", null],
+    ["duplicate", "recognized", "unauthorized", "not_applicable", null],
+  ];
+  for (const [name, disposition, category, statusDisposition, status, errorField] of cases) {
+    const captured = await runCapturedDiagnosticV01(testRoot, name);
+    const diagnostics = captured.rows.filter(row => row.failed_terminal_diagnostic);
+    assert.equal(diagnostics.length, 1, name);
+    const observation = diagnostics[0];
+    const diagnostic = observation.failed_terminal_diagnostic;
+    assert.equal(observation.kind, "settled");
+    assert.equal(observation.run_id, captured.request.run_id);
+    assert.equal(observation.thread_id, "01900000-0000-7000-8000-000000000001");
+    assert.equal(observation.turn_id, "01900000-0000-7000-8000-000000000003");
+    assert.equal(diagnostic.phase, "accepted_failed_terminal");
+    assert.equal(diagnostic.source, "turn/completed");
+    assert.equal(diagnostic.error_field, errorField ?? "object", name);
+    assert.equal(diagnostic.category_disposition, disposition, name);
+    assert.equal(diagnostic.category, category, name);
+    assert.equal(diagnostic.http_status_disposition, statusDisposition, name);
+    assert.equal(diagnostic.http_status, status, name);
+    const started = captured.lifecycle.find(event => event.event_kind === "turn_started")!;
+    for (const [key, value] of Object.entries(diagnostic.request_source_binding)) {
+      assert.equal(value, started.bounded_metadata[key === "binding_version" ? "request_source_binding_version" : key], name);
+    }
+    assert.equal(diagnostic.request_source_binding.task_context_packet_fingerprint, captured.request.packet.integrity.fingerprint);
+    assert.equal(diagnostic.request_source_binding.request_id, captured.request.request_id);
+    assert.equal(captured.result?.outcome, "failed");
+    assert.equal(captured.result?.public_stop_reason, "codex_turn_failed");
+    assert.equal(captured.result?.summary, "The local Codex App Server run did not complete successfully.");
+    assert.equal(JSON.stringify(captured.result).includes("failed_terminal_diagnostic"), false);
+    assert.equal(captured.captureStatus.capture_failure, null);
+    assert.equal(captured.captureStatus.failed_terminal_diagnostic_written, true);
+  }
+  for (const name of ["foreign_thread", "foreign_turn", "conflict", "success", "cancel", "timeout", "no_observer", "capture_failure"]) {
+    const captured = await runCapturedDiagnosticV01(testRoot, name);
+    assert.equal(captured.rows.some(row => row.failed_terminal_diagnostic), false, name);
+    if (["foreign_thread", "foreign_turn", "conflict"].includes(name)) {
+      assert.equal(captured.result, null, name);
+      assert.match(captured.failureCode!, /codex_(thread_identity_mismatch|turn_identity_mismatch|turn_completion_conflict)/);
+    } else if (name === "success") assert.equal(captured.result?.outcome, "completed");
+    else if (name === "cancel" || name === "timeout") {
+      assert.equal(captured.result?.outcome, "cancelled");
+      assert.equal(captured.result?.public_stop_reason, name === "timeout" ? "native_host_timeout" : "native_host_cancelled");
+    } else {
+      assert.equal(captured.result?.public_stop_reason, "codex_turn_failed");
+      if (name === "capture_failure") {
+        assert.equal(captured.captureStatus.capture_failure, "artifact_write_failed");
+        assert.equal(captured.captureStatus.failed_terminal_diagnostic_written, false);
+      }
+    }
+  }
+  console.log("failed-terminal diagnostic: 32 finite fake-host capture/readback cases passed; source binding, privacy, generic results, conflict, cancellation and cleanup preserved; zero network");
+}
+
+async function runCapturedDiagnosticV01(testRoot: string, name: string) {
+  const directory = path.join(testRoot, `diagnostic-${name}`);
+  mkdirSync(directory);
+  const home = path.join(directory, "home"); mkdirSync(home);
+  const request = requestV01(directory);
+  request.request_id += `-${name}`; request.run_id += `-${name}`;
+  const lifecycle: NativeHostLifecycleEventV01[] = [];
+  const cancellation = new AbortController();
+  const eventsPath = path.join(directory, "events.jsonl");
+  const cleanupPath = path.join(directory, "cleanup.marker");
+  const networkPath = path.join(directory, "network-count.txt");
+  const scenario = name === "success" ? "success" :
+    name === "cancel" || name === "timeout" ? "terminal_diagnostic_wait" :
+    name === "no_observer" || name === "capture_failure" ? "terminal_diagnostic_string" : `terminal_diagnostic_${name}`;
+  const options: CodexAppServerAdapterOptionsV01 = {
+    launch: { command: process.execPath,
+      prefix_args: [path.join(process.cwd(), "scripts/fixtures/fake-codex-app-server.mjs")],
+      environment: { NODE_ENV: "test", HOME: home, TMPDIR: directory, PATH: process.env.PATH,
+        FAKE_CODEX_SCENARIO: scenario, FAKE_CODEX_CLEANUP_MARKER_PATH: cleanupPath, FAKE_CODEX_NETWORK_COUNT_PATH: networkPath } },
+    observe: (observation: { kind: string }) => {
+      if (observation.kind !== "turn_started") return;
+      if (name === "capture_failure") { rmSync(eventsPath); mkdirSync(eventsPath); }
+      if (name === "cancel" || name === "timeout") {
+        cancellation.abort("synthetic_stop");
+        void invocation.request_stop({ reason: name === "timeout" ? "timeout" : "cancellation_requested" });
+      }
+    },
+  };
+  const recorder = createRecordedCodexAppServerAdapterV01({ directory, stage: 1, adapter_options: options });
+  const adapter = name === "no_observer" ? createCodexAppServerAdapterV01({ launch: options.launch }) : recorder.adapter;
+  const invocation = adapter.invoke(request, { cancellation_signal: cancellation.signal,
+    timeout_ms: 5_000, stop_settle_timeout_ms: 2_000, resume_binding: null,
+    lifecycle_sink: { async report_event(event) { lifecycle.push(event); }, async request_approval() { throw new Error("unexpected_approval"); } } });
+  let deadlineExpired = false;
+  const clearDeadline = scheduleNativeHostTimeoutV01({ timeout_ms: 5_000, on_timeout() {
+    deadlineExpired = true; cancellation.abort("test_deadline"); void invocation.request_stop({ reason: "timeout" });
+  } });
+  let result = null, failureCode: string | null = null;
+  try { result = await invocation.result; }
+  catch (error) { failureCode = (error as { code: string }).code; }
+  finally {
+    try { await invocation.settled; }
+    finally { clearDeadline(); recorder.closeCapture(); }
+  }
+  assert.equal(deadlineExpired, false, name);
+  assert.equal(readFileSync(cleanupPath, "utf8"), "settled\n", name);
+  assert.equal(readFileSync(networkPath, "utf8"), "0\n", name);
+  const captureStatus = JSON.parse(readFileSync(path.join(directory, "adapter-capture-status.json"), "utf8"));
+  assert.deepEqual(captureStatus, recorder.readCaptureStatus());
+  assert.equal(captureStatus.closed, true);
+  assert.equal(captureStatus.status_write_failed, false);
+  const text = name === "capture_failure" ? "" : readFileSync(eventsPath, "utf8");
+  assert.equal(text.includes("SYNTHETIC_DIAGNOSTIC_SECRET_DO_NOT_CAPTURE"), false, name);
+  assert.equal(text.includes(createHash("sha256").update("SYNTHETIC_DIAGNOSTIC_SECRET_DO_NOT_CAPTURE").digest("hex")), false, name);
+  const rows = text.trim() ? text.trim().split("\n").map(line => JSON.parse(line)) : [];
+  assert(rows.length <= 64);
+  return { request, lifecycle, result, failureCode, rows, captureStatus };
 }
 
 async function scopedProjectionV01(testRoot: string): Promise<void> {

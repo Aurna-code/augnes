@@ -125,6 +125,7 @@ import {
 import {
   createCodexAppServerAdapterV01,
   type CodexAppServerAdapterObservationV01,
+  type CodexAppServerAdapterOptionsV01,
 } from "../lib/vnext/native-host/codex-app-server-adapter";
 import { canonicalizeRepositoryRelativePathV01 } from "../lib/vnext/repository-relative-path";
 import { materializeRunAssessmentProposalV01 } from "../lib/vnext/run-assessment-proposal";
@@ -222,6 +223,7 @@ import {
   migrateVNextLocalOperatorSessionsV01,
 } from "./db-migrations.mjs";
 import { installZeroNetworkGuard } from "./test-harness-zero-network-guard.mjs";
+import { createRecordedCodexAppServerAdapterV01 } from "./codex-app-server-observation-recorder";
 
 const SMOKE_VERSION = "vnext_operator_pilot_smoke.v0.1" as const;
 const OPERATOR_WORKSPACE_UUID = "11111111-1111-4111-8111-111111111111";
@@ -8059,7 +8061,60 @@ async function assertLiveCodexAppServerLifecycleOnClonesV01(input: {
     );
   }
   await assertLiveCodexDisconnectResumeOnCloneV01(input);
+  await assertLiveCodexDiagnosticCaptureOnClonesV01(input);
   await assertLiveCodexFailureMatrixOnClonesV01(input);
+}
+
+async function assertLiveCodexDiagnosticCaptureOnClonesV01(input: {
+  environment: NodeJS.ProcessEnv; packet: TaskContextPacketV01;
+}): Promise<void> {
+  for (const [scenario, category, status] of [
+    ["terminal_diagnostic_string", "unauthorized", null],
+    ["terminal_diagnostic_http", "httpConnectionFailed", 429],
+  ] as const) {
+    await withOperatorDatabaseCloneV01(`capture-${scenario}`, input.environment, async ({ config }) => {
+      const packet = installPublicSafeLivePacketV01(config, input.packet);
+      const clock = new ManualClock(addIsoMillisecondsV01(input.packet.generated_at, 34_000));
+      const harness = createFakeLiveCodexHarnessV01({ config, scenario, now: () => clock.now(), capture: true });
+      try {
+        await harness.service.start({ config, mode: "interactive" });
+        const projection = await waitForLiveProjectionV01(harness.service, config, value => value.status === "failed");
+        assert.equal(projection.public_reason, "codex_turn_failed");
+        assert.equal(projection.reconciliation_required, false);
+        assert(projection.receipt);
+        await harness.service.shutdown();
+        const capture = harness.close_capture!();
+        assert.equal(capture.capture_failure, null);
+        assert.equal(capture.failed_terminal_diagnostic_written, true);
+        const text = readFileSync(path.join(harness.capture_directory!, "events.jsonl"), "utf8");
+        assert.equal(text.includes("SYNTHETIC_DIAGNOSTIC_SECRET_DO_NOT_CAPTURE"), false);
+        const rows = text.trim().split("\n").map(line => JSON.parse(line));
+        const diagnostics = rows.filter(row => row.failed_terminal_diagnostic);
+        assert.equal(diagnostics.length, 1);
+        assert.equal(diagnostics[0].run_id, projection.run_ref);
+        const diagnostic = diagnostics[0].failed_terminal_diagnostic;
+        assert.equal(diagnostic.category, category);
+        assert.equal(diagnostic.http_status, status);
+        assert.equal(diagnostic.request_source_binding.task_context_packet_fingerprint, packet.integrity.fingerprint);
+        assert.deepEqual(JSON.parse(readFileSync(path.join(harness.capture_directory!, "adapter-capture-status.json"), "utf8")), capture);
+        const db = openVNextLocalOperatorDatabaseV01(config);
+        try {
+          const run = readAutonomyRunLedgerRecord(projection.run_ref!, { db });
+          assert(run);
+          assert.equal(run.metadata.public_reason, "codex_turn_failed");
+          assert.equal(run.metadata.terminal_receipt_persisted, true);
+          assert.equal(JSON.stringify(run).includes("failed_terminal_diagnostic"), false);
+          const receipt = readVNextCoreRecordV01(db, { record_kind: "run_receipt", record_id: projection.receipt.receipt_ref,
+            workspace_id: config.workspace_id, project_id: config.project_id });
+          assert(receipt);
+          assert.equal(JSON.stringify(receipt).includes("failed_terminal_diagnostic"), false);
+        } finally { db.close(); }
+        assertObservedProcessesStoppedV01(harness.observations);
+        assert.equal(readNetworkAttemptsV01(harness.network_count_path), 0);
+      } finally { await harness.service.shutdown(); harness.close_capture?.(); }
+    });
+  }
+  pass("failed_terminal_diagnostic_survives_native_service_receipt_shutdown_and_local_capture_readback_without_core_changes");
 }
 
 async function assertLiveCodexSequentialApprovalAccountingOnCloneV01(input: {
@@ -10825,6 +10880,7 @@ function createFakeLiveCodexHarnessV01(input: {
   controlled_cleanup?: boolean;
   controlled_timeout?: boolean;
   command?: string;
+  capture?: boolean;
 }): {
   service: LiveNativeHostRunServiceV01;
   observations: CodexAppServerAdapterObservationV01[];
@@ -10836,6 +10892,8 @@ function createFakeLiveCodexHarnessV01(input: {
   cancellation_approval_resolution_release_path: string;
   trigger_timeout: (() => void) | null;
   timeout_schedule_active: () => boolean;
+  capture_directory?: string;
+  close_capture?: ReturnType<typeof createRecordedCodexAppServerAdapterV01>["closeCapture"];
 } {
   liveFixtureSequenceV01 += 1;
   const root = path.join(
@@ -10864,6 +10922,7 @@ function createFakeLiveCodexHarnessV01(input: {
   let scheduledTimeoutCallback: (() => void) | null = null;
   let timeoutTriggered = false;
   const observations: CodexAppServerAdapterObservationV01[] = [];
+  let recorder: ReturnType<typeof createRecordedCodexAppServerAdapterV01> | undefined;
   const service = new LiveNativeHostRunServiceV01({
     now: input.now,
     test_only_allow_unauthenticated_interactive: true,
@@ -10889,10 +10948,10 @@ function createFakeLiveCodexHarnessV01(input: {
           },
         }
       : {}),
-    adapter_factory: () =>
-      createCodexAppServerAdapterV01({
+    adapter_factory: () => {
+      const options: CodexAppServerAdapterOptionsV01 = {
         now: input.now,
-        observe: (observation) => {
+        observe: (observation: CodexAppServerAdapterObservationV01) => {
           observations.push(observation);
           if (observation.kind === "approval_resolved") {
             writeFileSync(
@@ -10940,11 +10999,17 @@ function createFakeLiveCodexHarnessV01(input: {
             ...(releasePath ? { FAKE_CODEX_RELEASE_PATH: releasePath } : {}),
           },
         },
-      }),
+      };
+      if (!input.capture) return createCodexAppServerAdapterV01(options);
+      assert.equal(recorder, undefined);
+      recorder = createRecordedCodexAppServerAdapterV01({ directory: runtime, stage: 1, adapter_options: options });
+      return recorder.adapter;
+    },
   });
   return {
     service,
     observations,
+    ...(input.capture ? { capture_directory: runtime, close_capture: () => { assert(recorder); return recorder.closeCapture(); } } : {}),
     trace_path: tracePath,
     state_path: statePath,
     cleanup_marker_path: cleanupMarkerPath,
