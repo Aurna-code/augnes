@@ -27,7 +27,7 @@ import {
   observeReviewedCandidateCodexAppServerUserAgentV01,
 } from "@/lib/vnext/native-host/codex-app-server-user-agent";
 import {
-  consumeCodexCandidateCanaryV01,
+  consumeCodexCandidateCanaryV01, isCodexNativeCandidateCanaryV01,
   type CodexCandidateCanaryBindingV01,
 } from "./codex-rolling-stable-candidate";
 import { observeCandidateConfigPolicyV01 } from "./codex-ordinary-runtime-candidate";
@@ -983,7 +983,7 @@ export function assertCodexScopedAdapterV01(adapter: NativeHostAdapterV01, scope
 export function createCodexAppServerAdapterV01(
   options: CodexAppServerAdapterOptionsV01 = {},
 ): NativeHostAdapterV01 {
-  if (options.incident_message && (options.candidate_canary || options.isolated_authenticated_execution ||
+  if (options.incident_message && ((options.candidate_canary && !isCodexNativeCandidateCanaryV01(options.candidate_canary)) || options.isolated_authenticated_execution ||
       options.isolated_authenticated_external_execution_authorization || options.observe_isolated_auth))
     throw new Error("codex_incident_message_lane_refused");
   if (options.scoped_task) {
@@ -1900,6 +1900,7 @@ class CodexAppServerInvocationV01 {
       assertCurrentCodexQualifiedRuntimeSelectionV01(this.qualifiedRuntimeSelection);
       assertCodexAppServerCompatibilityImplementedV01(this.qualifiedRuntimeSelection);
       this.candidateCanary = consumeCodexCandidateCanaryV01(this.options.candidate_canary);
+      this.scopedLaunch = this.candidateCanary.native_auth ?? null;
       if (this.candidateCanary.profile_fingerprint !== this.qualifiedRuntimeSelection.compatibility_profile.fingerprint)
         throw new Error("codex_candidate_canary_profile_changed");
       this.transport = new CodexStdioJsonRpcTransportV01({
@@ -1950,24 +1951,20 @@ class CodexAppServerInvocationV01 {
       }
       const launch =
         this.options.launch ?? resolveDefaultCodexAppServerLaunchV01();
+      const selectedRuntime = launch.qualified_runtime_selection ??
+        selectPinnedCodexQualifiedRuntimeV01({ lane: "ordinary_chatgpt_auth" });
+      assertCurrentCodexQualifiedRuntimeSelectionV01(selectedRuntime);
+      assertCodexAppServerCompatibilityImplementedV01(selectedRuntime);
       if (this.options.scoped_task) {
         // Custom transport is solely an existing credential-free fixture seam.
         if (this.options.launch && !(launch.environment?.NODE_ENV === "test" && launch.command === process.execPath &&
             launch.prefix_args?.length === 1 && launch.prefix_args[0] === path.join(process.cwd(), "scripts/fixtures/fake-codex-app-server.mjs")))
           throw new Error("codex_scoped_unmanaged_launch_refused");
         await consumeScopedCodexTaskV01(this.options.scoped_task, this.request);
-        this.scopedLaunch = prepareScopedCodexLaunchV01(this.options.scoped_task, launch.environment ?? boundedCodexChildEnvironmentV01(process.env, false));
+        this.scopedLaunch = prepareScopedCodexLaunchV01(this.options.scoped_task,
+          launch.environment ?? boundedCodexChildEnvironmentV01(process.env, false), selectedRuntime.artifact);
         if (this.control.cancellation_signal.aborted) throw new Error("codex_scoped_cancelled_before_spawn");
       }
-      const selectedRuntime =
-        launch.qualified_runtime_selection ??
-        selectPinnedCodexQualifiedRuntimeV01({
-          lane: "ordinary_chatgpt_auth",
-        });
-      assertCurrentCodexQualifiedRuntimeSelectionV01(selectedRuntime);
-      assertCodexAppServerCompatibilityImplementedV01(selectedRuntime);
-      if (this.options.scoped_task && selectedRuntime.artifact.version !== "0.152.1")
-        throw new Error("codex_scoped_runtime_extension_unqualified");
       if (launch.production_runtime_identity) {
         assertCodexProductionRuntimeIdentityUnchangedV01(
           launch.production_runtime_identity,
@@ -2094,6 +2091,7 @@ class CodexAppServerInvocationV01 {
       if (this.candidateCanary) {
         if (objectV01(account.account, "codex_account_response_invalid").type !== "chatgpt" || account.requiresOpenaiAuth !== true)
           throw new Error("codex_candidate_canary_ordinary_account_required");
+        if (!this.candidateCanary.native_auth) {
         const config = objectV01(await this.transport!.request("config/read", { includeLayers: true }), "codex_candidate_config_invalid");
         // Ordinary AuthManager's home may contain ambient configuration. Apply
         // the existing built-in-provider/no-custom-route boundary as well as
@@ -2104,6 +2102,7 @@ class CodexAppServerInvocationV01 {
           throw new CodexProtocolErrorV01("codex_candidate_canary_config_policy_changed");
         if (observeCandidateConfigPolicyV01(config) !== this.candidateCanary.policy_fingerprint)
           throw new Error("codex_candidate_canary_config_policy_changed");
+        }
         await this.transport!.settleNotifications();
         if (this.transport!.failure) throw this.transport!.failure;
       }
@@ -2149,6 +2148,7 @@ class CodexAppServerInvocationV01 {
       this.scopedLaunch!.assert_sources_current();
       if (this.control.cancellation_signal.aborted || this.stopRequest || this.fatalError) throw new Error("codex_scoped_stopped_before_thread");
     }
+    this.scopedLaunch?.assert_sources_current();
     this.threadStartSent = true;
     const response = objectV01(
       await this.transport!.request(
@@ -2162,6 +2162,8 @@ class CodexAppServerInvocationV01 {
             this.qualifiedRuntimeSelection.compatibility_profile.semantics
               .server_requests.approvals_reviewer,
           ...(this.scopedLaunch ? { permissions: this.scopedLaunch.profile_name, model: SCOPED_CODEX_MODEL_V01, modelProvider: "openai" } : { sandbox: this.sandboxProjection.thread_sandbox }),
+          ...(this.candidateCanary?.requested_model ? { model: this.candidateCanary.requested_model,
+            modelProvider: "openai", config: { model_reasoning_effort: this.candidateCanary.requested_effort } } : {}),
           ephemeral: this.options.isolated_authenticated_execution || this.candidateCanary || this.scopedLaunch
             ? true
             : false,
@@ -2176,12 +2178,17 @@ class CodexAppServerInvocationV01 {
     if (this.candidateCanary) {
       const thread = objectV01(response.thread, "codex_thread_start_binding_invalid");
       if (response.modelProvider !== "openai" || thread.modelProvider !== "openai" ||
+          (this.candidateCanary.requested_model && (response.model !== this.candidateCanary.requested_model ||
+            response.reasoningEffort !== this.candidateCanary.requested_effort ||
+            (thread.model != null && thread.model !== this.candidateCanary.requested_model) ||
+            (thread.reasoningEffort != null && thread.reasoningEffort !== this.candidateCanary.requested_effort))) ||
           thread.ephemeral !== true || thread.cliVersion !== this.candidateCanary.version ||
           !Array.isArray(thread.turns) || thread.turns.length !== 0 ||
-          !Array.isArray(response.instructionSources) || response.instructionSources.length !== 0 ||
-          response.approvalPolicy !== this.qualifiedRuntimeSelection.compatibility_profile.semantics.server_requests.approval_policy ||
-          response.approvalsReviewer !== this.qualifiedRuntimeSelection.compatibility_profile.semantics.server_requests.approvals_reviewer ||
-          canonicalizeProtocolValueV01(response.sandbox) !== canonicalizeProtocolValueV01(this.sandboxProjection.turn_sandbox_policy))
+          (!this.candidateCanary.native_auth && (
+            !Array.isArray(response.instructionSources) || response.instructionSources.length !== 0 ||
+            response.approvalPolicy !== this.qualifiedRuntimeSelection.compatibility_profile.semantics.server_requests.approval_policy ||
+            response.approvalsReviewer !== this.qualifiedRuntimeSelection.compatibility_profile.semantics.server_requests.approvals_reviewer ||
+            canonicalizeProtocolValueV01(response.sandbox) !== canonicalizeProtocolValueV01(this.sandboxProjection.turn_sandbox_policy))))
         throw new Error("codex_candidate_canary_thread_policy_changed");
     }
     if (this.options.isolated_authenticated_execution) {
@@ -2500,6 +2507,7 @@ class CodexAppServerInvocationV01 {
     }
     if (this.candidateCanary && (this.fatalError || this.stopRequest || this.control.cancellation_signal.aborted))
       throw this.fatalError ?? new CodexProtocolErrorV01("codex_candidate_canary_stopped_before_turn");
+    this.scopedLaunch?.assert_sources_current();
     const renderedPacket = this.candidateCanary
       ? "This is one ordinary authentication canary. Do not use any tool, command, file, web, permission, or external effect. Return only JSON matching the supplied output schema, with summary AUGNES_CANARY_OK and all arrays empty."
       : renderPacketV01(this.request);
@@ -2520,6 +2528,8 @@ class CodexAppServerInvocationV01 {
             this.qualifiedRuntimeSelection.compatibility_profile.semantics
               .server_requests.approvals_reviewer,
           ...(this.scopedLaunch ? { permissions: this.scopedLaunch.profile_name, model: SCOPED_CODEX_MODEL_V01, effort: SCOPED_CODEX_EFFORT_V01, approvalPolicy: "never" } : { sandboxPolicy: this.sandboxProjection.turn_sandbox_policy }),
+          ...(this.candidateCanary?.requested_model ? { model: this.candidateCanary.requested_model,
+            effort: this.candidateCanary.requested_effort } : {}),
           outputSchema: CODEX_HOST_STRUCTURED_RESULT_SCHEMA_V01,
         },
       ),
@@ -3265,6 +3275,9 @@ class CodexAppServerInvocationV01 {
         throw new CodexProtocolErrorV01("codex_scoped_result_effect_refused");
       if (this.candidateCanary && (payload.commands.length || payload.changed_files.length || payload.artifacts.length || payload.observed_actions.length))
         throw new CodexProtocolErrorV01("codex_candidate_canary_unexpected_effect");
+      if (this.candidateCanary?.native_auth && (payload.summary !== "AUGNES_CANARY_OK" || payload.checks.length ||
+          payload.skipped_checks.length || payload.uncertainty.length || payload.gaps.length || payload.proposed_next_steps.length))
+        throw new CodexProtocolErrorV01("codex_candidate_canary_expected_output_missing");
       this.resultDeferred.resolve(this.buildCompletedResult(payload));
       return;
     }
@@ -3417,7 +3430,7 @@ class CodexAppServerInvocationV01 {
           ...this.candidateEvidenceMetadataV01(),
           app_server_transport: "stdio_jsonl",
           experimental_api: Boolean(this.scopedLaunch),
-          ...(this.scopedLaunch ? {
+          ...(this.scopedLaunch && this.options.scoped_task ? {
             scoped_task_contract: SCOPED_CODEX_CONTRACT_V01,
             scoped_task_fingerprint: this.options.scoped_task!.fingerprint,
             scoped_configuration_fingerprint: this.scopedLaunch.configuration_fingerprint,
@@ -3456,6 +3469,12 @@ class CodexAppServerInvocationV01 {
       canary_prompt_delivery_initiated: this.packetDeliveryInitiated,
       candidate_receipt_fingerprint: this.options.candidate_canary!.receipt_fingerprint,
       compatibility_profile_fingerprint: this.candidateCanary.profile_fingerprint,
+      ...(this.options.candidate_canary!.native_auth ? {
+        native_auth_profile_fingerprint: this.options.candidate_canary!.native_auth.profile_fingerprint,
+        native_context_fingerprint: this.options.candidate_canary!.native_auth.context_fingerprint,
+        candidate_configuration_fingerprint: this.options.candidate_canary!.native_auth.configuration_fingerprint,
+        authentication_host_managed: true, credential_extraction: false, cold_isolation_claimed: false,
+      } : {}),
     } : {};
   }
 
@@ -5256,7 +5275,7 @@ function externalRefV01(
   };
 }
 
-function boundedCodexChildEnvironmentV01(
+export function boundedCodexChildEnvironmentV01(
   source: NodeJS.ProcessEnv,
   canonicalTest: boolean,
 ): NodeJS.ProcessEnv {

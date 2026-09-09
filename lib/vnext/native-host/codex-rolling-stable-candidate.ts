@@ -8,7 +8,8 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { CODEX_APP_SERVER_ADAPTER_VERSION_V01, probeCodexCredentialFreeExactProfileV01 } from "./codex-app-server-adapter";
+import { CODEX_APP_SERVER_ADAPTER_VERSION_V01, probeCodexCredentialFreeExactProfileV01, boundedCodexChildEnvironmentV01 } from "./codex-app-server-adapter";
+import { prepareCodexNativeCanaryLaunchV01, assertCodexScopedRuntimeArtifactV01, type ScopedCodexLaunchV01 } from "./codex-scoped-task";
 import { observeReviewedCandidateCodexAppServerUserAgentV01 } from "./codex-app-server-user-agent";
 import { extractDiscoveredCodexCandidateArchiveV01 } from "./codex-managed-runtime-store";
 import { CANDIDATE_CONFIG_OVERRIDE_ARGS_V01, observeCandidateConfigPolicyV01 } from "./codex-ordinary-runtime-candidate";
@@ -79,6 +80,14 @@ export interface CodexRollingReceiptV01 {
   cleanup: { disposable_staging_removed: boolean; process_settled: boolean; streams_closed: boolean };
   authority: { candidate_evidence_only: true; qualified: false; production_adoption: false; provider_turn_authorized: false };
   receipt_fingerprint: string;
+  reviewed_reentry?: {
+    authorization_ref: string;
+    reason: "new_host_reported_client_version_rejection";
+    prior_receipt_fingerprint: string;
+    prior_canary_result_fingerprint: string;
+    requested_model: "gpt-6-astra";
+    requested_effort: "max";
+  };
 }
 
 export function codexRollingFingerprintV01(value: unknown): string {
@@ -257,8 +266,70 @@ export async function runCodexRollingStableCandidateV01(input: {
 }): Promise<{ receipt: CodexRollingReceiptV01; receipt_path: string; reused: boolean }> {
   if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("codex_rolling_platform_unsupported");
   if (Object.values(input.augnes_source).some((value) => !SHA.test(value))) throw new Error("codex_rolling_augnes_source_invalid");
+  return runCodexCandidateCycleV01(input, await discoverCodexRollingStableV01());
+}
+
+/** Trusted local, explicit review only. No updater/worker/UI calls this entry.
+ * The old failed receipt and consumed claim remain immutable. A new exclusive
+ * claim adjacent to that receipt prevents changing output directories from
+ * renewing this review's allowance. follow_stable still skips terminal history. */
+export async function runCodexReviewedCandidateReentryV01(input: {
+  augnes_source: CodexRollingReceiptV01["augnes_source"];
+  historical_receipt_path: string;
+  authorization_ref: string;
+  prior_receipt_fingerprint: string;
+  prior_canary_result_fingerprint: string;
+  archive_bytes: Buffer;
+}): Promise<{ receipt: CodexRollingReceiptV01; receipt_path: string; reused: boolean }> {
+  const historical = input.historical_receipt_path;
+  if (Object.values(input.augnes_source).some((value) => !SHA.test(value))) throw new Error("codex_rolling_augnes_source_invalid");
+  const read = (file: string) => {
+    const s = lstatSync(file);
+    if (!s.isFile() || s.isSymbolicLink() || (s.mode & 0o077) !== 0 || s.size > 16 * 1024 * 1024 || realpathSync.native(file) !== file)
+      throw new Error("codex_candidate_reentry_history_invalid");
+    return readFileSync(file, "utf8");
+  };
+  if (!/^https:\/\/github\.com\/hynk-studio\/augnes\/issues\/1234#issuecomment-[1-9][0-9]*$/u.test(input.authorization_ref))
+    throw new Error("codex_candidate_reentry_review_invalid");
+  const prior = JSON.parse(read(historical)) as CodexRollingReceiptV01;
+  const { receipt_fingerprint, ...priorMaterial } = prior;
+  const result = record(JSON.parse(read(`${historical}.ordinary-canary-result.json`)));
+  const { fingerprint, ...resultMaterial } = result;
+  if (prior.receipt_version !== CODEX_ROLLING_CANDIDATE_VERSION_V01 || prior.reviewed_reentry ||
+      !prior.native || prior.attempts?.length !== 1 || !passed(prior.attempts[0]!) ||
+      !["AUTHENTICATED_CANARY_REQUIRED", "HOLD_EXPLICIT_SEMANTIC_REVIEW_REQUIRED", "HOLD_INCOMPATIBLE_OR_UNCLEAR_DELTA"].includes(prior.disposition) ||
+      receipt_fingerprint !== input.prior_receipt_fingerprint || receipt_fingerprint !== codexRollingFingerprintV01(priorMaterial) ||
+      fingerprint !== input.prior_canary_result_fingerprint || fingerprint !== codexRollingFingerprintV01(resultMaterial) ||
+      result.candidate_receipt_fingerprint !== receipt_fingerprint || result.binding_consumed !== true ||
+      result.disposition !== "HOLD_AUTHENTICATED_CANARY_CONTRACT" || result.adapter_settlement_passed !== true ||
+      result.disposable_state_removed !== true || result.owned_processes_remaining !== 0 ||
+      codexRollingFingerprintV01(result.candidate) !== codexRollingFingerprintV01(prior.candidate) ||
+      codexRollingFingerprintV01(result.native) !== codexRollingFingerprintV01(prior.native) ||
+      read(`${historical}.ordinary-canary-claimed`) !== `${receipt_fingerprint}\n` ||
+      !isNewerCodexRollingStableV01(prior.candidate.version, selectPinnedCodexQualifiedRuntimeV01().artifact.version))
+    throw new Error("codex_candidate_reentry_history_invalid");
+  const reentry: NonNullable<CodexRollingReceiptV01["reviewed_reentry"]> = {
+    authorization_ref: input.authorization_ref, reason: "new_host_reported_client_version_rejection",
+    prior_receipt_fingerprint: receipt_fingerprint, prior_canary_result_fingerprint: input.prior_canary_result_fingerprint,
+    requested_model: "gpt-6-astra", requested_effort: "max",
+  };
+  const directory = `${historical}.reviewed-reentry-${codexRollingFingerprintV01(reentry).slice(7)}`;
+  // mkdir is an exclusive persistent reservation, including interrupted gates.
+  // Never remove or reuse it to retry. A future review is a distinct entry.
+  mkdirSync(directory, { mode: 0o700 });
+  return runCodexCandidateCycleV01({ augnes_source: input.augnes_source, evidence_directory: directory },
+    prior.candidate, { provenance: reentry, archive_bytes: input.archive_bytes });
+}
+
+async function runCodexCandidateCycleV01(input: {
+  augnes_source: CodexRollingReceiptV01["augnes_source"];
+  evidence_directory: string;
+}, candidate: CodexRollingIdentityV01, reentry?: {
+  provenance: NonNullable<CodexRollingReceiptV01["reviewed_reentry"]>; archive_bytes: Buffer;
+}): Promise<{ receipt: CodexRollingReceiptV01; receipt_path: string; reused: boolean }> {
+  if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("codex_rolling_platform_unsupported");
+  if (Object.values(input.augnes_source).some((value) => !SHA.test(value))) throw new Error("codex_rolling_augnes_source_invalid");
   const production = selectPinnedCodexQualifiedRuntimeV01({ lane: "ordinary_chatgpt_auth" });
-  const candidate = await discoverCodexRollingStableV01();
   const directory = realpathSync.native(input.evidence_directory);
   const dirStat = lstatSync(input.evidence_directory);
   if (directory !== path.resolve(input.evidence_directory) || !dirStat.isDirectory() || dirStat.isSymbolicLink() || (dirStat.mode & 0o077) !== 0)
@@ -289,6 +360,7 @@ export async function runCodexRollingStableCandidateV01(input: {
     candidate, native: null, attempts: [], delta: null, disposition: "HOLD_INTERRUPTED_OR_INCOMPLETE", authenticated_canary: "not_reached", failure_reason: null,
     cleanup: { disposable_staging_removed: false, process_settled: true, streams_closed: true },
     authority: { candidate_evidence_only: true, qualified: false, production_adoption: false, provider_turn_authorized: false }, receipt_fingerprint: "",
+    ...(reentry ? { reviewed_reentry: reentry.provenance } : {}),
   };
   const persist = (initial = false) => {
     const { receipt_fingerprint: ignored, ...material } = receipt;
@@ -317,7 +389,7 @@ export async function runCodexRollingStableCandidateV01(input: {
       previousVersions.push(previous.candidate.version);
   }
   persist(true); // Exclusive exact-identity claim before any acquisition or launch.
-  if (!previousVersions.every((version) => isNewerCodexRollingStableV01(candidate.version, version))) {
+  if (!reentry && !previousVersions.every((version) => isNewerCodexRollingStableV01(candidate.version, version))) {
     receipt.disposition = "NO_NEWER_STABLE";
     receipt.cleanup.disposable_staging_removed = true;
     persist();
@@ -330,7 +402,7 @@ export async function runCodexRollingStableCandidateV01(input: {
     const extractionRoot = path.join(root, "artifact"), stateParent = path.join(root, "state"), executionRoot = path.join(root, "execution"), emptyPath = path.join(root, "path");
     for (const target of [extractionRoot, stateParent, executionRoot, emptyPath]) mkdirSync(target, { mode: 0o700 });
     await reverifyCodexRollingIdentityV01(candidate);
-    const archive = await boundedFetch(`https://github.com/openai/codex/releases/download/${candidate.release_tag}/${ASSET}`,
+    const archive = reentry?.archive_bytes ?? await boundedFetch(`https://github.com/openai/codex/releases/download/${candidate.release_tag}/${ASSET}`,
       candidate.qualified_provenance_asset.size_bytes, "application/octet-stream", 120_000);
     const native = extractDiscoveredCodexCandidateArchiveV01({ artifact: candidate, archive_bytes: archive, destination: extractionRoot });
     receipt.native = { native_executable_sha256: native.native_executable_sha256,
@@ -426,6 +498,71 @@ function record(value: unknown): Record<string, unknown> {
 function positive(value: unknown): boolean { return typeof value === "number" && Number.isSafeInteger(value) && value > 0; }
 function sha(value: unknown): value is string { return typeof value === "string" && SHA.test(value); }
 
+/** Prospective ordinary operational profile. Historical broker fingerprints and
+ * receipts remain unchanged. This describes native host effects, not Strict
+ * identity or a promise that the ordinary home stays byte-identical. */
+const NATIVE_CANARY_PROFILE_V01 = Object.freeze({
+  profile: "native_ordinary_context_canary.v0.1",
+  version: "0.153.4", source: "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+  native_sha256: "sha256:b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3",
+  authentication: "official_AuthManager_same_as_production", credential_extraction: false,
+  state: "existing_coherent_CODEX_HOME_and_SQLite", native_refresh_and_cache_writes: true,
+  task: "fresh_ephemeral_fixed_non_tool", instructions: "exact_approved_sources",
+  controls: "named_permissions_ambient_off_closed_command_environment",
+  model: "gpt-6-astra", effort: "max", timeout_ms: 60_000,
+});
+export function codexCandidateNativeAuthProfileFingerprintV01(): string {
+  return codexRollingFingerprintV01(NATIVE_CANARY_PROFILE_V01);
+}
+interface NativeCanaryContextV01 {
+  environment: NodeJS.ProcessEnv;
+  launch: ScopedCodexLaunchV01;
+  fingerprint: string;
+  assert_current(): void;
+}
+function prepareNativeCanaryContextV01(root: string, approved: readonly Readonly<{ path: string; sha256: string }>[],
+  receipt: CodexRollingReceiptV01): NativeCanaryContextV01 {
+  try {
+    if (receipt.candidate.version !== NATIVE_CANARY_PROFILE_V01.version || !receipt.reviewed_reentry)
+      throw new Error("codex_candidate_native_profile_not_applicable");
+    const environment = Object.freeze(boundedCodexChildEnvironmentV01(process.env, false));
+    const home = path.resolve(environment.CODEX_HOME ?? path.join(environment.HOME ?? os.homedir(), ".codex"));
+    // This bounded profile uses the existing ordinary layout, never a fresh
+    // private SQLite paired with personal rollout history. It performs no login,
+    // credential lookup, migration, history read, or host warm-up.
+    if (environment.CODEX_SQLITE_HOME != null && path.resolve(environment.CODEX_SQLITE_HOME) !== home)
+      throw new Error("codex_candidate_native_state_context_mismatch");
+    const identity = (file: string, directory: boolean) => {
+      const stat = lstatSync(file);
+      if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile()) || realpathSync.native(file) !== file)
+        throw new Error("codex_candidate_native_context_invalid");
+      return { path: file, dev: stat.dev, ino: stat.ino };
+    };
+    const context = [identity(home, true), identity(path.join(home, "state_5.sqlite"), false)];
+    const contextFingerprint = codexRollingFingerprintV01({ profile: codexCandidateNativeAuthProfileFingerprintV01(),
+      context, environment, approved_instruction_files: approved });
+    const launch = prepareCodexNativeCanaryLaunchV01({ root, fingerprint: contextFingerprint,
+      approved_instruction_files: approved }, environment, {
+      version: NATIVE_CANARY_PROFILE_V01.version, native_executable_sha256: NATIVE_CANARY_PROFILE_V01.native_sha256,
+      tagged_source_commit: NATIVE_CANARY_PROFILE_V01.source,
+      compatibility_profile_fingerprint: receipt.compatibility_profile_fingerprint,
+    });
+    return { environment, launch, fingerprint: contextFingerprint, assert_current() {
+      try {
+      if (codexRollingFingerprintV01(boundedCodexChildEnvironmentV01(process.env, false)) !== codexRollingFingerprintV01(environment) ||
+          codexRollingFingerprintV01([identity(home, true), identity(path.join(home, "state_5.sqlite"), false)]) !== codexRollingFingerprintV01(context))
+        throw new Error("codex_candidate_native_context_changed");
+      launch.assert_sources_current();
+      } catch { throw new Error("codex_candidate_native_context_changed"); }
+    } };
+  } catch (error) {
+    const code = error instanceof Error ? error.message : "";
+    // Filesystem and parser exceptions may contain private paths or values.
+    if (/^codex_(?:scoped_[a-z_]+|candidate_native_[a-z_]+)$/u.test(code)) throw new Error(code);
+    throw new Error("codex_candidate_native_context_unavailable");
+  }
+}
+
 /** Run-scoped review input, not a registry entry or qualification decision. */
 export interface CodexCandidateCanaryReviewV01 {
   decision: "COMPATIBLE_PROFILE_REUSE_SUPPORTED";
@@ -438,6 +575,7 @@ export interface CodexCandidateCanaryBindingV01 {
   readonly kind: "ordinary_candidate_canary.v0.1";
   readonly execution_root: string;
   readonly receipt_fingerprint: string;
+  readonly native_auth?: Readonly<{ profile_fingerprint: string; context_fingerprint: string; configuration_fingerprint: string }>;
 }
 interface CanaryStateV01 {
   receipt: CodexRollingReceiptV01;
@@ -449,8 +587,9 @@ interface CanaryStateV01 {
   credential_profile_fingerprint: string;
   state: "prepared" | "consumed" | "closed";
   broker_claimed?: boolean;
+  native_auth?: NativeCanaryContextV01;
   assert_source_integrity?: () => void;
-  fixture?: "success" | "config_mismatch" | "user_agent_mismatch" | "server_request" | "effect" | "descendant_cleanup" | "prethread_request" | "provider_mismatch" | "sqlite_mismatch";
+  fixture?: "result_mismatch" | "auth_mismatch" | "failed" | "unauthenticated" | "success" | "config_mismatch" | "user_agent_mismatch" | "server_request" | "effect" | "descendant_cleanup" | "prethread_request" | "provider_mismatch" | "sqlite_mismatch" | "model_mismatch" | "effort_mismatch";
   fixture_file?: { path: string; hash: string };
 }
 const CANARY_BINDINGS_V01 = new WeakMap<CodexCandidateCanaryBindingV01, CanaryStateV01>();
@@ -461,6 +600,7 @@ export async function prepareCodexCandidateCanaryV01(input: {
   receipt_path: string;
   review: CodexCandidateCanaryReviewV01;
   archive_bytes: Buffer;
+  native_auth?: { approved_instruction_files: readonly Readonly<{ path: string; sha256: string }>[] };
 }): Promise<CodexCandidateCanaryBindingV01> {
   const receiptPath = input.receipt_path;
   if (!/^rust-v[0-9]+\.[0-9]+\.[0-9]+-darwin-arm64\.json$/u.test(path.basename(receiptPath)))
@@ -473,6 +613,10 @@ export async function prepareCodexCandidateCanaryV01(input: {
   const { receipt_fingerprint, ...material } = receipt;
   const selected = selectPinnedCodexQualifiedRuntimeV01({ lane: "ordinary_chatgpt_auth" });
   const probe = receipt.attempts?.[0];
+  if (receipt.reviewed_reentry && (receipt.reviewed_reentry.requested_model !== "gpt-6-astra" ||
+      receipt.reviewed_reentry.requested_effort !== "max" ||
+      receipt.reviewed_reentry.reason !== "new_host_reported_client_version_rejection"))
+    throw new Error("codex_candidate_canary_reentry_binding_invalid");
   if (receipt.receipt_version !== CODEX_ROLLING_CANDIDATE_VERSION_V01 ||
       receipt_fingerprint !== codexRollingFingerprintV01(material) ||
       path.basename(receiptPath) !== `${receipt.candidate.release_tag}-darwin-arm64.json` ||
@@ -495,14 +639,14 @@ export async function prepareCodexCandidateCanaryV01(input: {
         decision: "COMPATIBLE_PROFILE_REUSE_SUPPORTED", receipt_fingerprint,
         compatibility_profile_fingerprint: selected.compatibility_profile.fingerprint,
         config_policy_fingerprint: probe.observed_policy_fingerprint,
-        credential_profile_fingerprint: codexCandidateOrdinaryBrokerProfileFingerprintV01() }))
+        credential_profile_fingerprint: input.native_auth ? codexCandidateNativeAuthProfileFingerprintV01() : codexCandidateOrdinaryBrokerProfileFingerprintV01() }))
     throw new Error("codex_candidate_canary_evidence_or_review_invalid");
   await reverifyCodexRollingIdentityV01(receipt.candidate);
   const root = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "augnes-candidate-canary-")));
   try {
     chmodSync(root, 0o700);
     const directories: CanaryStateV01["directories"] = new Map();
-    for (const name of ["", "artifact", "execution", "home", "sqlite", "tmp", "codex-home"]) {
+    for (const name of (input.native_auth ? ["", "artifact", "execution"] : ["", "artifact", "execution", "home", "sqlite", "tmp", "codex-home"])) {
       const directory = path.join(root, name);
       if (name) mkdirSync(directory, { mode: 0o700 });
       const identity = lstatSync(directory);
@@ -515,14 +659,26 @@ export async function prepareCodexCandidateCanaryV01(input: {
         native.extracted_native_size_bytes !== receipt.native!.extracted_native_size_bytes ||
         native.archive_member_name !== receipt.native!.archive_member_name)
       throw new Error("codex_candidate_canary_native_identity_mismatch");
+    const nativeAuth = input.native_auth ? prepareNativeCanaryContextV01(path.join(root, "execution"),
+      structuredClone(input.native_auth.approved_instruction_files), receipt) : undefined;
     const binding: CodexCandidateCanaryBindingV01 = Object.freeze({
       kind: "ordinary_candidate_canary.v0.1", execution_root: path.join(root, "execution"), receipt_fingerprint,
+      ...(nativeAuth ? { native_auth: Object.freeze({ profile_fingerprint: input.review.credential_profile_fingerprint,
+        context_fingerprint: nativeAuth.fingerprint, configuration_fingerprint: nativeAuth.launch.configuration_fingerprint }) } : {}),
     });
     CANARY_BINDINGS_V01.set(binding, { receipt, root, directories, command: native.native_executable,
+      native_auth: nativeAuth,
       credential_profile_fingerprint: input.review.credential_profile_fingerprint,
       executable_hash: native.native_executable_sha256, claim: `${receiptPath}.ordinary-canary-claimed`, state: "prepared" });
     return binding;
   } catch (error) { rmSync(root, { recursive: true, force: false }); throw error; }
+}
+
+/** Trusted local diagnostics are permitted only for this genuine prospective
+ * native profile; a caller-supplied lookalike never expands adapter admission. */
+export function isCodexNativeCandidateCanaryV01(binding: CodexCandidateCanaryBindingV01): boolean {
+  const state = CANARY_BINDINGS_V01.get(binding);
+  return !!state?.native_auth && state.state === "prepared";
 }
 
 function canaryStateV01(binding: CodexCandidateCanaryBindingV01): CanaryStateV01 {
@@ -542,8 +698,9 @@ function removeCanaryStateV01(state: CanaryStateV01): void {
   assertCanaryDirectoriesV01(state);
   try { state.assert_source_integrity?.(); }
   finally {
-    // A source-integrity failure must not retain private credentials. Refreshed
-    // auth belongs solely to this disposable tree, including replaced inodes.
+    // Delete only the owned disposable tree, even when source checks fail.
+    // In native mode, ordinary auth/state (including refresh) is outside it.
+    // Historical private-mode refreshed credentials remain cleanup-owned.
     rmSync(state.root, { recursive: true, force: false });
     if (existsSync(state.root)) throw new Error("codex_candidate_canary_cleanup_failed");
     state.state = "closed";
@@ -554,7 +711,7 @@ function removeCanaryStateV01(state: CanaryStateV01): void {
  * This capability exists only inside consumption, after the persistent claim. */
 export function claimCodexCandidateOrdinaryBrokerContextV01(binding: CodexCandidateCanaryBindingV01) {
   const state = CANARY_BINDINGS_V01.get(binding);
-  if (!state || state.state !== "consumed" || state.broker_claimed ||
+  if (!state || state.state !== "consumed" || state.native_auth || state.broker_claimed ||
       readFileSync(state.claim, "utf8") !== `${binding.receipt_fingerprint}\n`)
     throw new Error("codex_candidate_canary_broker_admission_refused");
   assertCanaryDirectoriesV01(state);
@@ -577,15 +734,16 @@ export function consumeCodexCandidateCanaryV01(binding: CodexCandidateCanaryBind
   try {
     writeFileSync(state.claim, `${binding.receipt_fingerprint}\n`, { flag: "wx", mode: 0o600 });
     assertCanaryDirectoriesV01(state);
-    if (state.credential_profile_fingerprint !== codexCandidateOrdinaryBrokerProfileFingerprintV01())
+    if (state.credential_profile_fingerprint !== (state.native_auth ? codexCandidateNativeAuthProfileFingerprintV01() : codexCandidateOrdinaryBrokerProfileFingerprintV01()))
       throw new Error("codex_candidate_canary_credential_profile_changed");
     if (readdirSync(binding.execution_root).length !== 0 ||
         canaryHashV01(state.command) !== state.executable_hash || lstatSync(state.command).isSymbolicLink() ||
         !lstatSync(state.command).isFile() || realpathSync.native(state.command) !== state.command)
       throw new Error("codex_candidate_canary_native_identity_mismatch");
-    // Every child state directory is private. Only the credential broker may
-    // resolve/read the ordinary source; no source-home path reaches the child.
-    const environment: NodeJS.ProcessEnv = {
+    // Historical brokered mode keeps private child state. The prospective
+    // native mode reuses the product's coherent context without extracting
+    // credentials; only its artifact/execution directories are cleanup-owned.
+    const environment: NodeJS.ProcessEnv = state.native_auth ? { ...state.native_auth.environment } : {
       NODE_ENV: state.fixture ? "test" : "production", PATH: "/usr/bin:/bin:/usr/sbin:/sbin", NO_COLOR: "1",
       HOME: path.join(state.root, "home"), CODEX_SQLITE_HOME: path.join(state.root, "sqlite"), TMPDIR: path.join(state.root, "tmp"),
       CODEX_HOME: path.join(state.root, "codex-home"),
@@ -594,13 +752,19 @@ export function consumeCodexCandidateCanaryV01(binding: CodexCandidateCanaryBind
     if (state.fixture_file && canaryHashV01(state.fixture_file.path) !== state.fixture_file.hash)
       throw new Error("codex_candidate_canary_fixture_changed");
     if (state.fixture) {
-      environment.FAKE_CODEX_SCENARIO = `candidate_canary_${state.fixture}`;
+      environment.FAKE_CODEX_SCENARIO = `candidate_canary_${state.native_auth ? "native_" : ""}${state.fixture}`;
       environment.FAKE_CODEX_CANARY_VERSION = state.receipt.candidate.version;
       environment.FAKE_CODEX_TRACE_PATH = `${state.claim}.synthetic-trace`;
       environment.FAKE_CODEX_NETWORK_COUNT_PATH = `${state.claim}.synthetic-network`;
       environment.FAKE_CODEX_CLEANUP_MARKER_PATH = `${state.claim}.synthetic-cleanup`;
     }
-    const auth = provisionCodexCandidateOrdinaryAuthV01(binding);
+    if (state.native_auth && !state.fixture) assertCodexScopedRuntimeArtifactV01({
+      version: state.receipt.candidate.version, native_executable_sha256: state.executable_hash,
+      tagged_source_commit: state.receipt.candidate.tagged_source_commit,
+      compatibility_profile_fingerprint: state.receipt.compatibility_profile_fingerprint,
+    });
+    const auth = state.native_auth ? { assert_before_launch: state.native_auth.assert_current,
+      assert_source_integrity: state.native_auth.assert_current } : provisionCodexCandidateOrdinaryAuthV01(binding);
     state.assert_source_integrity = auth.assert_source_integrity;
     const version = spawnSync(state.command, [...prefix, "--version"], {
       cwd: binding.execution_root, env: environment, encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024,
@@ -613,8 +777,11 @@ export function consumeCodexCandidateCanaryV01(binding: CodexCandidateCanaryBind
     assertCanaryDirectoriesV01(state);
     auth.assert_before_launch();
     return {
-      command: state.command, args: [...prefix, ...CANDIDATE_CONFIG_OVERRIDE_ARGS_V01, "app-server", "--stdio"], environment,
+      command: state.command, args: [...prefix, ...(state.native_auth?.launch.args ?? CANDIDATE_CONFIG_OVERRIDE_ARGS_V01), "app-server", "--stdio"], environment,
+      native_auth: state.native_auth?.launch,
       version: state.receipt.candidate.version,
+      requested_model: state.receipt.reviewed_reentry?.requested_model ?? null,
+      requested_effort: state.receipt.reviewed_reentry?.requested_effort ?? null,
       profile_fingerprint: state.receipt.compatibility_profile_fingerprint, synthetic: Boolean(state.fixture),
       policy_fingerprint: state.receipt.attempts[0]!.observed_policy_fingerprint,
       cleanup: () => removeCanaryStateV01(state),
@@ -626,7 +793,7 @@ export function consumeCodexCandidateCanaryV01(binding: CodexCandidateCanaryBind
  * no caller-supplied executable, environment, credential owner, or launch args. */
 export function emulateCodexCandidateCanaryForTestV01(binding: CodexCandidateCanaryBindingV01, scenario: NonNullable<CanaryStateV01["fixture"]>): void {
   if (process.env.AUGNES_CODEX_ORDINARY_CANDIDATE_TEST_MODE !== "1" ||
-      !["success", "config_mismatch", "user_agent_mismatch", "server_request", "effect", "descendant_cleanup", "prethread_request", "provider_mismatch", "sqlite_mismatch"].includes(scenario))
+      !["result_mismatch", "auth_mismatch", "failed", "unauthenticated", "success", "config_mismatch", "user_agent_mismatch", "server_request", "effect", "descendant_cleanup", "prethread_request", "provider_mismatch", "sqlite_mismatch", "model_mismatch", "effort_mismatch"].includes(scenario))
     throw new Error("codex_candidate_canary_test_controls_refused");
   const state = canaryStateV01(binding);
   state.fixture = scenario;

@@ -495,6 +495,9 @@ export async function executeLocalCanonicalVerification({
   let executionFailure = preflightIssues.length > 0;
   let cleanupComplete = true;
   let cleanupReason = null;
+  // A selected plan is not ownership. Acquisition must return successfully
+  // before this invocation may mutate (or finally remove) shared build state.
+  let sharedGeneratedStateOwned = false;
   let generatedNextPresentAfterExecutionCleanup = nextState.present_before;
 
   try {
@@ -508,6 +511,7 @@ export async function executeLocalCanonicalVerification({
           repositoryRoot,
           operationId: `local-canonical-dependencies:${runId}`,
         });
+        sharedGeneratedStateOwned = true;
       }
       if (generatedNextManaged && nextState.present_before) {
         nextState.removed_before_execution = removeBoundedGeneratedNextState();
@@ -567,7 +571,7 @@ export async function executeLocalCanonicalVerification({
     );
   } finally {
     console.log("[local-canonical] cleanup_start");
-    if (generatedNextManaged && generatedNextEntryPresent()) {
+    if (sharedGeneratedStateOwned && generatedNextManaged && generatedNextEntryPresent()) {
       try {
         nextState.removed_after_execution =
           removeBoundedGeneratedNextState();
@@ -577,7 +581,7 @@ export async function executeLocalCanonicalVerification({
       }
     }
     generatedNextPresentAfterExecutionCleanup = generatedNextEntryPresent();
-    if (generatedNextManaged && generatedNextPresentAfterExecutionCleanup) {
+    if (sharedGeneratedStateOwned && generatedNextManaged && generatedNextPresentAfterExecutionCleanup) {
       cleanupComplete = false;
       cleanupReason ??= "generated_next_cleanup_incomplete";
     }
@@ -593,6 +597,7 @@ export async function executeLocalCanonicalVerification({
       }
     }
     if (
+      sharedGeneratedStateOwned &&
       plan.selected_plan === "full-canonical" &&
       windowsHelperState.required &&
       existsSync(generatedWindowsHelperRoot)

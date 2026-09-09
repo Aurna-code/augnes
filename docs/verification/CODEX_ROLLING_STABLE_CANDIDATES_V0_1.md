@@ -67,10 +67,13 @@ in-memory token and an exclusive `.ordinary-canary-claimed` marker beside the
 receipt before execution. Do not remove or relocate evidence to renew a budget.
 An unused preparation can be disposed without invoking the adapter.
 
-The later invocation uses only official ordinary AuthManager access through
-the ordinary credential-owner directory. Augnes does not read or project
-credentials. HOME, SQLite, temporary state, and the empty execution root are
-private and disposable; PATH is controlled. Exact CLI/user-agent identity,
+The historical/default invocation uses the #1207 ordinary credential broker to validate a
+selected ordinary AuthDotJson and reconstruct only its required TokenData
+and optional refresh timestamp inside a private home. Credential values never
+leave that owner and refreshed child credentials are not written back. The
+source home, configuration and history are not copied. HOME, SQLite, temporary
+state, and the empty execution root are private and disposable; PATH is
+controlled. Exact CLI/user-agent identity,
 ordinary account availability, and `observeCandidateConfigPolicyV01` must pass
 before thread creation. The existing candidate overrides, including
 `features.shell_snapshot_v2=false`, remain mandatory.
@@ -85,6 +88,77 @@ if a terminal result arrived. Unsettled children retain disposable state for
 separate cleanup rather than claiming successful removal. Neither preparation
 nor a future successful canary qualifies or adopts a runtime. Actual
 authenticated execution always requires separate authority.
+
+## Explicit reviewed re-entry under #1234
+
+`runCodexReviewedCandidateReentryV01` is a trusted local entry in the same
+candidate owner. It requires an explicit issue-comment authorization, the exact
+historical receipt and failed canary-result fingerprints, a consumed historical
+claim, settled cleanup and the same candidate tuple. It does not discover a
+different release or change `follow_stable`. It exclusively reserves a new
+directory next to the historical receipt, then uses the existing acquisition,
+extraction, provider-free gates, source comparison and cleanup. Verified local
+archive bytes avoid another download; frozen official metadata is still
+revalidated. Interrupted reservations cannot be retried or moved to renew them.
+
+The new receipt retains its predecessor and authorization references. It binds
+the fixed `gpt-6-astra` / `max` request to the canary's thread configuration and
+turn parameters, with provider fallback disabled and contradictory exposed
+model/effort values refused. Unexposed backend identity remains unknown. This
+does not change historical/default canary settings, its fixed non-tool prompt,
+result schema, read-only policy, exclusive claim or terminal/settlement owners.
+The existing smaller execution ceiling is **60,000 ms**, with the existing
+10,000 ms RPC and stop-settlement limits; the 180,000 ms authorization does not
+increase it. Historical/default candidate canaries cannot combine `scoped_task`,
+incident hooks, launch overrides or Strict-lane authority. The native profile
+below admits the reviewed local incident hook through its genuine candidate
+binding; it does not admit a scoped-task grant or a launch override.
+
+`readCodexCandidateOrdinaryAuthAvailabilityV01` uses the same source resolver
+and validator as provisioning. It returns only a closed availability/reason,
+route and broker-profile fingerprint. Availability reads the selected source
+but is not a grant. Preparation binds opaque source/physical/configuration
+metadata; consumption revalidates it and the ordinary material before creating
+a private snapshot. No credential-content hash is made.
+
+### Superseded unmerged reader experiment
+
+The original file-only observation remains historical. The earlier follow-up under
+[PR #1239 review](https://github.com/hynk-studio/augnes/pull/1239#pullrequestreview-5154321040)
+attempted the selected macOS Direct keyring source. Pinned source
+`3d2ee51ca2d5db578f328aa75e20aa22c0197c9a` selects this backend when
+`features.secret_auth_storage` is false (the macOS default). It uses service
+`Codex Auth`, the canonical-home-derived store key, and the User-domain
+keychain selected by pinned keyring 3.6.3. A short-lived source-owned native
+reader uses the same Security.framework lookup with interaction disabled;
+`/usr/bin/security` cannot enforce that no-prompt requirement. Compilation and
+read each have a 10-second bound. The reader and all its output remain private
+to the broker and are removed before it returns. This does not use Strict
+Agent Identity, create/delete keychain entries or expose a public getter.
+
+File selection never queries keyring; keyring selection never falls back to a
+stale file. Secrets, auto fallback, ephemeral, selected profiles, custom auth
+routes, managed configuration and nonempty workspace restrictions remain
+explicit prelaunch refusals. The bounded route does not drop workspace rules
+when private AuthManager refreshes. No real source configuration or storage
+mode is changed. The old file profile/fingerprints are unchanged; Direct
+keyring has a distinct profile. Locked/denied/unavailable reads return a closed
+refusal without waiting for OS interaction. No different source is tried.
+
+Only minimum validated ordinary TokenData/optional last_refresh is written to
+the owner-only candidate snapshot. Normal child refresh remains private;
+source no-writeback, integrity checks, rollback removal and the existing
+single-use claim remained mandatory. Its real source prerequisite refused before
+consumption. The later native-auth dispatch supersedes this unmerged reader;
+its implementation has been removed from this PR. These paragraphs describe the
+historical experiment, not a current product prerequisite or setup instruction.
+
+The exact 0.153.4 archive/native passed the scoped credential-free sandbox,
+configuration and command-environment checks. The native-profile authenticated
+canary subsequently completed as recorded in the execution card. Registry and
+managed adoption still require review; the default selection remains 0.152.1.
+The old 0.153.4 HOLD and consumed claim remain historical. The retained
+post-adoption diagnostic is a distinct, unexecuted allowance.
 
 ## Bounded outcomes
 
@@ -162,3 +236,24 @@ new process-owning integration child uses the existing bounded Canonical
 runner. The manual live candidate command is never called by Canonical.
 Changes to Canonical registration itself still select full Canonical under the
 [existing policy](../../.github/LOCAL_CANONICAL_VERIFICATION.md).
+
+
+## Prospective native ordinary-context profile (#1239)
+
+Explicit `native_auth` preparation selects a new `native_ordinary_context_canary.v0.1`
+profile, not an exemption to the historical private-home profile. It uses official
+Codex AuthManager with the normal adapter's bounded environment and the existing
+coherent native home/SQLite context; no Augnes credential reader or snapshot runs.
+The exact 0.153.4 artifact and reviewed re-entry are required. Account availability
+is checked natively during the single counted startup, never as an authenticated
+rehearsal. Missing native login, policy drift or settlement failure remains HOLD.
+
+Shared restriction projection suppresses ambient sources before launch and validates
+named permissions, source-bound instructions, auth-policy readback and the closed
+command environment. The candidate task root is empty; no prior thread or history
+is replayed. Native token refresh and compatible incidental state/cache writes are
+host-owned effects. Cleanup does not roll them back or remove the ordinary home.
+No cold-isolation or Strict qualification is claimed. See the
+[execution-card connection](P51_SCOPED_NATIVE_HOST_EXECUTION_CARD.md#pr-1239-prospective-native-auth-canary-connection)
+for capture and adoption boundaries. Historical claims, profile fingerprints and
+receipts are not rewritten or reused.
