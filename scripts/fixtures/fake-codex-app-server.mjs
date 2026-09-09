@@ -23,15 +23,17 @@ import { waitForBoundedFileSignal } from "../bounded-file-signal.mjs";
 
 const root = process.cwd();
 const canonicalTestRoot = process.env.AUGNES_CANONICAL_TEMP_ROOT ?? null;
-const scenario =
+const rawScenario =
   process.env.FAKE_CODEX_SCENARIO ??
   (process.env.AUGNES_CANONICAL_TEST_MODE === "1" && canonicalTestRoot
     ? "browser_two_sequential_approvals"
     : "command_approval");
+const nativeCandidateScenario = rawScenario.startsWith("candidate_canary_native_");
+const scenario = nativeCandidateScenario ? rawScenario.replace("candidate_canary_native_", "candidate_canary_") : rawScenario;
 const isolatedAuthScenario = scenario.startsWith("isolated_auth_");
 const candidate01532Scenario = scenario.startsWith("candidate_0_153_2_");
 const candidateCanaryScenario = scenario.startsWith("candidate_canary_");
-const scopedScenario = scenario.startsWith("scoped_");
+const scopedScenario = nativeCandidateScenario || scenario.startsWith("scoped_");
 let scopedConfig = null;
 let scopedPermissions = null;
 const candidateCanaryVersion = process.env.FAKE_CODEX_CANARY_VERSION;
@@ -94,7 +96,16 @@ if (process.argv.at(-2) !== "app-server" || process.argv.at(-1) !== "--stdio") {
   process.exit(2);
 }
 
-if (candidateCanaryScenario) {
+if (nativeCandidateScenario) {
+  // No credential file is opened by this fixture's native-route controller.
+  trace("candidate_native_context", {
+    existing_state: existsSync(path.join(process.env.CODEX_HOME, "state_5.sqlite")),
+    no_private_sqlite_override: process.env.CODEX_SQLITE_HOME == null || process.env.CODEX_SQLITE_HOME === process.env.CODEX_HOME,
+    no_credential_environment: !["OPENAI_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_API_KEY"].some(k => process.env[k]),
+    no_auth_override: !process.argv.some(v => /^(?:cli_auth_credentials_store|forced_login_method)=/u.test(v)),
+  });
+}
+if (candidateCanaryScenario && !nativeCandidateScenario) {
   // Synthetic auth only. Public trace contains structural booleans, never
   // credential values, source paths or the serialized snapshot.
   const privateRoot = path.dirname(root);
@@ -317,7 +328,7 @@ async function handle(message) {
     if (message.method === "account/read") {
       respond(
         message.id,
-        scenario === "unauthenticated" ||
+        scenario === "unauthenticated" || scenario === "candidate_canary_unauthenticated" ||
         candidate01532Scenario ||
         scenario === "isolated_auth_unauthenticated"
           ? { account: null, requiresOpenaiAuth: true }
@@ -378,6 +389,19 @@ async function handle(message) {
         if (scenario === "scoped_ignored_mcp") config.mcp_servers.inherited.enabled = true;
         if (scenario === "scoped_ignored_permissions") config.permissions[scopedPermissions].filesystem["/"] = "read";
         if (scenario === "scoped_ignored_environment_filter") config.shell_environment_policy.include_only = ["*"];
+        if (nativeCandidateScenario) {
+          initializedCandidatePolicy = true;
+          if (scenario === "candidate_canary_auth_mismatch") config.cli_auth_credentials_store = "file";
+          if (scenario === "candidate_canary_config_mismatch") config.features.memories = true;
+          if (scenario === "candidate_canary_provider_mismatch") config.model_providers = { openai: {} };
+          if (scenario === "candidate_canary_sqlite_mismatch") config.sqlite_home = "/synthetic-other-state";
+          trace("candidate_native_policy", {
+            backend: config.cli_auth_credentials_store ?? "file",
+            workspace_restriction_retained: config.forced_chatgpt_workspace_id === "synthetic-workspace",
+            shell_disabled: config.features.shell_tool === false && config.features.unified_exec === false,
+            closed_environment: config.shell_environment_policy.inherit === "none" && JSON.stringify(config.shell_environment_policy.include_only) === '["PATH"]',
+          });
+        }
         scopedConfig = config;
         trace("scoped_launch_controls", {
           strict_config: process.argv.includes("--strict-config"),
@@ -549,7 +573,7 @@ async function handle(message) {
         respondError(message.id, -32602, "scoped_thread_policy_required");
         return;
       }
-      if (candidateCanaryScenario && (!initializedCandidatePolicy || message.params?.ephemeral !== true ||
+      if (candidateCanaryScenario && !nativeCandidateScenario && (!initializedCandidatePolicy || message.params?.ephemeral !== true ||
           message.params?.allowProviderModelFallback !== false || message.params?.sandbox !== "read-only"))
         throw new Error("candidate_canary_prethread_gate_missing");
       if (scenario === "crash_before_thread_id") {
@@ -685,14 +709,14 @@ async function handle(message) {
           emitObservedItems(path.join(path.dirname(root), "outside-result.ts"));
           completeSuccess();
         } else if (
-          scenario === "success" || scenario === "scoped_success" || scenario === "scoped_result_effect" || scenario === "candidate_canary_success" || scenario === "candidate_canary_descendant_cleanup" ||
+          scenario === "success" || scenario === "scoped_success" || scenario === "scoped_result_effect" || scenario === "candidate_canary_success" || scenario === "candidate_canary_result_mismatch" || scenario === "candidate_canary_descendant_cleanup" ||
           isolatedAuthScenario ||
           scenario === "thread_bound_notification_before_response" ||
           scenario === "status_only_notifications"
         )
           completeSuccess();
         else if (scenario.startsWith("terminal_diagnostic_")) completeDiagnosticFailure();
-        else if (scenario === "turn_failure") completeFailure();
+        else if (scenario === "turn_failure" || scenario === "candidate_canary_failed") completeFailure();
         else if (scenario === "scoped_approval") requestCommandApproval();
         else if (scenario === "scoped_effect") {
           notify("item/started", { threadId, turnId, item: { id: "unexpected-tool", type: "webSearch" } });
@@ -1720,14 +1744,14 @@ function completeUnsafeTextStructuredResult(summary) {
 }
 
 function structuredResult() {
-  if (scopedScenario && scenario !== "scoped_result_effect") return JSON.stringify({
+  if (scopedScenario && !candidateCanaryScenario && scenario !== "scoped_result_effect") return JSON.stringify({
     result_version: "codex_host_structured_result.v0.1", summary: "The synthetic scoped fixture returned a bounded result.",
     changed_files: [], artifacts: [], observed_actions: [], commands: [],
     checks: [{ check_id: "synthetic_fixture", required: false, status: "passed", summary: "Deterministic contract check only." }],
     skipped_checks: [], uncertainty: ["No model was used."], gaps: [], proposed_next_steps: ["Review the bounded fixture result."],
   });
   if (candidateCanaryScenario) return JSON.stringify({
-    result_version: "codex_host_structured_result.v0.1", summary: "AUGNES_CANARY_OK",
+    result_version: "codex_host_structured_result.v0.1", summary: scenario === "candidate_canary_result_mismatch" ? "Different bounded result" : "AUGNES_CANARY_OK",
     changed_files: [], artifacts: [], observed_actions: [], commands: [], checks: [],
     skipped_checks: [], uncertainty: [], gaps: [], proposed_next_steps: [],
   });
@@ -1793,7 +1817,7 @@ function threadResponse(options = {}) {
   const isolated = isolatedAuthScenario || candidateCanaryScenario || scopedScenario;
   return {
     thread: thread({ ...options, ephemeral: isolated }),
-    model: candidateCanaryScenario && scenario !== "candidate_canary_model_mismatch" ? candidateRequestedModel ?? "configured-default" :
+    model: candidateCanaryScenario ? (scenario === "candidate_canary_model_mismatch" ? "configured-default" : candidateRequestedModel ?? "configured-default") :
       scopedScenario && scenario !== "scoped_model_mismatch" ? "gpt-6-astra" : "configured-default",
     modelProvider:
       isolated && scenario !== "isolated_auth_provider_mismatch"
@@ -1804,7 +1828,7 @@ function threadResponse(options = {}) {
     instructionSources:
       scenario === "isolated_auth_instruction_source_drift"
         ? ["file:///foreign-instruction-source"]
-        : [],
+        : nativeCandidateScenario && existsSync(path.join(process.env.CODEX_HOME, "AGENTS.md")) ? [path.join(process.env.CODEX_HOME, "AGENTS.md")] : [],
     approvalPolicy: scopedScenario ? "never" : "on-request",
     approvalsReviewer: "user",
     sandbox: candidateCanaryScenario || scopedScenario ? { type: "readOnly", networkAccess: false } : {
@@ -1814,7 +1838,7 @@ function threadResponse(options = {}) {
       excludeTmpdirEnvVar: true,
       excludeSlashTmp: true,
     },
-    reasoningEffort: candidateCanaryScenario && scenario !== "candidate_canary_effort_mismatch" ? candidateRequestedEffort :
+    reasoningEffort: candidateCanaryScenario ? (scenario === "candidate_canary_effort_mismatch" ? null : candidateRequestedEffort) :
       scopedScenario && scenario !== "scoped_effort_mismatch" ? "max" : null,
     ...(scopedScenario ? { activePermissionProfile: { id: scenario === "scoped_profile_mismatch" ? "wrong" : scopedPermissions } } : {}),
   };

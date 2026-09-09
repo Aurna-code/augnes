@@ -447,7 +447,7 @@ permissions, final filtering, approved reads, denied held reads, symlink escape,
 writes, command network and finite cleanup. This is not cold isolation, Strict
 qualification or evidence of an actual scoped model task.
 
-**Current disposition: HOLD / not_run.** On 2026-09-09 the candidate broker's
+**Historical preparation disposition: HOLD / not_run.** On 2026-09-09 the candidate broker's
 supported file-backed source was absent while ordinary storage was configured
 as keyring. The new candidate canary and retained incident were not executed.
 No new qualification or registry/production-selection change is prepared on
@@ -465,9 +465,9 @@ This task does not execute or renew that allowance. No historical fingerprint
 is rewritten or transferred to the new source.
 
 
-### PR #1239 ordinary-keyring and verification follow-up
+### Historical PR #1239 ordinary-keyring and verification follow-up
 
-The reviewed candidate credential connection resolves the selected ordinary
+The earlier unmerged candidate credential connection resolved the selected ordinary
 source in the existing broker. Direct macOS keyring uses the pinned User-domain
 lookup with interaction disabled, validates ordinary TokenData, and provisions
 only a private owner-only candidate snapshot. Secrets/auto fallback, managed or
@@ -491,3 +491,52 @@ preflight refuses or maintenance acquisition fails. Successful acquisition
 retains normal partial/success cleanup and restoration. Existing receipt fields
 report actual presence/removal; an untouched build is not reported as removed.
 The prior failed receipt and later recovery remain separate historical evidence.
+
+
+### PR #1239 prospective native-auth canary connection
+
+The later user dispatch replaces the custom ordinary-Keychain reader prerequisite
+with `native_ordinary_context_canary.v0.1`. The unmerged custom reader is removed;
+the historical #1207 file broker, its profile, and Strict behavior are unchanged.
+Prior refusals and receipts retain their original meaning. A helper's OSStatus
+is not evidence that official Codex cannot use the ordinary login.
+
+`prepareCodexCandidateCanaryV01({native_auth: {approved_instruction_files}, ...})`
+binds a distinct profile fingerprint, existing native context, approved instruction
+hashes and effective launch-policy fingerprint to the genuine candidate handle.
+Only the exact reviewed 0.153.4 artifact may consume this mode. It remains
+unqualified candidate evidence under the existing exclusive reviewed-reentry and
+single-use claim owners. Neither an arbitrary launch nor a scoped-task grant can
+substitute for that binding.
+
+The candidate and normal production adapter use the same bounded child-environment
+owner. Official AuthManager consumes the existing coherent HOME/CODEX_HOME and
+SQLite context, chooses the configured credential backend, enforces login and
+workspace restrictions, and owns ordinary refresh. Augnes does not retrieve,
+copy, hash, or export credentials. Native refresh/cache writes are expected host
+effects; no byte-identical-home or Strict/cold-isolation claim is made. The
+candidate cleanup owns only its extracted artifact and empty execution directory,
+not pre-existing native authentication, history, or databases. A separate fresh
+private SQLite paired with real history is refused, as is configuration redirection.
+
+The shared pre-launch restriction owner selects named permissions at initialization,
+thread and turn boundaries; disables ambient memory/background generation, Chronicle,
+MCP/plugins/connectors/discovery and shell tools; and verifies the final closed
+command environment. Explicit auth-selection/restriction settings must match native
+configuration readback; conflicting source layers refuse. Generic global instructions
+must match approved file hashes. No prior transcript is replayed. The ephemeral
+canary has no task-file grants; write/network permissions remain denied and any
+unexpected task tool/effect stops the existing candidate contract.
+
+`createRecordedCodexAppServerAdapterV01` may connect the already reviewed local
+incident-message callback only for a genuine native-candidate handle. Category
+recording, accepted-terminal ownership, cancellation and result semantics remain
+unchanged. The finite operator closes captures after settlement and reads them
+from disk; a missing/withheld message is not authority to retry.
+
+The limit remains one fixed non-tool canary, requesting `gpt-6-astra` / `max`,
+60,000 ms and existing smaller RPC/settlement bounds. Native account/configuration
+checks occur inside that counted startup. The outcome and exact exercised source
+are reported in the PR's local evidence appendix. Production stays on 0.152.1;
+qualification/adoption require actual canary completion and settlement plus review.
+The pending scoped incident remains unexecuted and requires post-adoption bindings.

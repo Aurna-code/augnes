@@ -10,7 +10,7 @@ import {
 } from "../lib/vnext/native-host/codex-rolling-stable-candidate";
 import { extractDiscoveredCodexCandidateArchiveV01 } from "../lib/vnext/native-host/codex-managed-runtime-store";
 import { CODEX_QUALIFIED_RUNTIME_REGISTRY_V01, selectPinnedCodexQualifiedRuntimeV01 } from "../lib/vnext/native-host/codex-qualified-runtime-registry";
-import { testCodexCandidateCanaryBindingV01 } from "./test-codex-candidate-canary-binding";
+import { testCodexCandidateCanaryBindingV01, testCodexNativeCandidateCanaryV01 } from "./test-codex-candidate-canary-binding";
 
 const hash = (bytes: Buffer) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 const root = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "augnes-rolling-test-")));
@@ -182,6 +182,9 @@ async function fullFailureAndReplay(): Promise<void> {
   assert.equal(receipt_fingerprint, codexRollingFingerprintV01(material));
   assert.equal(JSON.parse(readFileSync(first.receipt_path, "utf8")).receipt_fingerprint, receipt_fingerprint);
   await testCodexCandidateCanaryBindingV01(root, first.receipt, archive);
+  selectedVersion = "0.153.4";
+  await testCodexNativeCandidateCanaryV01(root, { ...first.receipt, candidate: freezeCodexRollingIdentityV01(metadata(selectedVersion, archive)) }, archive);
+  selectedVersion = "9.8.7";
   // Distinct explicit review after a consumed terminal canary. Synthetic
   // evidence only; the deliberately non-runnable native makes the new cheap
   // gate HOLD. No historical file, claim, or follow_stable policy is changed.

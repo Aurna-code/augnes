@@ -8,7 +8,7 @@ import path from "node:path";
 
 import { genericCliBuilderInputFixture } from "@/fixtures/vnext/protocol/task-context-packet-v0-1";
 import { createCodexAppServerAdapterV01, CODEX_APP_SERVER_ADAPTER_VERSION_V01, type CodexAppServerAdapterOptionsV01 } from "@/lib/vnext/native-host/codex-app-server-adapter";
-import { assertCodexScopedTaskCurrentV01, createCodexScopedTaskV01, createCodexFeasibilityWindowV01, prepareScopedCodexLaunchV01 } from "@/lib/vnext/native-host/codex-scoped-task";
+import { assertCodexScopedTaskCurrentV01, createCodexScopedTaskV01, createCodexFeasibilityWindowV01, prepareScopedCodexLaunchV01, prepareCodexNativeCanaryLaunchV01 } from "@/lib/vnext/native-host/codex-scoped-task";
 import { inspectNativeHostPhysicalRootIdentityV01 } from "@/lib/vnext/native-host/project-root-identity";
 import { resolveCodexProductionRuntimeV01 } from "@/lib/vnext/native-host/codex-production-runtime";
 import { extractDiscoveredCodexCandidateArchiveV01 } from "@/lib/vnext/native-host/codex-managed-runtime-store";
@@ -659,6 +659,16 @@ async function pinnedSandboxV01(testRoot: string, stage: string, held: string, e
     await pinnedConfigurationV01(executable, prepareScopedCodexLaunchV01(scope, environment, runtime), environment, stage, testRoot, runtime.version);
     assert.deepEqual(readFileSync(configFile), original, "Diagnostic must leave original synthetic config unchanged");
     assert.deepEqual(readFileSync(authFile), authBefore, "Diagnostic must leave original synthetic auth unchanged");
+  }
+  if (archiveIndex >= 0) {
+    const nativeConfigBefore = readFileSync(configFile);
+    writeFileSync(configFile, 'cli_auth_credentials_store="file"\nforced_login_method="chatgpt"\nforced_chatgpt_workspace_id="00000000-0000-4000-8000-000000000001"\n' + nativeConfigBefore.toString("utf8"));
+    const nativeLaunch = prepareCodexNativeCanaryLaunchV01({ root: stage,
+      fingerprint: createProtocolSha256V01("synthetic-native-canary-only"), approved_instruction_files: [] }, environment, runtime);
+    await pinnedConfigurationV01(executable, nativeLaunch, environment, stage, testRoot, runtime.version);
+    assert.equal(nativeLaunch.settings.features && (nativeLaunch.settings.features as Record<string, unknown>).shell_tool, false);
+    console.log("native canary projection: same strict/config/MCP/command consumer; native auth/login/workspace readback retained; shell tool disabled; empty task file grants; synthetic file auth override only for zero-network proof");
+    writeFileSync(configFile, nativeConfigBefore);
   }
   const launch = prepareScopedCodexLaunchV01(scope, environment, runtime);
   assert.equal(statExistsV01(startupMarker), false, "Inherited MCP must be disabled before process startup");

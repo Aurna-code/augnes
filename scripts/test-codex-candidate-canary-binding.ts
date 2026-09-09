@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { genericCliBuilderInputFixture } from "../fixtures/vnext/protocol/task-context-packet-v0-1";
@@ -8,10 +9,11 @@ import { CANDIDATE_CONFIG_OVERRIDE_ARGS_V01, observeCandidateConfigPolicyV01 } f
 import {
   codexRollingFingerprintV01, prepareCodexCandidateCanaryV01, disposeCodexCandidateCanaryV01,
   emulateCodexCandidateCanaryForTestV01, type CodexRollingReceiptV01,
-  consumeCodexCandidateCanaryV01, claimCodexCandidateOrdinaryBrokerContextV01,
+  consumeCodexCandidateCanaryV01, codexCandidateNativeAuthProfileFingerprintV01, claimCodexCandidateOrdinaryBrokerContextV01,
 } from "../lib/vnext/native-host/codex-rolling-stable-candidate";
-import { codexCandidateOrdinaryBrokerProfileFingerprintV01, provisionCodexCandidateOrdinaryAuthV01, bindCodexCandidateOrdinarySourceV01, installCodexCandidateKeyringForTestV01, containsCodexCredentialSecretShapeV01, readCodexCandidateOrdinaryAuthAvailabilityV01 } from "../lib/vnext/native-host/codex-credential-broker";
+import { codexCandidateOrdinaryBrokerProfileFingerprintV01, provisionCodexCandidateOrdinaryAuthV01, containsCodexCredentialSecretShapeV01 } from "../lib/vnext/native-host/codex-credential-broker";
 import { assertCurrentCodexQualifiedRuntimeSelectionV01, CODEX_QUALIFIED_RUNTIME_REGISTRY_FINGERPRINT_V01, selectPinnedCodexQualifiedRuntimeV01 } from "../lib/vnext/native-host/codex-qualified-runtime-registry";
+import { createRecordedCodexAppServerAdapterV01 } from "./codex-app-server-observation-recorder";
 import type { NativeHostInvocationControlV01, NativeHostRequestV01 } from "../types/vnext/native-host-adapter";
 
 // Called by the existing rolling-candidate Canonical owner with only synthetic
@@ -60,10 +62,6 @@ export async function testCodexCandidateCanaryBindingV01(root: string, initial: 
     return { binding: await prepareCodexCandidateCanaryV01({ receipt_path: receiptPath, review, archive_bytes: archive }), receiptPath };
   };
   try {
-    const beforeAvailability = metadata(sourceAuth);
-    assert.deepEqual(readCodexCandidateOrdinaryAuthAvailabilityV01(), { status: "available", route: "ordinary_chatgpt_auth_file",
-      credential_profile_fingerprint: codexCandidateOrdinaryBrokerProfileFingerprintV01(), reason: "validated" });
-    assert.equal(metadata(sourceAuth), beforeAvailability);
     const invalidPath = path.join(root, `${receipt.candidate.release_tag}-darwin-arm64.json`);
     writeFileSync(invalidPath, JSON.stringify(receipt), { mode: 0o600 });
     await assert.rejects(prepareCodexCandidateCanaryV01({ receipt_path: invalidPath, review: { ...review, receipt_fingerprint: "wrong" }, archive_bytes: archive }));
@@ -112,7 +110,6 @@ export async function testCodexCandidateCanaryBindingV01(root: string, initial: 
       "invalid-json",
     ]) {
       writeFileSync(sourceAuth, typeof material === "string" ? material : JSON.stringify(material));
-      assert.equal(readCodexCandidateOrdinaryAuthAvailabilityV01().status, "unavailable");
       const { binding, receiptPath } = await prepare();
       emulateCodexCandidateCanaryForTestV01(binding, "success");
       assert.throws(() => consumeCodexCandidateCanaryV01(binding), /^CodexCredentialBrokerErrorV01: codex_candidate_ordinary_auth_projection_refused$/);
@@ -242,88 +239,6 @@ export async function testCodexCandidateCanaryBindingV01(root: string, initial: 
       assert.notEqual((await retry.result).outcome, "completed"); await retry.settled;
       assert.equal(existsSync(reminted.execution_root), false);
     }
-    if (process.platform === "darwin") {
-      const configPath = path.join(sourceHome, "config.toml");
-      const fileProfile = review.credential_profile_fingerprint;
-      assert.equal(fileProfile, "sha256:00fc8ac374128518207717ab18f29949b5ec776f0eca38398a47a57f9a6bbc85");
-      const configureKeyring = () => writeFileSync(configPath, 'cli_auth_credentials_store = "keyring"\n[features]\nsecret_auth_storage = false\n');
-      let keyringMaterial = JSON.stringify(syntheticAuth);
-      let deny = false;
-      let reads = 0;
-      let keychainSelection = "synthetic-first-user-keychain";
-      const restoreKeyring = installCodexCandidateKeyringForTestV01(() => {
-        reads++;
-        if (deny) throw new Error("SYNTHETIC_PRIVATE_DENIAL_MUST_NOT_ESCAPE");
-        return keyringMaterial;
-      }, () => keychainSelection);
-      try {
-        configureKeyring();
-        writeFileSync(sourceAuth, JSON.stringify({ OPENAI_API_KEY: "sk-synthetic-stale-file-never-selected" }));
-        const fileBefore = metadata(sourceAuth), configBefore = metadata(configPath);
-        const available = readCodexCandidateOrdinaryAuthAvailabilityV01();
-        assert.equal(available.status, "available");
-        assert.equal(available.route, "ordinary_chatgpt_auth_keyring_direct");
-        assert.notEqual(available.credential_profile_fingerprint, fileProfile);
-        review.credential_profile_fingerprint = available.credential_profile_fingerprint!;
-        const { binding } = await prepare(); emulateCodexCandidateCanaryForTestV01(binding, "success");
-        const invocation = createCodexAppServerAdapterV01({ candidate_canary: binding }).invoke(request(binding.execution_root), control());
-        assert.equal((await invocation.result).outcome, "completed"); await invocation.settled;
-        assert.equal(existsSync(binding.execution_root), false);
-        assert.equal(metadata(sourceAuth), fileBefore); assert.equal(metadata(configPath), configBefore);
-        assert.ok(reads >= 3, "availability, consumption and launch/cleanup independently revalidate");
-        for (const raw of ["malformed", JSON.stringify({ auth_mode: "agentIdentity", agent_identity: "synthetic" }), JSON.stringify({ ...syntheticAuth, tokens: null })]) {
-          keyringMaterial = raw;
-          assert.equal(readCodexCandidateOrdinaryAuthAvailabilityV01().status, "unavailable");
-        }
-        keyringMaterial = JSON.stringify(syntheticAuth); deny = true;
-        assert.equal(JSON.stringify(readCodexCandidateOrdinaryAuthAvailabilityV01()).includes("SYNTHETIC_PRIVATE"), false);
-        const denied = await prepare(); emulateCodexCandidateCanaryForTestV01(denied.binding, "success");
-        assert.throws(() => consumeCodexCandidateCanaryV01(denied.binding), /projection_refused/);
-        assert.equal(existsSync(denied.binding.execution_root), false); deny = false;
-        const domainDrift = await prepare(); emulateCodexCandidateCanaryForTestV01(domainDrift.binding, "success");
-        keychainSelection = "synthetic-replaced-user-keychain";
-        assert.throws(() => consumeCodexCandidateCanaryV01(domainDrift.binding), /projection_refused/);
-        assert.equal(existsSync(domainDrift.binding.execution_root), false);
-        keychainSelection = "synthetic-first-user-keychain";
-        const selectionDrift = await prepare(); emulateCodexCandidateCanaryForTestV01(selectionDrift.binding, "success");
-        configureKeyring(); // same values, different actual observation: not the bound source
-        assert.throws(() => consumeCodexCandidateCanaryV01(selectionDrift.binding), /projection_refused/);
-        assert.equal(existsSync(selectionDrift.binding.execution_root), false);
-        const snapshot = await prepare(); emulateCodexCandidateCanaryForTestV01(snapshot.binding, "success");
-        const launch = consumeCodexCandidateCanaryV01(snapshot.binding);
-        const authPath = path.join(launch.environment.CODEX_HOME!, "auth.json");
-        assert.equal(lstatSync(authPath).mode & 0o777, 0o600);
-        assert.deepEqual(JSON.parse(readFileSync(authPath, "utf8")).tokens, syntheticAuth.tokens);
-        assert.equal(containsCodexCredentialSecretShapeV01(JSON.stringify(launch)), false);
-        keyringMaterial = JSON.stringify({ ...syntheticAuth, tokens: { ...syntheticAuth.tokens, refresh_token: "synthetic-concurrent-refresh" } });
-        assert.throws(() => launch.cleanup(), /source_integrity_failed/);
-        assert.equal(existsSync(snapshot.binding.execution_root), false);
-        keyringMaterial = JSON.stringify(syntheticAuth);
-        for (const config of [
-          'cli_auth_credentials_store = "keyring"\n[features]\nsecret_auth_storage = true\n',
-          'cli_auth_credentials_store = "auto"\n',
-          'cli_auth_credentials_store = "ephemeral"\n',
-          'cli_auth_credentials_store = "unknown"\n',
-          'cli_auth_credentials_store = "keyring"\nforced_login_method = "api"\n',
-          'cli_auth_credentials_store = "keyring"\nforced_chatgpt_workspace_id = "synthetic-other-account"\n',
-        ]) {
-          writeFileSync(configPath, config); resetAuth();
-          assert.equal(readCodexCandidateOrdinaryAuthAvailabilityV01().status, "unavailable");
-        }
-        writeFileSync(configPath, 'cli_auth_credentials_store = "SYNTHETIC_PRIVATE_PARSE_SENTINEL');
-        for (const sourceRead of [codexCandidateOrdinaryBrokerProfileFingerprintV01, bindCodexCandidateOrdinarySourceV01])
-          assert.throws(sourceRead, error => String(error) === "CodexCredentialBrokerErrorV01: codex_candidate_ordinary_auth_source_refused");
-        assert.equal(JSON.stringify(readCodexCandidateOrdinaryAuthAvailabilityV01()).includes("SYNTHETIC_PRIVATE"), false);
-        writeFileSync(configPath, '# file source parity\n'); resetAuth();
-        const priorReads = reads;
-        assert.equal(readCodexCandidateOrdinaryAuthAvailabilityV01().status, "available");
-        assert.equal(reads, priorReads, "file selection must never query keyring");
-        assert.equal(codexCandidateOrdinaryBrokerProfileFingerprintV01(), fileProfile);
-      } finally {
-        restoreKeyring(); writeFileSync(configPath, '# synthetic private config\n'); resetAuth();
-        review.credential_profile_fingerprint = fileProfile;
-      }
-    }
     // A reviewed re-entry binds the requested model/effort, without changing
     // historical/default canary args, broker profile, or candidate authority.
     const reentered = structuredClone(receipt);
@@ -359,6 +274,103 @@ export async function testCodexCandidateCanaryBindingV01(root: string, initial: 
     else process.env.CODEX_HOME = originalCodexHome;
     if (originalTestMode === undefined) delete process.env.AUGNES_CODEX_ORDINARY_CANDIDATE_TEST_MODE;
     else process.env.AUGNES_CODEX_ORDINARY_CANDIDATE_TEST_MODE = originalTestMode;
+  }
+}
+
+/** Same finite adapter/recorder lifecycle, synthetic native auth/state only. */
+export async function testCodexNativeCandidateCanaryV01(root: string, initial: CodexRollingReceiptV01, archive: Buffer): Promise<void> {
+  const env = { CODEX_HOME: process.env.CODEX_HOME, CODEX_SQLITE_HOME: process.env.CODEX_SQLITE_HOME,
+    AUGNES_CODEX_ORDINARY_CANDIDATE_TEST_MODE: process.env.AUGNES_CODEX_ORDINARY_CANDIDATE_TEST_MODE };
+  const home = path.join(root, "native-ordinary-home"); mkdirSync(home, { mode: 0o700 });
+  const database = path.join(home, "state_5.sqlite"), auth = path.join(home, "auth.json"), config = path.join(home, "config.toml");
+  writeFileSync(database, "synthetic-existing-state");
+  writeFileSync(auth, "SYNTHETIC_STALE_SECRET_NOT_READ_OR_COPIED");
+  const instruction = path.join(home, "AGENTS.md"); writeFileSync(instruction, "Synthetic approved generic instruction.");
+  const approved = [{ path: instruction, sha256: createHash("sha256").update(readFileSync(instruction)).digest("hex") }];
+  process.env.CODEX_HOME = home; delete process.env.CODEX_SQLITE_HOME;
+  process.env.AUGNES_CODEX_ORDINARY_CANDIDATE_TEST_MODE = "1";
+  const receipt = structuredClone(initial);
+  receipt.attempts = [{ ...receipt.attempts[0]!, state: "compatible_exact", observed_cli_version: "0.153.4", cli_reported_version: "0.153.4",
+    observed_policy_fingerprint: policyFingerprint(), runtime_exercised_methods: ["initialize", "initialized", "account/read", "config/read"],
+    private_environment_observed: true, account_disposition: "unauthenticated_empty_state", executable_fingerprint: receipt.native!.native_executable_sha256 }];
+  receipt.failure_reason = null; receipt.disposition = "HOLD_INCOMPATIBLE_OR_UNCLEAR_DELTA";
+  const selected = selectPinnedCodexQualifiedRuntimeV01();
+  receipt.delta = { classification: "incompatible_or_unclear", baseline_source_commit: selected.artifact.tagged_source_commit,
+    candidate_source_commit: receipt.candidate.tagged_source_commit, baseline_tree: "4".repeat(40), candidate_tree: receipt.candidate.source_tree,
+    changed_paths: [], reason: "synthetic_native_profile_review" };
+  receipt.reviewed_reentry = { authorization_ref: "https://github.com/hynk-studio/augnes/issues/1234#issuecomment-123",
+    reason: "new_host_reported_client_version_rejection", prior_receipt_fingerprint: initial.receipt_fingerprint,
+    prior_canary_result_fingerprint: codexRollingFingerprintV01("synthetic-prior-result"), requested_model: "gpt-6-astra", requested_effort: "max" };
+  const { receipt_fingerprint: ignored, ...material } = receipt; void ignored;
+  receipt.receipt_fingerprint = codexRollingFingerprintV01(material);
+  let count = 0;
+  const prepare = async (instructions = approved) => {
+    const directory = path.join(root, `native-canary-${count++}`); mkdirSync(directory, { mode: 0o700 });
+    const file = path.join(directory, "rust-v0.153.4-darwin-arm64.json"); writeFileSync(file, JSON.stringify(receipt), { mode: 0o600 });
+    return { directory, file, binding: await prepareCodexCandidateCanaryV01({ receipt_path: file, archive_bytes: archive,
+      native_auth: { approved_instruction_files: instructions }, review: {
+        decision: "COMPATIBLE_PROFILE_REUSE_SUPPORTED", receipt_fingerprint: receipt.receipt_fingerprint,
+        compatibility_profile_fingerprint: receipt.compatibility_profile_fingerprint, config_policy_fingerprint: policyFingerprint(),
+        credential_profile_fingerprint: codexCandidateNativeAuthProfileFingerprintV01(),
+      } }) };
+  };
+  const configure = (backend: string) => writeFileSync(config, `cli_auth_credentials_store="${backend}"
+forced_chatgpt_workspace_id="synthetic-workspace"
+[shell_environment_policy.set]
+SYNTHETIC_SECRET="never-echo-config-value"
+[features]
+memories=true
+[mcp_servers.synthetic]
+command="never-start"
+enabled=true
+`);
+  try {
+    configure("keyring");
+    const before = [metadata(auth), metadata(database)];
+    await assert.rejects(prepare([]), /unapproved_instructions/);
+    process.env.CODEX_SQLITE_HOME = path.join(root, "fresh-private-sqlite");
+    await assert.rejects(prepare(), /state_context_mismatch/); delete process.env.CODEX_SQLITE_HOME;
+    const drift = await prepare(); writeFileSync(config, '# changed after preparation');
+    const refused = createCodexAppServerAdapterV01({ candidate_canary: drift.binding }).invoke(request(drift.binding.execution_root), control());
+    assert.notEqual((await refused.result).outcome, "completed"); await refused.settled;
+    assert.equal(existsSync(drift.binding.execution_root), false);
+    for (const [backend, scenario] of [["file", "success"], ["keyring", "success"], ["keyring", "unauthenticated"],
+      ["keyring", "config_mismatch"], ["keyring", "auth_mismatch"], ["keyring", "model_mismatch"], ["keyring", "failed"], ["keyring", "result_mismatch"]] as const) {
+      configure(backend); const prepared = await prepare();
+      assert.notEqual(prepared.binding.native_auth!.profile_fingerprint, codexCandidateOrdinaryBrokerProfileFingerprintV01());
+      assert.throws(() => provisionCodexCandidateOrdinaryAuthV01(prepared.binding), /broker_admission_refused/);
+      emulateCodexCandidateCanaryForTestV01(prepared.binding, scenario);
+      let hookCount = 0;
+      const recorder = createRecordedCodexAppServerAdapterV01({ directory: prepared.directory, stage: 1,
+        adapter_options: { candidate_canary: prepared.binding, incident_message(value) {
+          hookCount++; assert.equal(value.diagnostic.request_source_binding.request_id, "synthetic:canary");
+        } } });
+      const invocation = recorder.adapter.invoke(request(prepared.binding.execution_root), control());
+      const outcome = await invocation.result.then(result => ({ result, error: null }), error => ({ result: null, error }));
+      await invocation.settled; recorder.closeCapture();
+      if (scenario === "model_mismatch") assert.equal(outcome.error?.code, "codex_app_server_failed");
+      else assert.equal(outcome.error, null, scenario);
+      const result = outcome.result;
+      assert.equal(result?.outcome === "completed", scenario === "success", scenario);
+      if (scenario === "success") assert.equal(result?.summary, "AUGNES_CANARY_OK");
+      if (scenario === "unauthenticated") assert(JSON.stringify(result).includes("codex_not_authenticated"));
+      assert.equal(hookCount, scenario === "failed" ? 1 : 0);
+      const status = JSON.parse(readFileSync(path.join(prepared.directory, "adapter-capture-status.json"), "utf8"));
+      assert.equal(status.capture_failure, null); assert.equal(status.failed_terminal_diagnostic_written, scenario === "failed");
+      const capture = readFileSync(path.join(prepared.directory, "events.jsonl"), "utf8");
+      assert(!capture.includes("SYNTHETIC_STALE_SECRET") && !capture.includes("never-echo-config-value"));
+      const rows = readFileSync(`${prepared.file}.ordinary-canary-claimed.synthetic-trace`, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      assert(Object.values(rows.find(row => row.kind === "candidate_native_context").value).every(Boolean));
+      const policy = rows.find(row => row.kind === "candidate_native_policy").value;
+      assert.deepEqual(policy, { backend: scenario === "auth_mismatch" ? "file" : backend, workspace_restriction_retained: true, shell_disabled: true, closed_environment: true });
+      assert.equal(rows.filter(row => row.kind === "received" && row.value.method === "turn/start").length,
+        ["success", "failed", "result_mismatch"].includes(scenario) ? 1 : 0);
+      assert.equal(existsSync(prepared.binding.execution_root), false);
+      assert.deepEqual([metadata(auth), metadata(database)], before, "ordinary state is not owned cleanup material");
+      assert.throws(() => consumeCodexCandidateCanaryV01(prepared.binding), /consumed/);
+    }
+  } finally {
+    for (const [key, value] of Object.entries(env)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   }
 }
 

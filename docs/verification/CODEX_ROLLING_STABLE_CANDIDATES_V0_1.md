@@ -67,7 +67,7 @@ in-memory token and an exclusive `.ordinary-canary-claimed` marker beside the
 receipt before execution. Do not remove or relocate evidence to renew a budget.
 An unused preparation can be disposed without invoking the adapter.
 
-The later invocation uses the #1207 ordinary credential broker to validate a
+The historical/default invocation uses the #1207 ordinary credential broker to validate a
 selected ordinary AuthDotJson and reconstruct only its required TokenData
 and optional refresh timestamp inside a private home. Credential values never
 leave that owner and refreshed child credentials are not written back. The
@@ -231,3 +231,24 @@ new process-owning integration child uses the existing bounded Canonical
 runner. The manual live candidate command is never called by Canonical.
 Changes to Canonical registration itself still select full Canonical under the
 [existing policy](../../.github/LOCAL_CANONICAL_VERIFICATION.md).
+
+
+## Prospective native ordinary-context profile (#1239)
+
+Explicit `native_auth` preparation selects a new `native_ordinary_context_canary.v0.1`
+profile, not an exemption to the historical private-home profile. It uses official
+Codex AuthManager with the normal adapter's bounded environment and the existing
+coherent native home/SQLite context; no Augnes credential reader or snapshot runs.
+The exact 0.153.4 artifact and reviewed re-entry are required. Account availability
+is checked natively during the single counted startup, never as an authenticated
+rehearsal. Missing native login, policy drift or settlement failure remains HOLD.
+
+Shared restriction projection suppresses ambient sources before launch and validates
+named permissions, source-bound instructions, auth-policy readback and the closed
+command environment. The candidate task root is empty; no prior thread or history
+is replayed. Native token refresh and compatible incidental state/cache writes are
+host-owned effects. Cleanup does not roll them back or remove the ordinary home.
+No cold-isolation or Strict qualification is claimed. See the
+[execution-card connection](P51_SCOPED_NATIVE_HOST_EXECUTION_CARD.md#pr-1239-prospective-native-auth-canary-connection)
+for capture and adoption boundaries. Historical claims, profile fingerprints and
+receipts are not rewritten or reused.

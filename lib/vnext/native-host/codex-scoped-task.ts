@@ -273,14 +273,37 @@ export interface ScopedCodexLaunchV01 {
  * Never returns config contents, credentials, prompts, or personal memory. */
 export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environment: NodeJS.ProcessEnv,
   runtime: CodexScopedRuntimeArtifactV01 = selectPinnedCodexQualifiedRuntimeV01().artifact): ScopedCodexLaunchV01 {
+  return prepareRestrictedCodexLaunchV01(material(scope), scope.fingerprint, environment, runtime, false);
+}
+
+/** Candidate-only narrowing projection. This is configuration, not an execution
+ * grant or a fabricated TaskContextPacket scope. Only the existing candidate
+ * owner may bind it to an exact artifact and its single-use canary. */
+export function prepareCodexNativeCanaryLaunchV01(input: {
+  root: string; fingerprint: string;
+  approved_instruction_files: readonly Readonly<{ path: string; sha256: string }>[];
+}, environment: NodeJS.ProcessEnv, runtime: CodexScopedRuntimeArtifactV01): ScopedCodexLaunchV01 {
+  if (runtime.version !== "0.153.4" || !/^sha256:[a-f0-9]{64}$/u.test(input.fingerprint) ||
+      input.approved_instruction_files.length > 4 || input.approved_instruction_files.some(f =>
+        !path.isAbsolute(f.path) || !/^[a-f0-9]{64}$/u.test(f.sha256) || digest(fileBytes(f.path)) !== f.sha256))
+    refuse("native_canary_inputs_invalid");
+  return prepareRestrictedCodexLaunchV01({ ...structuredClone(input), files: [] }, input.fingerprint, environment, runtime, true);
+}
+
+function prepareRestrictedCodexLaunchV01(m: Pick<StageMaterial, "root" | "files" | "approved_instruction_files">,
+  fingerprint: string, environment: NodeJS.ProcessEnv, runtime: CodexScopedRuntimeArtifactV01,
+  nativeCanary: boolean): ScopedCodexLaunchV01 {
   assertCodexScopedRuntimeArtifactV01(runtime);
   const runtimeVersion = runtime.version; // Detached; no mutable caller binding retained.
-  const disabledFeatures = runtimeVersion === "0.153.4"
-    ? [...DISABLED_FEATURES, "context_management", "mcp_oauth_refresh_coordination"] : DISABLED_FEATURES;
-  const m = material(scope);
+  const disabledFeatures = [
+    ...DISABLED_FEATURES,
+    ...(runtimeVersion === "0.153.4" ? ["context_management", "mcp_oauth_refresh_coordination"] : []),
+    ...(nativeCanary ? ["shell_tool", "unified_exec"] : []),
+  ];
   const codexHome = path.resolve(environment.CODEX_HOME ?? path.join(environment.HOME ?? os.homedir(), ".codex"));
   const paths = configFiles(codexHome, m.root);
   const servers = new Set<string>();
+  const nativeAuthInputs = new Map<string, unknown>();
   const sourceHashes = new Map<string, string | null>();
   // These managed sources can override session controls. This bounded opt-in
   // refuses their presence; it never disables or rewrites managed policy.
@@ -294,6 +317,22 @@ export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environme
     sourceHashes.set(p, existsSync(p) ? digest(fileBytes(p)) : null);
     const c = readConfig(p);
     assertNoUnapprovedConfiguration(c);
+    if (nativeCanary) {
+      if (c.sqlite_home != null) refuse("native_canary_state_redirected");
+      // Let official AuthManager own selection/refresh. Only compare explicit
+      // source settings with effective readback; never project their values to
+      // argv, evidence or task context. Conflicting source layers fail closed.
+      for (const key of ["cli_auth_credentials_store", "forced_login_method", "forced_chatgpt_workspace_id"]) {
+        if (c[key] == null) continue;
+        if (nativeAuthInputs.has(key) && !equal(nativeAuthInputs.get(key), c[key])) refuse("native_auth_source_conflict");
+        nativeAuthInputs.set(key, c[key]);
+      }
+      const secretStorage = optionalRecord(c.features).secret_auth_storage;
+      if (secretStorage != null) {
+        if (nativeAuthInputs.has("secret_auth_storage") && !equal(nativeAuthInputs.get("secret_auth_storage"), secretStorage)) refuse("native_auth_source_conflict");
+        nativeAuthInputs.set("secret_auth_storage", secretStorage);
+      }
+    }
     if (c["shell-environment-policy"] != null) refuse("shell_environment_policy_invalid");
     assertShellEnvironmentPolicy(c.shell_environment_policy);
     Object.keys(optionalRecord(c.mcp_servers)).forEach(name => servers.add(name));
@@ -305,7 +344,7 @@ export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environme
     sourceHashes.set(p, hash);
     if (hash && !m.approved_instruction_files.some(f => f.path === p && f.sha256 === hash)) refuse("unapproved_instructions");
   }
-  const profileName = `augnes_synthetic_${scope.fingerprint.slice(7)}`;
+  const profileName = `augnes_synthetic_${fingerprint.slice(7)}`;
   // The pinned :minimal preset also supplies required macOS startup syscalls.
   // Keep those OS mechanics, but explicitly deny its unrelated configuration,
   // database, third-party library and terminal read exceptions. The preset by
@@ -338,10 +377,15 @@ export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environme
     assertSources();
     const r = record(response), c = record(r.config);
     assertNoUnapprovedConfiguration(c);
+    if (nativeCanary && c.sqlite_home != null) refuse("native_canary_state_redirected");
     assertShellEnvironmentPolicy(c.shell_environment_policy, true);
     for (const key of ["model", "model_provider", "model_reasoning_effort", "default_permissions", "web_search", "project_doc_max_bytes", "allow_login_shell"])
       if (!equal(c[key], settings[key])) refuse("effective_configuration_mismatch");
     const features = record(c.features);
+    if (nativeCanary) for (const [key, expected] of nativeAuthInputs) {
+      const actual = key === "secret_auth_storage" ? features[key] : c[key];
+      if (!equal(actual, expected)) refuse("native_auth_effective_source_mismatch");
+    }
     for (const key of disabledFeatures) {
       const val = features[key];
       if (val !== false && (val == null || typeof val !== "object" || record(val).enabled !== false)) refuse("ambient_feature_enabled");
