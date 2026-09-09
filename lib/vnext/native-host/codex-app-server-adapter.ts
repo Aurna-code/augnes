@@ -387,6 +387,45 @@ export interface CodexAppServerAdapterObservationV01 {
   // or proof that settlement succeeded; settlement_failed remains separate.
   failed_terminal_diagnostic?: CodexFailedTerminalDiagnosticV01;
   failed_terminal_diagnostic_capture_failure?: "projection_failed";
+  // Closed status only. Incident text never enters this general observer.
+  incident_message_capture_status?: "delivered" | "projection_failed" | "hook_failed";
+}
+
+/** Trusted synchronous local incident consumer, not a worker/transport surface.
+ * Detached, deeply frozen data; no request, terminal or arbitrary error fields.
+ * The text is private and must never be logged or retained by a callback. */
+export interface CodexIncidentMessageV01 {
+  run_id: string;
+  process_id: number | null;
+  thread_id: string | null;
+  turn_id: string | null;
+  observed_at_ms: number;
+  diagnostic: CodexFailedTerminalDiagnosticV01;
+  message_disposition: "unavailable" | "absent" | "null" | "non_string" | "text";
+  message: string | null;
+  message_utf8_bytes: number | null;
+  message_truncated: boolean;
+}
+
+function boundedIncidentMessageV01(turn: Record<string, unknown>): Pick<
+  CodexIncidentMessageV01, "message_disposition" | "message" | "message_utf8_bytes" | "message_truncated"
+> {
+  const empty = { message: null, message_utf8_bytes: null, message_truncated: false };
+  if (!isObjectV01(turn.error)) return { ...empty, message_disposition: "unavailable" };
+  if (!Object.hasOwn(turn.error, "message")) return { ...empty, message_disposition: "absent" };
+  if (turn.error.message === null) return { ...empty, message_disposition: "null" };
+  if (typeof turn.error.message !== "string") return { ...empty, message_disposition: "non_string" };
+  const text = turn.error.message;
+  let end = 0, bytes = 0;
+  // Inspect only a bounded prefix. Do not encode/copy/hash the full message or
+  // split a surrogate pair/UTF-8 sequence at the inspection boundary.
+  for (const character of text) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > 8_192) break;
+    bytes += size; end += character.length;
+  }
+  return { message_disposition: "text", message: text.slice(0, end),
+    message_utf8_bytes: bytes, message_truncated: end < text.length };
 }
 
 // Pinned 5adb68a49933ae446bf11935662c83dba55a0804:
@@ -478,6 +517,9 @@ export interface CodexAppServerAdapterOptionsV01 {
   isolated_authenticated_external_execution_authorization?: CodexIsolatedAuthTestExecutionAuthorizationV01;
   now?: () => string;
   observe?: (observation: CodexAppServerAdapterObservationV01) => void;
+  // Default-off, per invocation. Must finish synchronously; not an untrusted
+  // plugin or a preemptible callback. Exceptions are contained separately.
+  incident_message?: (message: Readonly<CodexIncidentMessageV01>) => void;
   observe_isolated_auth?: (
     observation: CodexIsolatedAuthObservationV01,
   ) => void;
@@ -941,6 +983,9 @@ export function assertCodexScopedAdapterV01(adapter: NativeHostAdapterV01, scope
 export function createCodexAppServerAdapterV01(
   options: CodexAppServerAdapterOptionsV01 = {},
 ): NativeHostAdapterV01 {
+  if (options.incident_message && (options.candidate_canary || options.isolated_authenticated_execution ||
+      options.isolated_authenticated_external_execution_authorization || options.observe_isolated_auth))
+    throw new Error("codex_incident_message_lane_refused");
   if (options.scoped_task) {
     if (options.candidate_canary || options.isolated_authenticated_execution ||
         options.isolated_authenticated_external_execution_authorization || options.observe_isolated_auth)
@@ -1665,6 +1710,8 @@ class CodexAppServerInvocationV01 {
   private terminalObserved: CodexTurnTerminalV01 | null = null;
   private failedTerminalDiagnostic: CodexFailedTerminalDiagnosticV01 | undefined;
   private failedTerminalDiagnosticCaptureFailure: "projection_failed" | undefined;
+  private incidentMessageCaptureStatus: CodexAppServerAdapterObservationV01["incident_message_capture_status"];
+  private readonly incidentMessageHook: CodexAppServerAdapterOptionsV01["incident_message"];
   private cleanupSettled = false;
   private fatalError: Error | null = null;
   private isolatedAuthObservation: CodexIsolatedAuthObservationV01 | null =
@@ -1697,6 +1744,7 @@ class CodexAppServerInvocationV01 {
     private readonly control: NativeHostInvocationControlV01,
     private readonly options: CodexAppServerAdapterOptionsV01,
   ) {
+    this.incidentMessageHook = options.incident_message;
     this.sandboxProjection = options.isolated_authenticated_execution
       ? {
           thread_sandbox: "workspace-write",
@@ -3241,6 +3289,24 @@ class CodexAppServerInvocationV01 {
         this.failedTerminalDiagnosticCaptureFailure = "projection_failed";
       }
     }
+    if (this.incidentMessageHook) {
+      try {
+        const incident = deepFreezeAdapterValueV01({
+          run_id: this.request.run_id, process_id: this.transport?.processId ?? null,
+          thread_id: this.threadId, turn_id: this.turnId, observed_at_ms: Date.now(),
+          diagnostic: projectFailedTerminalDiagnosticV01(terminal.turn, terminal.source, this.request),
+          ...boundedIncidentMessageV01(terminal.turn),
+        });
+        try {
+          this.incidentMessageHook(incident);
+          this.incidentMessageCaptureStatus = "delivered";
+        } catch {
+          this.incidentMessageCaptureStatus = "hook_failed";
+        }
+      } catch {
+        this.incidentMessageCaptureStatus = "projection_failed";
+      }
+    }
     this.resultDeferred.resolve(this.buildBoundaryResult("failed", "codex_turn_failed"));
   }
 
@@ -3737,6 +3803,8 @@ class CodexAppServerInvocationV01 {
         ? { failed_terminal_diagnostic: this.failedTerminalDiagnostic } : {}),
       ...(kind === "settled" && this.failedTerminalDiagnosticCaptureFailure
         ? { failed_terminal_diagnostic_capture_failure: this.failedTerminalDiagnosticCaptureFailure } : {}),
+      ...(kind === "settled" && this.incidentMessageCaptureStatus
+        ? { incident_message_capture_status: this.incidentMessageCaptureStatus } : {}),
     });
   }
 }

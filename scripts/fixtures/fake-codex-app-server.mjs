@@ -1605,6 +1605,21 @@ function completeDiagnosticFailure() {
   };
   const name = scenario.slice("terminal_diagnostic_".length);
   const value = { ...turn("failed", []), error: { ...privateFields, ...(cases[name] ?? cases.string) } };
+  if (name.startsWith("message_")) {
+    value.error.codexErrorInfo = "other";
+    const messages = {
+      safe: "Unsupported parameter: 'temperature'.",
+      schema: "Invalid schema for response_format: 'additionalProperties' must be false.",
+      sensitive: "Unsupported parameter: 'temperature'. Authorization: Bearer sk-test-INCIDENT_CREDENTIAL_SENTINEL; Cookie: INCIDENT_HEADER_SENTINEL; account_id=INCIDENT_ACCOUNT_SENTINEL; /Users/INCIDENT_PATH_SENTINEL/private; https://INCIDENT_URL_SENTINEL.invalid; request={INCIDENT_REQUEST_SENTINEL}; config={INCIDENT_CONFIG_SENTINEL}",
+      ambiguous: "INCIDENT_UNRECOGNIZED_SENTINEL",
+      truncated: "Unsupported parameter: 'temperature'." + " ".repeat(8_150) + "sk-test-INCIDENT_TRUNCATED_SECRET_SENTINEL",
+      unicode_exact: "🧪".repeat(2_048),
+      unicode_cut: "a" + "🧪".repeat(2_048),
+      null: null, non_string: { secret: sentinel }, empty: "",
+    };
+    if (name === "message_absent") delete value.error.message;
+    else value.error.message = messages[name.slice("message_".length)];
+  }
   if (name === "error_absent") delete value.error;
   if (name === "error_null") value.error = null;
   if (name === "error_malformed") value.error = [sentinel];

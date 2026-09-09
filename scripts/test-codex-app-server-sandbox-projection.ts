@@ -19,6 +19,7 @@ import {
 } from "@/lib/vnext/protocol-primitives";
 import { buildTaskContextPacketV01 } from "@/lib/vnext/task-context-packet";
 import { createRecordedCodexAppServerAdapterV01 } from "./codex-app-server-observation-recorder";
+import { createIncidentRecordedCodexAppServerAdapterV01, sanitizeCodexIncidentMessageV01 } from "./codex-incident-message-recorder";
 import type { ExternalRefV01 } from "@/types/vnext/external-ref";
 import type {
   NativeHostLifecycleEventV01,
@@ -30,8 +31,10 @@ async function main(): Promise<void> {
     mkdtempSync(path.join(tmpdir(), "augnes-codex-sandbox-test-")),
   );
   try {
+  if (process.argv.includes("--incident-message-only")) { await incidentMessageCaptureV01(testRoot); return; }
   await failedTerminalDiagnosticCaptureV01(testRoot);
   if (process.argv.includes("--failed-terminal-diagnostic-only")) return;
+  await incidentMessageCaptureV01(testRoot);
   const runtimeRoot = path.join(testRoot, "runtime");
   const userHome = path.join(testRoot, "home");
   mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
@@ -198,7 +201,12 @@ async function failedTerminalDiagnosticCaptureV01(testRoot: string): Promise<voi
   console.log("failed-terminal diagnostic: 32 finite fake-host capture/readback cases passed; source binding, privacy, generic results, conflict, cancellation and cleanup preserved; zero network");
 }
 
-async function runCapturedDiagnosticV01(testRoot: string, name: string) {
+async function runCapturedDiagnosticV01(testRoot: string, name: string, incident?: {
+  scenario: string; capture?: boolean;
+  hook?: CodexAppServerAdapterOptionsV01["incident_message"];
+  break_artifact?: boolean; break_status?: boolean;
+  observer_failure?: boolean;
+}) {
   const directory = path.join(testRoot, `diagnostic-${name}`);
   mkdirSync(directory);
   const home = path.join(directory, "home"); mkdirSync(home);
@@ -206,6 +214,7 @@ async function runCapturedDiagnosticV01(testRoot: string, name: string) {
   request.request_id += `-${name}`; request.run_id += `-${name}`;
   const lifecycle: NativeHostLifecycleEventV01[] = [];
   const cancellation = new AbortController();
+  const requestedStop = name === "cancel" || name === "cancel-incident" ? "cancel" : name === "timeout" || name === "timeout-incident" ? "timeout" : null;
   const eventsPath = path.join(directory, "events.jsonl");
   const cleanupPath = path.join(directory, "cleanup.marker");
   const networkPath = path.join(directory, "network-count.txt");
@@ -216,17 +225,21 @@ async function runCapturedDiagnosticV01(testRoot: string, name: string) {
     launch: { command: process.execPath,
       prefix_args: [path.join(process.cwd(), "scripts/fixtures/fake-codex-app-server.mjs")],
       environment: { NODE_ENV: "test", HOME: home, TMPDIR: directory, PATH: process.env.PATH,
-        FAKE_CODEX_SCENARIO: scenario, FAKE_CODEX_CLEANUP_MARKER_PATH: cleanupPath, FAKE_CODEX_NETWORK_COUNT_PATH: networkPath } },
+        FAKE_CODEX_SCENARIO: incident?.scenario ?? scenario, FAKE_CODEX_CLEANUP_MARKER_PATH: cleanupPath, FAKE_CODEX_NETWORK_COUNT_PATH: networkPath } },
+    ...(incident?.hook ? { incident_message: incident.hook } : {}),
     observe: (observation: { kind: string }) => {
+      if (incident?.observer_failure && observation.kind === "settled") throw new Error("SYNTHETIC_GENERAL_OBSERVER_FAILURE");
       if (observation.kind !== "turn_started") return;
       if (name === "capture_failure") { rmSync(eventsPath); mkdirSync(eventsPath); }
-      if (name === "cancel" || name === "timeout") {
+      if (incident?.break_artifact) { rmSync(path.join(directory, "sanitized-incident.json")); mkdirSync(path.join(directory, "sanitized-incident.json")); }
+      if (requestedStop) {
         cancellation.abort("synthetic_stop");
-        void invocation.request_stop({ reason: name === "timeout" ? "timeout" : "cancellation_requested" });
+        void invocation.request_stop({ reason: requestedStop === "timeout" ? "timeout" : "cancellation_requested" });
       }
     },
   };
-  const recorder = createRecordedCodexAppServerAdapterV01({ directory, stage: 1, adapter_options: options });
+  const incidentRecorder = incident?.capture ? createIncidentRecordedCodexAppServerAdapterV01({ directory, stage: 1, adapter_options: options }) : undefined;
+  const recorder = incidentRecorder ?? createRecordedCodexAppServerAdapterV01({ directory, stage: 1, adapter_options: options });
   const adapter = name === "no_observer" ? createCodexAppServerAdapterV01({ launch: options.launch }) : recorder.adapter;
   const invocation = adapter.invoke(request, { cancellation_signal: cancellation.signal,
     timeout_ms: 5_000, stop_settle_timeout_ms: 2_000, resume_binding: null,
@@ -235,12 +248,21 @@ async function runCapturedDiagnosticV01(testRoot: string, name: string) {
   const clearDeadline = scheduleNativeHostTimeoutV01({ timeout_ms: 5_000, on_timeout() {
     deadlineExpired = true; cancellation.abort("test_deadline"); void invocation.request_stop({ reason: "timeout" });
   } });
-  let result = null, failureCode: string | null = null;
+  let result = null, failureCode: string | null = null, settlementObserverFailure = false;
   try { result = await invocation.result; }
   catch (error) { failureCode = (error as { code: string }).code; }
   finally {
     try { await invocation.settled; }
-    finally { clearDeadline(); recorder.closeCapture(); }
+    catch (error) {
+      if (!incident?.observer_failure) throw error;
+      assert.equal((error as Error).message, "SYNTHETIC_GENERAL_OBSERVER_FAILURE");
+      settlementObserverFailure = true;
+    }
+    finally {
+      clearDeadline(); recorder.closeCapture();
+      if (incident?.break_status) mkdirSync(path.join(directory, "incident-capture-status.json"));
+      incidentRecorder?.closeIncidentCapture();
+    }
   }
   assert.equal(deadlineExpired, false, name);
   assert.equal(readFileSync(cleanupPath, "utf8"), "settled\n", name);
@@ -254,7 +276,124 @@ async function runCapturedDiagnosticV01(testRoot: string, name: string) {
   assert.equal(text.includes(createHash("sha256").update("SYNTHETIC_DIAGNOSTIC_SECRET_DO_NOT_CAPTURE").digest("hex")), false, name);
   const rows = text.trim() ? text.trim().split("\n").map(line => JSON.parse(line)) : [];
   assert(rows.length <= 64);
-  return { request, lifecycle, result, failureCode, rows, captureStatus };
+  const incidentReadback = incidentRecorder?.readIncidentCapture();
+  return { request, lifecycle, result, failureCode, rows, captureStatus, incidentReadback, directory, settlementObserverFailure };
+}
+
+async function incidentMessageCaptureV01(testRoot: string): Promise<void> {
+  const cases = [
+    ["safe", "recognized", "text", false, 37],
+    ["schema", "recognized", "text", false, null],
+    ["sensitive", "withheld", "text", false, null],
+    ["ambiguous", "withheld", "text", false, null],
+    ["truncated", "withheld", "text", true, 8_192],
+    ["unicode_exact", "withheld", "text", false, 8_192],
+    ["unicode_cut", "withheld", "text", true, 8_189],
+    ["absent", "unavailable", "absent", false, null],
+    ["null", "unavailable", "null", false, null],
+    ["non_string", "unavailable", "non_string", false, null],
+    ["empty", "withheld", "text", false, 0],
+  ] as const;
+  for (const [name, sanitizedStatus, messageDisposition, truncated, bytes] of cases) {
+    const captured = await runCapturedDiagnosticV01(testRoot, `incident-${name}`, { scenario: `terminal_diagnostic_message_${name}`, capture: true });
+    assert.equal(captured.result?.public_stop_reason, "codex_turn_failed");
+    const readback = captured.incidentReadback!;
+    assert.equal(readback.readback_failure, null);
+    assert.equal(readback.status.hook_status, "delivered");
+    assert.equal(readback.status.capture_failure, null);
+    const artifact = readback.artifact;
+    assert.equal(artifact.sanitized.status, sanitizedStatus, name);
+    assert.equal(artifact.message_disposition, messageDisposition, name);
+    assert.equal(artifact.message_truncated, truncated, name);
+    if (bytes !== null) assert.equal(artifact.message_utf8_bytes, bytes, name);
+    assert.equal(artifact.diagnostic.category, "other");
+    assert.equal(artifact.run_id, captured.request.run_id);
+    assert.equal(artifact.diagnostic.request_source_binding.request_id, captured.request.request_id);
+    assert.equal(artifact.diagnostic.request_source_binding.task_context_packet_fingerprint, captured.request.packet.integrity.fingerprint);
+    const started = captured.lifecycle.find(event => event.event_kind === "turn_started")!;
+    for (const [key, value] of Object.entries(artifact.diagnostic.request_source_binding))
+      assert.equal(value, started.bounded_metadata[key === "binding_version" ? "request_source_binding_version" : key]);
+    assert.deepEqual(artifact.diagnostic, captured.rows.find(row => row.failed_terminal_diagnostic).failed_terminal_diagnostic);
+    assert(!Object.hasOwn(artifact, "message"));
+    if (name === "safe") assert.equal(artifact.sanitized.explanation, "The host reports that the temperature parameter is unsupported.");
+    if (name === "schema") assert.match(artifact.sanitized.explanation, /requires additionalProperties to be false/);
+    if (sanitizedStatus !== "recognized") assert.equal(artifact.sanitized.explanation, null);
+    assert(Buffer.byteLength(artifact.sanitized.explanation ?? "", "utf8") <= 1_024);
+    const retained = JSON.stringify([artifact, readback.status, captured.rows, captured.result, captured.lifecycle]);
+    for (const sentinel of ["SYNTHETIC_DIAGNOSTIC_SECRET_DO_NOT_CAPTURE", "INCIDENT_CREDENTIAL_SENTINEL", "INCIDENT_HEADER_SENTINEL", "INCIDENT_ACCOUNT_SENTINEL", "INCIDENT_PATH_SENTINEL", "INCIDENT_URL_SENTINEL", "INCIDENT_REQUEST_SENTINEL", "INCIDENT_CONFIG_SENTINEL", "INCIDENT_UNRECOGNIZED_SENTINEL", "INCIDENT_TRUNCATED_SECRET_SENTINEL"])
+      assert.equal(retained.includes(sentinel), false, name);
+    assert.equal(JSON.stringify(captured.rows).includes("Unsupported parameter"), false);
+    assert.equal(JSON.stringify(captured.result).includes("incident_message"), false);
+  }
+  const disabled = await runCapturedDiagnosticV01(testRoot, "incident-default-off", { scenario: "terminal_diagnostic_message_safe" });
+  assert(disabled.rows.every(row => !Object.hasOwn(row, "incident_message_capture_status")));
+  assert.equal(disabled.result?.public_stop_reason, "codex_turn_failed");
+  let calls = 0, mutationsRefused = 0;
+  const mutation = await runCapturedDiagnosticV01(testRoot, "incident-mutation", { scenario: "terminal_diagnostic_message_safe", hook(input) {
+    calls++;
+    assert(Object.isFrozen(input) && Object.isFrozen(input.diagnostic) && Object.isFrozen(input.diagnostic.request_source_binding));
+    for (const mutate of [() => { (input as any).message = "changed"; }, () => { input.diagnostic.category = "unauthorized"; }, () => { input.diagnostic.request_source_binding.request_id = "foreign"; }]) {
+      try { mutate(); } catch { mutationsRefused++; }
+    }
+  } });
+  assert.equal(calls, 1); assert.equal(mutationsRefused, 3);
+  assert.equal(mutation.rows.find(row => row.failed_terminal_diagnostic).failed_terminal_diagnostic.category, "other");
+  assert.equal(mutation.result?.public_stop_reason, "codex_turn_failed");
+  const thrown = await runCapturedDiagnosticV01(testRoot, "incident-hook-throws", { scenario: "terminal_diagnostic_message_safe", hook() { throw new Error("INCIDENT_EXCEPTION_SECRET_SENTINEL"); } });
+  assert.equal(thrown.rows.find(row => row.kind === "settled").incident_message_capture_status, "hook_failed");
+  assert.equal(thrown.result?.public_stop_reason, "codex_turn_failed");
+  assert.equal(JSON.stringify(thrown.rows).includes("INCIDENT_EXCEPTION_SECRET_SENTINEL"), false);
+  const sanitizerFailure = sanitizeCodexIncidentMessageV01({ get message_disposition(): "text" { throw new Error("INCIDENT_EXCEPTION_SECRET_SENTINEL"); }, message: null, message_utf8_bytes: null, message_truncated: false });
+  assert.deepEqual(sanitizerFailure, { status: "failed", reason: "sanitizer_failed", explanation: null, parameter: null });
+  for (const name of ["foreign_thread", "foreign_turn", "conflict", "duplicate", "success", "cancel", "timeout"]) {
+    let invoked = 0;
+    // Reuse the existing stop and foreign/conflict scenarios, with the hook on.
+    const capture = await runCapturedDiagnosticV01(testRoot, name === "cancel" || name === "timeout" ? name + "-incident" : `incident-parity-${name}`, {
+      scenario: name === "success" ? "success" : name === "cancel" || name === "timeout" ? "terminal_diagnostic_wait" : `terminal_diagnostic_${name}`,
+      hook() { invoked++; },
+    });
+    if (name === "duplicate") { assert.equal(invoked, 1); assert.equal(capture.result?.public_stop_reason, "codex_turn_failed"); }
+    else assert.equal(invoked, 0, name);
+    if (name === "success") assert.equal(capture.result?.outcome, "completed");
+    if (name === "cancel" || name === "timeout") {
+      assert.equal(capture.result?.outcome, "cancelled");
+      assert.equal(capture.result?.public_stop_reason, name === "timeout" ? "native_host_timeout" : "native_host_cancelled");
+    }
+  }
+  let unicodeObserved = false;
+  await runCapturedDiagnosticV01(testRoot, "incident-unicode-prefix", { scenario: "terminal_diagnostic_message_unicode_cut", hook(input) {
+    assert.equal(input.message_utf8_bytes, 8_189);
+    assert.equal(Buffer.byteLength(input.message!, "utf8"), 8_189);
+    assert(input.message!.endsWith("🧪"));
+    assert.equal(Buffer.from(input.message!, "utf8").toString("utf8"), input.message);
+    unicodeObserved = true;
+  } });
+  assert(unicodeObserved);
+  for (const errorShape of ["error_absent", "error_malformed"]) {
+    const capture = await runCapturedDiagnosticV01(testRoot, `incident-${errorShape}`, { scenario: `terminal_diagnostic_${errorShape}`, capture: true });
+    assert.equal(capture.result?.public_stop_reason, "codex_turn_failed");
+    assert.equal(capture.incidentReadback!.artifact.message_disposition, "unavailable");
+    assert.equal(capture.incidentReadback!.artifact.sanitized.status, "unavailable");
+  }
+  for (const capture of [false, true]) {
+    const result = await runCapturedDiagnosticV01(testRoot, `incident-observer-${capture}`, { scenario: "terminal_diagnostic_message_safe", capture, observer_failure: true });
+    assert.equal(result.result?.public_stop_reason, "codex_turn_failed");
+    assert.equal(result.settlementObserverFailure, true, "General observer exceptions keep their existing settlement effect");
+    assert.equal(JSON.stringify(result.rows).includes("SYNTHETIC_GENERAL_OBSERVER_FAILURE"), false);
+    if (capture) assert.equal(result.incidentReadback!.readback_failure, null);
+  }
+  const occupied = path.join(testRoot, "incident-occupied"); mkdirSync(occupied);
+  writeFileSync(path.join(occupied, "sanitized-incident.json"), "existing");
+  assert.throws(() => createIncidentRecordedCodexAppServerAdapterV01({ directory: occupied, stage: 1 }), /codex_incident_artifact_create_failed/);
+  assert.equal(readFileSync(path.join(occupied, "sanitized-incident.json"), "utf8"), "existing");
+  for (const failure of ["artifact", "status"] as const) {
+    const capture = await runCapturedDiagnosticV01(testRoot, `incident-io-${failure}`, { scenario: "terminal_diagnostic_message_safe", capture: true, break_artifact: failure === "artifact", break_status: failure === "status" });
+    assert.equal(capture.result?.public_stop_reason, "codex_turn_failed");
+    assert.equal(capture.incidentReadback!.readback_failure, "artifact_readback_failed");
+    if (failure === "artifact") assert.equal(capture.incidentReadback!.status.capture_failure, "artifact_write_failed");
+    else assert.equal(capture.incidentReadback!.status.status_write_failed, true);
+  }
+  console.log("incident-message: bounded synthetic factory/hook/sanitizer/disk readback, withholding, UTF-8, mutation, terminal parity and failure cleanup passed; study calls=0");
 }
 
 async function scopedProjectionV01(testRoot: string): Promise<void> {
@@ -275,6 +414,23 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
   const environment: NodeJS.ProcessEnv = { NODE_ENV: "test", HOME: path.join(testRoot, "home"), CODEX_HOME: codexHome, TMPDIR: path.join(testRoot, "runtime"), PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
   const configFile = path.join(codexHome, "config.toml");
   writeFileSync(configFile, '[shell_environment_policy.set]\nPATH="/synthetic/unapproved"\nSYNTHETIC_SECRET="secret-like-sentinel"\nORDINARY_SENTINEL="ordinary-sentinel"\n[shell_environment_policy.filters]\n"*"="include"\n[features]\nmemories=true\nchronicle=true\nplugins=true\n[mcp_servers.inherited]\ncommand="synthetic-must-not-start"\nenabled=true\n[mcp_servers."quoted.server"]\ncommand="synthetic-must-not-start"\n[permissions.old.filesystem]\n"/"="read"\n');
+  const incidentScope = await scopeFor();
+  const incidentDirectory = path.join(testRoot, "scoped-incident-factory"); mkdirSync(incidentDirectory);
+  let incidentRecorder: ReturnType<typeof createIncidentRecordedCodexAppServerAdapterV01> | undefined;
+  const incidentService = new LiveNativeHostRunServiceV01({
+    scoped_task: { scope: incidentScope, window: createCodexFeasibilityWindowV01() },
+    adapter_factory(actualScope) {
+      assert.equal(actualScope, incidentScope);
+      incidentRecorder ??= createIncidentRecordedCodexAppServerAdapterV01({ directory: incidentDirectory, stage: 1, adapter_options: { scoped_task: actualScope } });
+      return incidentRecorder.adapter;
+    },
+  });
+  // The service's real branded-adapter validation runs on both capability reads.
+  assert.deepEqual(incidentService.readCapabilityContractV01(), incidentService.readCapabilityContractV01());
+  await incidentService.shutdown();
+  incidentRecorder!.closeCapture(); incidentRecorder!.closeIncidentCapture();
+  assert.equal(incidentRecorder!.readIncidentCapture().artifact, null);
+  assert.equal(incidentRecorder!.readIncidentCaptureStatus().hook_status, "not_observed");
   const scenarios = ["scoped_success", "scoped_unsupported_capability", "scoped_ignored_memory", "scoped_ignored_mcp", "scoped_ignored_permissions", "scoped_ignored_environment_filter", "scoped_command_environment_mismatch", "scoped_mcp_tool", "scoped_profile_mismatch", "scoped_model_mismatch", "scoped_effort_mismatch", "scoped_approval", "scoped_effect", "scoped_settings_drift", "scoped_result_effect", "scoped_cancel"];
   for (const scenario of scenarios) {
     const scope = await scopeFor();

@@ -298,3 +298,119 @@ removes this diagnostic/collector connection while preserving already written
 local evidence; generic failed-turn behavior remains available. Missing,
 unrecognized or `other` diagnostics can still leave the cause unresolved.
 Any future live execution requires separate authorization and distinct evidence.
+
+## Incident message connection (#1234)
+
+Both live work-loop attempts are consumed and terminal. The later incident
+inspection stopped before launch because no supported message observer existed;
+its allowance was not consumed. This implementation does not resume that task,
+recover either discarded message, or authorize a call. After review, an explicit
+later dispatch can return to the already defined single-turn incident diagnostic.
+It cannot use this connection to restart X → B, retry, change model/auth/runtime,
+or expand the existing execution limits.
+
+The default-off `incident_message` adapter option runs synchronously only in
+`finishFromTerminal`'s accepted failed branch, after the existing identity,
+duplicate/conflict, same-batch notification and stop checks. It is refused in
+the isolated-auth and candidate-canary lanes. Ordinary default behavior and the
+scoped permission/currentness checks are unchanged. There is no transport
+export, RPC/standalone-error observation, remote flag, worker tool, UI control,
+new receipt field or execution authority.
+
+The callback receives detached, deeply frozen run/process/thread/turn/time
+bindings, the existing closed diagnostic and request-source fingerprints, and
+only the terminal's `error.message`. Its disposition distinguishes unavailable
+error objects, absent messages, null, non-string and text. At most 8,192 UTF-8
+bytes are supplied, without splitting a code point; a separate flag reports
+truncation. No arbitrary error property, additionalDetails, request/terminal
+object, prompt, stream or private-value hash crosses this boundary. The existing
+terminal fingerprints and generic `codex_turn_failed` result remain unchanged.
+New projection/hook failures produce only a closed incident capture status on
+the settled observation. The general observer retains its original exception
+policy. This trusted synchronous callback is not a sandbox or a preemptible
+plugin; no watchdog or secure-erasure claim is made.
+
+`scripts/codex-incident-message-recorder.ts` completes the optional local path.
+`createIncidentRecordedCodexAppServerAdapterV01` composes the category recorder
+with a synchronous incident sanitizer. Setup uses exclusive files and refuses
+before returning an adapter if either capture cannot be created. Cache the
+returned adapter for the exact supplied scope: service capability reads can
+call the factory more than once without creating another invocation.
+
+```ts
+let capture: ReturnType<typeof createIncidentRecordedCodexAppServerAdapterV01>;
+const service = new LiveNativeHostRunServiceV01({
+  scoped_task: { scope, window }, // genuine fresh factory scope and existing clock
+  timeout_ms: 180_000,
+  stop_settle_timeout_ms: 10_000,
+  adapter_factory(actualScope) {
+    if (actualScope !== scope) throw new Error("incident_scope_conflict");
+    capture ??= createIncidentRecordedCodexAppServerAdapterV01({
+      directory: freshInvocationEvidenceDirectory, stage: 1,
+      adapter_options: { scoped_task: actualScope, observe: existingOperatorObserver },
+    });
+    return capture.adapter;
+  },
+});
+service.readCapabilityContractV01(); // capture setup only, no host/start/warm-up
+// After separately authorized authenticated Start, follow normal settlement.
+// In finally, even if shutdown fails:
+try { await service.shutdown(); }
+finally {
+  capture?.closeCapture();
+  capture?.closeIncidentCapture();
+}
+const readback = capture?.readIncidentCapture(); // actual artifact/status disk read
+```
+
+The ordinary Start, request/packet admission, invocation, deadline, cancellation
+and shutdown owners remain required. This example is consumer wiring, not a
+standalone executor or execution authorization. The incident ceiling is one
+host attempt and one turn submission, with existing smaller deadlines and
+settlement reserve retained. Capture closure does not attest host settlement,
+remote generation/billing cessation or successful cleanup. Record those results
+separately; never start a replacement to compensate for failed capture.
+
+The sanitizer recognizes complete, narrow diagnostic sentence forms and emits
+only fixed explanations with closed public parameter names. It never returns a
+free-text substring after regex replacement. For example, synthetic category
+`other` plus `Unsupported parameter: 'temperature'.` becomes “The host reports
+that the temperature parameter is unsupported.” A recognized schema complaint
+can retain the requirement for `additionalProperties=false`. These examples
+are fixtures, not messages from either historical failure. Model/auth, effort,
+context-window, rate-limit and overload sentence forms have similarly bounded
+wording; their recognition is a host-report interpretation, not a root-cause
+attestation or authority to retry.
+
+Unknown names/suffixes, echoed request/configuration content, headers, account
+identifiers, paths/URLs and other unrecognized free text are withheld. Truncated
+input is always withheld, even when its prefix looks harmless. Missing/malformed
+messages remain unavailable; sanitizer exceptions yield only `sanitizer_failed`.
+This deliberately conservative vocabulary may withhold useful unfamiliar
+messages and is not universal redaction. There is no model/network call,
+asynchronous raw retention, console output, raw file or message hash. JavaScript
+strings are released normally without a secure-erasure promise.
+
+The consumer writes at most one `sanitized-incident.json` artifact, bounded to
+16 KiB including provenance and at most 1,024 UTF-8 explanation bytes, plus
+`incident-capture-status.json`. Raw text never enters category `events.jsonl`,
+Core, receipts or the public observer. After ordinary shutdown and capture
+closure, disk readback checks the exact sanitized artifact/status bytes and
+reports a separate closed readback failure on corruption/missing material.
+Empty artifacts and status distinguish no accepted failed terminal from capture
+failure; they must not be reported as a diagnosis. Keep these files in a fresh
+exclusive local evidence directory outside worker access.
+
+Focused proof uses the existing sandbox/projection fake host and native-service
+DB/lifecycle owner, including actual persisted generic failure, both capture
+closures and artifact/status readback. Synthetic checks cover recognizable
+`other`, excluded secret/header/account/path/URL/request/config values, unknown
+and truncated text, UTF-8 bounds, missing/malformed messages, mutation attempts,
+default/completed/interrupted/foreign/conflicting/duplicate parity and separate
+hook/sanitizer/I/O failures. The general-observer exception test retains its
+existing settlement failure, without declaring capture closure to be cleanup.
+The focused projection entry is `--incident-message-only`; the default test
+owner includes it as well. No authenticated diagnostic or study runs in these
+tests. Rollback removes this opt-in hook/helper while preserving local evidence
+and the prior category-only route. No dependency, auth/config/runtime selection,
+sandbox, registry, qualification, packaging or Core/schema change is required.
