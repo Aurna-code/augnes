@@ -684,6 +684,7 @@ async function handle(message) {
           scenario === "status_only_notifications"
         )
           completeSuccess();
+        else if (scenario.startsWith("terminal_diagnostic_")) completeDiagnosticFailure();
         else if (scenario === "turn_failure") completeFailure();
         else if (scenario === "scoped_approval") requestCommandApproval();
         else if (scenario === "scoped_effect") {
@@ -1575,6 +1576,49 @@ function completeFailure() {
       },
     },
   });
+}
+
+function completeDiagnosticFailure() {
+  if (scenario === "terminal_diagnostic_wait") return;
+  const sentinel = "SYNTHETIC_DIAGNOSTIC_SECRET_DO_NOT_CAPTURE";
+  const privateFields = { message: sentinel, additionalDetails: sentinel,
+    misalignment: { explanation: sentinel }, stack: sentinel, headers: { authorization: sentinel }, url: sentinel };
+  const cases = {
+    string: { codexErrorInfo: "unauthorized" },
+    http: { codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 429, private: sentinel } } },
+    other: { codexErrorInfo: "other" },
+    missing: {}, null: { codexErrorInfo: null },
+    unknown: { codexErrorInfo: sentinel },
+    unknown_tag: { codexErrorInfo: { [sentinel]: { private: sentinel } } },
+    malformed: { codexErrorInfo: [sentinel] },
+    multiple_tags: { codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 400 }, unauthorized: sentinel } },
+    wrong_string_shape: { codexErrorInfo: "httpConnectionFailed" },
+    wrong_object_shape: { codexErrorInfo: { unauthorized: {} } },
+    invalid_status: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: "429" } } },
+    invalid_range: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 600 } } },
+    invalid_fraction: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 429.5 } } },
+    status_null: { codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: null } } },
+    status_missing: { codexErrorInfo: { responseStreamConnectionFailed: {} } },
+    malformed_tag: { codexErrorInfo: { httpConnectionFailed: sentinel } },
+    active_turn: { codexErrorInfo: { activeTurnNotSteerable: { turnKind: "review" } } },
+    malformed_active_turn: { codexErrorInfo: { activeTurnNotSteerable: { turnKind: sentinel } } },
+  };
+  const name = scenario.slice("terminal_diagnostic_".length);
+  const value = { ...turn("failed", []), error: { ...privateFields, ...(cases[name] ?? cases.string) } };
+  if (name === "error_absent") delete value.error;
+  if (name === "error_null") value.error = null;
+  if (name === "error_malformed") value.error = [sentinel];
+  if (name === "ignored_notification") {
+    notify("error", { threadId, turnId, willRetry: true, error: { ...privateFields, codexErrorInfo: "badRequest" } });
+    value.error.codexErrorInfo = null;
+  }
+  completed = true; turnActive = false;
+  persistState({ threadId, sessionId, turnId, status: "failed" });
+  notify("turn/completed", { threadId: name === "foreign_thread" ? "foreign-thread" : threadId,
+    turn: name === "foreign_turn" ? { ...value, id: "foreign-turn" } : value });
+  if (name === "duplicate") notify("turn/completed", { threadId, turn: value });
+  if (name === "conflict") notify("turn/completed", { threadId,
+    turn: { ...value, error: { ...privateFields, codexErrorInfo: "badRequest" } } });
 }
 
 function completeInterrupted() {
