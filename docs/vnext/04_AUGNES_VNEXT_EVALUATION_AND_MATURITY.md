@@ -226,6 +226,74 @@ Do not claim usefulness from one synthetic fixture, one model judgment, one
 feedback record, or apparent consensus. Persistent actors, debate turns, graph
 structure, model count, and strategy volume receive no credit by themselves.
 
+### Repeated-handoff evaluation (P5.2)
+
+This bounded refinement belongs to the existing P5.2 scope in
+[#1215](https://github.com/hynk-studio/augnes/issues/1215). It defines follow-up
+evaluation requirements, not a new phase, maturity claim, implementation, or
+execution authorization. It adds no retroactive completion gate to P5.1 or
+completed slices and does not widen active work, approved execution cards,
+call/time/cost limits, or stop/replacement rules.
+
+Before adding tests, map current normal-path producers, consumers, and existing
+evidence to the two questions below. Sufficient coverage should end with
+`no_change_needed_with_evidence`. Otherwise, start with one supported normal
+handoff and the smallest missing contrasts through existing test owners and
+disposable/offline fixtures. Do not repeat an existing handoff matrix merely
+under a new name or perturb live user material or accepted state.
+
+#### Cumulative preservation of still-valid conditions
+
+Before observing successor outcomes, identify the source-bound conditions,
+corrections, uncertainty, and unresolved checks that matter to the case. At
+handoff boundaries and final resumption, compare both with the preceding state
+and with the applicable reviewed reference plus its valid revision lineage.
+Adjacent similarity alone cannot establish cumulative continuity.
+
+For each material condition or unresolved check, distinguish retained,
+demonstrably resolved, legitimately superseded, and unsupported/unknown using
+existing sources and review records. An unexplained loss of a known still-valid
+condition is a continuity failure, not completion. Insufficient evidence to
+classify a change remains unknown, not a pass; bounded retrieval failure does
+not prove that the underlying source or relation is absent.
+
+A justified revision updates the applicable reference. Do not freeze the first
+conclusion, silently reactivate superseded obligations, reconstruct deleted
+material, or automatically carry execution approval across versions. For
+example, preserving "check B, then reconsider still-untested Y" requires more
+than retaining "check B":
+finishing B must not silently erase the conditional reconsideration of Y or
+imply that Y was executed, completed, or authorized.
+
+#### Contrast justified change with unsupported change
+
+Specify material invariants and permitted changes before judging outcomes.
+Use paired cases that distinguish:
+
+- representation-only changes that preserve relevant meaning and source binding;
+- source-bound corrections through the applicable existing review, decision,
+  and separately authorized Transition or operational continuation path;
+- unexplained changes to criteria, scope, or authority presented as mere
+  rewording or correction;
+- unchanged conclusions whose apparent consistency hides lost counterevidence,
+  uncertainty, or an unresolved condition.
+
+New evidence may warrant review; it does not automatically change accepted
+state or expand authority. Allow multiple supported next actions and wording
+variants. Judge whether justified change is admitted and unsupported change is
+detected, rather than rewarding fidelity to an obsolete conclusion.
+
+Report missed unsupported changes and falsely blocked legitimate progress
+separately. Keep semantic preservation/correction evidence distinct from actual
+next-action benefit, review burden, cost, and latency against the existing
+credible baseline. Blanket deferral and sending all history are not cost-free
+successes; deterministic fixtures do not establish live model usefulness.
+
+These are evaluation-report distinctions, not new Core states or an obligation
+database. No new continuity score, automatic goal editor, standing model judge,
+UI, or runtime mechanism is required. Implementation and sequencing remain
+owned by the roadmap and the existing bounded issues.
+
 ## Alpha and release evaluation
 
 ### Alpha
