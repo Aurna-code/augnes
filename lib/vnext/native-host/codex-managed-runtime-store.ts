@@ -49,6 +49,28 @@ export const CODEX_MANAGED_RUNTIME_RETENTION_V01 = Object.freeze({
 
 const STORE_NATIVE_RELATIVE_PATH_V01 = "bin/codex";
 const STORE_MANIFEST_NAME_V01 = "store.json";
+// Separate prospective scoped extension. This does not modify the qualified
+// native artifact, its historical manifest, or the ordinary production pin.
+export const CODEX_SCOPED_CODE_MODE_HOST_V01 = Object.freeze({
+  version: "0.153.4",
+  tagged_source_commit: "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+  native_executable_sha256: "sha256:b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3",
+  official_release_id: 383061770,
+  asset_id: 545043539,
+  asset_name: "codex-code-mode-host-aarch64-apple-darwin.tar.gz",
+  archive_bytes: 22569619,
+  archive_sha256: "sha256:45a9b0fdf53b98b85a6bb91e175dd90e961328a7a14fb50a40902205199df1df",
+  member_name: "codex-code-mode-host-aarch64-apple-darwin",
+  executable_bytes: 62767552,
+  executable_sha256: "sha256:d8a2222e017342718d16a5dbe092921c628961f812f62f42036b8d960e1ffe56",
+  relative_path: "bin/codex-code-mode-host",
+});
+export const CODEX_SCOPED_CODE_MODE_PROFILE_FINGERPRINT_V01 = createProtocolSha256V01(canonicalizeProtocolValueV01({
+  contract: "codex_scoped_code_mode.v0.1", artifact: CODEX_SCOPED_CODE_MODE_HOST_V01,
+  backend: "process_owned_stdio", host: { enabled: true, disable_in_process_fallback: true },
+  prewarm: false, agents_enabled: false, task_permissions: "unchanged_exact_named_read_scope",
+}));
+const SCOPED_STORE_SCHEMA_V01 = "codex_managed_scoped_runtime_store.v0.1" as const;
 const LOCK_STALE_AFTER_MS_V01 = 30_000;
 const LOCK_WAIT_MS_V01 = 10_000;
 const MAX_DECOMPRESSED_ARCHIVE_BYTES_V01 = 512 * 1024 * 1024;
@@ -73,10 +95,11 @@ interface StoreArtifactIdentityV01 {
 }
 
 interface StoreManifestPayloadV01 {
-  store_schema_version: typeof CODEX_MANAGED_RUNTIME_STORE_SCHEMA_VERSION_V01;
+  store_schema_version: typeof CODEX_MANAGED_RUNTIME_STORE_SCHEMA_VERSION_V01 | typeof SCOPED_STORE_SCHEMA_V01;
   artifact_identity: StoreArtifactIdentityV01;
   native_relative_path: string;
   native_size_bytes: number;
+  scoped_code_mode?: Readonly<{ artifact: typeof CODEX_SCOPED_CODE_MODE_HOST_V01; profile_fingerprint: string }>;
 }
 
 interface StoreManifestV01 extends StoreManifestPayloadV01 {
@@ -108,6 +131,7 @@ export interface CodexManagedRuntimeSelectionV01 {
   canonical_native_executable: string;
   store_manifest_fingerprint: string;
   qualified_runtime_selection: CodexQualifiedRuntimeSelectionV01;
+  scoped_code_mode?: Readonly<{ canonical_helper_executable: string; profile_fingerprint: string; helper_sha256: string }>;
 }
 
 export class CodexManagedRuntimeStoreErrorV01 extends Error {
@@ -115,6 +139,43 @@ export class CodexManagedRuntimeStoreErrorV01 extends Error {
     super(code);
     this.name = "CodexManagedRuntimeStoreErrorV01";
   }
+}
+
+function supportsScopedCodeModeV01(artifact: CodexQualifiedRuntimeArtifactV01): boolean {
+  return artifact.entry_id === "codex-rust-v0.153.4-darwin-arm64" && artifact.version === CODEX_SCOPED_CODE_MODE_HOST_V01.version &&
+    artifact.tagged_source_commit === CODEX_SCOPED_CODE_MODE_HOST_V01.tagged_source_commit &&
+    artifact.native_executable_sha256 === CODEX_SCOPED_CODE_MODE_HOST_V01.native_executable_sha256 &&
+    artifact.platform === "darwin" && artifact.architecture === "arm64" && artifact.upstream_target_triple === "aarch64-apple-darwin";
+}
+function scopedManifestBindingV01(): NonNullable<StoreManifestPayloadV01["scoped_code_mode"]> {
+  return { artifact: CODEX_SCOPED_CODE_MODE_HOST_V01, profile_fingerprint: CODEX_SCOPED_CODE_MODE_PROFILE_FINGERPRINT_V01 };
+}
+function extractCodeModeHostBytesV01(archive: Buffer, artifact: CodexQualifiedRuntimeArtifactV01): Buffer {
+  const h = CODEX_SCOPED_CODE_MODE_HOST_V01;
+  if (!supportsScopedCodeModeV01(artifact)) throw new CodexManagedRuntimeStoreErrorV01("codex_scoped_helper_runtime_mismatch");
+  if (archive.length !== h.archive_bytes || sha256BufferV01(archive) !== h.archive_sha256)
+    throw new CodexManagedRuntimeStoreErrorV01("codex_scoped_helper_archive_identity_mismatch");
+  const bytes = extractReviewedArchiveV01(archive, artifact, h.member_name).bytes;
+  if (bytes.length !== h.executable_bytes || sha256BufferV01(bytes) !== h.executable_sha256)
+    throw new CodexManagedRuntimeStoreErrorV01("codex_scoped_helper_native_identity_mismatch");
+  return bytes;
+}
+
+/** Explicit installation of the exact scoped extension. No download, selection
+ * mutation, invocation or qualification occurs. Existing native-only entries
+ * remain separate and unchanged; publication uses the ordinary store owner. */
+export async function ensurePinnedCodexScopedManagedRuntimeV01(input: {
+  root: string; reviewed_archive_bytes: Buffer; reviewed_helper_archive_bytes: Buffer; environment?: NodeJS.ProcessEnv;
+}): Promise<CodexManagedRuntimeSelectionV01> {
+  const selection = selectCodexQualifiedRuntimeEntryV01({ registry: CODEX_QUALIFIED_RUNTIME_REGISTRY_V01,
+    entry_id: CODEX_QUALIFIED_RUNTIME_REGISTRY_V01.production_selection.entry_id, lane: "ordinary_chatgpt_auth", selection_mode: "pinned_exact" });
+  if (!supportsScopedCodeModeV01(selection.artifact)) throw new CodexManagedRuntimeStoreErrorV01("codex_scoped_helper_runtime_mismatch");
+  const dependencies = productionValidationDependenciesV01(input.environment ?? process.env);
+  await stageSelectionV01({ root: input.root, selection, archive_bytes: input.reviewed_archive_bytes,
+    helper_archive_bytes: input.reviewed_helper_archive_bytes, dependencies });
+  const installed = selectCodexManagedRuntimeV01({ root: input.root, environment: input.environment, scoped_code_mode: true });
+  enforceCodexManagedRuntimeRetentionV01({ root: input.root, active: installed, environment: input.environment });
+  return installed;
 }
 
 /** Archive-bound discovery only; never creates a registry entry or store selection. */
@@ -398,12 +459,15 @@ export function selectCodexManagedRuntimeV01(input: {
   lane?: CodexRuntimeLaneV01;
   observed_at?: string;
   environment?: NodeJS.ProcessEnv;
+  /** Trusted scoped adapter/installer option; never a runtime-selection policy. */
+  scoped_code_mode?: boolean;
 }): CodexManagedRuntimeSelectionV01 {
   return selectFromStoreV01({
     root: input.root,
     mode: input.mode ?? "pinned_exact",
     lane: input.lane ?? "ordinary_chatgpt_auth",
     registry: CODEX_QUALIFIED_RUNTIME_REGISTRY_V01,
+    scoped_code_mode: input.scoped_code_mode,
     observed_at: input.observed_at ?? new Date().toISOString(),
     dependencies: productionValidationDependenciesV01(
       input.environment ?? process.env,
@@ -480,10 +544,12 @@ export function assertCodexManagedRuntimeSelectionUnchangedV01(
       lane: selection.lane,
       observed_at: new Date().toISOString(),
       environment: input.environment ?? process.env,
+      scoped_code_mode: selection.scoped_code_mode !== undefined,
     });
     if (
       current.canonical_native_executable !== selection.canonical_native_executable ||
       current.store_manifest_fingerprint !== selection.store_manifest_fingerprint ||
+      canonicalizeProtocolValueV01(current.scoped_code_mode ?? null) !== canonicalizeProtocolValueV01(selection.scoped_code_mode ?? null) ||
       canonicalizeProtocolValueV01(current.qualified_runtime_selection) !==
         canonicalizeProtocolValueV01(selection.qualified_runtime_selection)
     ) {
@@ -636,8 +702,16 @@ function enforceRetentionV01(input: {
     );
   }
   const registeredDirectories = new Set(
-    input.registry.artifacts.map((artifact) => artifactKeyV01(artifact)),
+    input.registry.artifacts.flatMap((artifact) => [artifactKeyV01(artifact), ...(supportsScopedCodeModeV01(artifact) ? [artifactKeyV01(artifact, true)] : [])]),
   );
+  // Both installed views of the current exact native remain usable. This is
+  // retention protection, not a last-known-good receipt or a selection change.
+  if (supportsScopedCodeModeV01(input.active.qualified_runtime_selection.artifact)) {
+    for (const scoped of [false, true]) {
+      const counterpart = path.join(artifactsDirectory, artifactKeyV01(input.active.qualified_runtime_selection.artifact, scoped));
+      if (existsSync(counterpart)) protectedDirectories.add(counterpart);
+    }
+  }
   const entries = readdirSync(artifactsDirectory)
     .map((name) => {
       const directory = path.join(artifactsDirectory, name);
@@ -726,7 +800,10 @@ function selectFromStoreV01(input: {
   registry: CodexQualifiedRuntimeRegistryV01;
   observed_at: string;
   dependencies: StoreValidationDependenciesV01;
+  scoped_code_mode?: boolean;
 }): CodexManagedRuntimeSelectionV01 {
+  if (input.scoped_code_mode && (input.mode !== "pinned_exact" || input.lane !== "ordinary_chatgpt_auth"))
+    throw new CodexManagedRuntimeStoreErrorV01("codex_scoped_helper_runtime_mismatch");
   assertStoreRootV01(input.root);
   assertArtifactsRootV01(input.root);
   const candidateIds = input.mode === "pinned_exact"
@@ -760,7 +837,7 @@ function selectFromStoreV01(input: {
     }
     eligibleCount += 1;
     try {
-      valid.push(validateStoredArtifactV01(input.root, registrySelection, input.dependencies));
+      valid.push(validateStoredArtifactV01(input.root, registrySelection, input.dependencies, input.scoped_code_mode));
     } catch (error) {
       if (error instanceof CodexManagedRuntimeStoreErrorV01) {
         if (error.code === "codex_managed_runtime_corrupt") sawCorrupt = true;
@@ -812,13 +889,16 @@ function validateStoredArtifactV01(
   root: string,
   selection: CodexQualifiedRuntimeSelectionV01,
   dependencies: StoreValidationDependenciesV01,
+  scopedCodeMode = false,
 ): CodexManagedRuntimeSelectionV01 {
+  if (scopedCodeMode && (selection.lane !== "ordinary_chatgpt_auth" || !supportsScopedCodeModeV01(selection.artifact)))
+    throw new CodexManagedRuntimeStoreErrorV01("codex_scoped_helper_runtime_mismatch");
   assertManagedDirectNativeAdmittedV01(selection);
   const artifactsDirectory = assertArtifactsRootV01(root);
   if (!artifactsDirectory) {
     throw new CodexManagedRuntimeStoreErrorV01("codex_managed_runtime_absent");
   }
-  const directory = path.join(artifactsDirectory, artifactKeyV01(selection.artifact));
+  const directory = path.join(artifactsDirectory, artifactKeyV01(selection.artifact, scopedCodeMode));
   const directoryStat = lstatIfExistsV01(directory);
   if (!directoryStat) throw new CodexManagedRuntimeStoreErrorV01("codex_managed_runtime_absent");
   try {
@@ -840,7 +920,7 @@ function validateStoredArtifactV01(
       realpathSync.native(binDirectory) !== binDirectory ||
       !isPhysicalChildV01(artifactsDirectory, binDirectory)
     ) throw new Error();
-    if (canonicalizeProtocolValueV01(readdirSync(binDirectory)) !== canonicalizeProtocolValueV01(["codex"])) throw new Error();
+    if (canonicalizeProtocolValueV01(readdirSync(binDirectory).sort()) !== canonicalizeProtocolValueV01(scopedCodeMode ? ["codex", "codex-code-mode-host"] : ["codex"])) throw new Error();
     const nativeExecutable = path.join(
       directory,
       ...STORE_NATIVE_RELATIVE_PATH_V01.split("/"),
@@ -849,7 +929,7 @@ function validateStoredArtifactV01(
     if (
       !nativeStat.isFile() ||
       nativeStat.isSymbolicLink() ||
-      (nativeStat.mode & 0o7777) !== 0o555
+      (nativeStat.mode & 0o7777) !== 0o555 || (scopedCodeMode && nativeStat.nlink !== 1)
     ) throw new Error();
     const canonicalNativeExecutable = realpathSync.native(nativeExecutable);
     if (
@@ -874,7 +954,8 @@ function validateStoredArtifactV01(
     );
     const expectedIdentity = storeArtifactIdentityV01(selection.artifact);
     if (
-      manifest.store_schema_version !== CODEX_MANAGED_RUNTIME_STORE_SCHEMA_VERSION_V01 ||
+      manifest.store_schema_version !== (scopedCodeMode ? SCOPED_STORE_SCHEMA_V01 : CODEX_MANAGED_RUNTIME_STORE_SCHEMA_VERSION_V01) ||
+      canonicalizeProtocolValueV01(manifest.scoped_code_mode ?? null) !== canonicalizeProtocolValueV01(scopedCodeMode ? scopedManifestBindingV01() : null) ||
       canonicalizeProtocolValueV01(manifest.artifact_identity) !== canonicalizeProtocolValueV01(expectedIdentity) ||
       manifest.native_relative_path !== STORE_NATIVE_RELATIVE_PATH_V01 ||
       manifest.native_size_bytes !== nativeStat.size ||
@@ -882,6 +963,7 @@ function validateStoredArtifactV01(
       !dependencies.inspect_native(nativeExecutable, selection.artifact) ||
       dependencies.read_cli_version(nativeExecutable) !== selection.artifact.version
     ) throw new Error();
+    if (scopedCodeMode) assertStoredCodeModeHostV01(directory, selection.artifact, 0o555);
     return Object.freeze({
       policy_version: CODEX_MANAGED_RUNTIME_SELECTION_POLICY_VERSION_V01,
       selection_mode: selection.selection_mode,
@@ -889,6 +971,8 @@ function validateStoredArtifactV01(
       canonical_native_executable: canonicalNativeExecutable,
       store_manifest_fingerprint: manifest.manifest_fingerprint,
       qualified_runtime_selection: selection,
+      ...(scopedCodeMode ? { scoped_code_mode: Object.freeze({ canonical_helper_executable: path.join(directory, CODEX_SCOPED_CODE_MODE_HOST_V01.relative_path),
+        profile_fingerprint: CODEX_SCOPED_CODE_MODE_PROFILE_FINGERPRINT_V01, helper_sha256: CODEX_SCOPED_CODE_MODE_HOST_V01.executable_sha256 }) } : {}),
     });
   } catch {
     throw new CodexManagedRuntimeStoreErrorV01("codex_managed_runtime_corrupt");
@@ -899,8 +983,11 @@ async function stageSelectionV01(input: {
   root: string;
   selection: CodexQualifiedRuntimeSelectionV01;
   archive_bytes: Buffer;
+  helper_archive_bytes?: Buffer;
   dependencies: StoreValidationDependenciesV01 & Partial<StoreTestDependenciesV01>;
 }): Promise<void> {
+  const scopedCodeMode = input.helper_archive_bytes !== undefined;
+  const helperBytes = scopedCodeMode ? extractCodeModeHostBytesV01(input.helper_archive_bytes!, input.selection.artifact) : null;
   assertManagedDirectNativeAdmittedV01(input.selection);
   assertStoreRootV01(input.root, true);
   if (
@@ -926,16 +1013,17 @@ async function stageSelectionV01(input: {
       input.root,
       input.selection.artifact,
       owner.token,
+      scopedCodeMode,
     );
     try {
-      validateStoredArtifactV01(input.root, input.selection, input.dependencies);
+      validateStoredArtifactV01(input.root, input.selection, input.dependencies, scopedCodeMode);
       return;
     } catch (error) {
       if (!(error instanceof CodexManagedRuntimeStoreErrorV01) || error.code !== "codex_managed_runtime_absent") throw error;
     }
     const stagingRoot = storePathV01(input.root, "staging");
     ensureDirectoryV01(stagingRoot);
-    stageDirectory = path.join(stagingRoot, `${artifactKeyV01(input.selection.artifact)}.${owner.token}`);
+    stageDirectory = path.join(stagingRoot, `${artifactKeyV01(input.selection.artifact, scopedCodeMode)}.${owner.token}`);
     mkdirSync(path.join(stageDirectory, "bin"), { recursive: true, mode: 0o700 });
     const extracted = extractReviewedArchiveV01(
       input.archive_bytes,
@@ -946,6 +1034,7 @@ async function stageSelectionV01(input: {
       ...STORE_NATIVE_RELATIVE_PATH_V01.split("/"),
     );
     writeFileSync(nativePath, extracted.bytes, { flag: "wx", mode: 0o700 });
+    if (helperBytes) writeFileSync(path.join(stageDirectory, CODEX_SCOPED_CODE_MODE_HOST_V01.relative_path), helperBytes, { flag: "wx", mode: 0o700 });
     if (
       sha256FileV01(nativePath) !== input.selection.artifact.native_executable_sha256 ||
       !input.dependencies.inspect_native(nativePath, input.selection.artifact) ||
@@ -954,10 +1043,11 @@ async function stageSelectionV01(input: {
       throw new CodexManagedRuntimeStoreErrorV01("codex_managed_runtime_native_identity_mismatch");
     }
     const payload: StoreManifestPayloadV01 = {
-      store_schema_version: CODEX_MANAGED_RUNTIME_STORE_SCHEMA_VERSION_V01,
+      store_schema_version: scopedCodeMode ? SCOPED_STORE_SCHEMA_V01 : CODEX_MANAGED_RUNTIME_STORE_SCHEMA_VERSION_V01,
       artifact_identity: storeArtifactIdentityV01(input.selection.artifact),
       native_relative_path: STORE_NATIVE_RELATIVE_PATH_V01,
       native_size_bytes: extracted.bytes.length,
+      ...(scopedCodeMode ? { scoped_code_mode: scopedManifestBindingV01() } : {}),
     };
     const manifest: StoreManifestV01 = {
       ...payload,
@@ -970,17 +1060,20 @@ async function stageSelectionV01(input: {
     );
     await input.dependencies.before_publish?.();
     verifyArchiveIdentityV01(input.archive_bytes, input.selection.artifact);
+    if (scopedCodeMode) extractCodeModeHostBytesV01(input.helper_archive_bytes!, input.selection.artifact);
     validateStagingDirectoryV01(
       stageDirectory,
       input.selection,
       input.dependencies,
+      scopedCodeMode,
     );
     const artifactsDirectory = assertArtifactsRootV01(input.root, true)!;
     const finalDirectory = path.join(
       artifactsDirectory,
-      artifactKeyV01(input.selection.artifact),
+      artifactKeyV01(input.selection.artifact, scopedCodeMode),
     );
     chmodSync(nativePath, 0o555);
+    if (scopedCodeMode) chmodSync(path.join(stageDirectory, CODEX_SCOPED_CODE_MODE_HOST_V01.relative_path), 0o555);
     chmodSync(path.join(stageDirectory, STORE_MANIFEST_NAME_V01), 0o444);
     chmodSync(path.join(stageDirectory, "bin"), 0o555);
     const stageIdentity = directoryIdentityV01(lstatSync(stageDirectory));
@@ -996,11 +1089,11 @@ async function stageSelectionV01(input: {
         identity: stageIdentity,
       });
       chmodSync(finalDirectory, 0o555);
-      validateStoredArtifactV01(input.root, input.selection, input.dependencies);
+      validateStoredArtifactV01(input.root, input.selection, input.dependencies, scopedCodeMode);
       publishedDirectory = null;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST" && (error as NodeJS.ErrnoException).code !== "ENOTEMPTY") throw error;
-      validateStoredArtifactV01(input.root, input.selection, input.dependencies);
+      validateStoredArtifactV01(input.root, input.selection, input.dependencies, scopedCodeMode);
     }
   } catch (error) {
     if (error instanceof CodexManagedRuntimeStoreErrorV01) throw error;
@@ -1030,11 +1123,12 @@ function recoverInterruptedStagesV01(
   root: string,
   artifact: CodexQualifiedRuntimeArtifactV01,
   currentOwnerToken: string,
+  scopedCodeMode = false,
 ): void {
   const stagingRoot = storePathV01(root, "staging");
   if (!existsSync(stagingRoot)) return;
   assertExactDirectoryV01(stagingRoot);
-  const prefix = `${artifactKeyV01(artifact)}.`;
+  const prefix = `${artifactKeyV01(artifact, scopedCodeMode)}.`;
   for (const name of readdirSync(stagingRoot)) {
     if (
       !name.startsWith(prefix) ||
@@ -1057,6 +1151,7 @@ function validateStagingDirectoryV01(
   directory: string,
   selection: CodexQualifiedRuntimeSelectionV01,
   dependencies: StoreValidationDependenciesV01,
+  scopedCodeMode = false,
 ): void {
   const nativePath = path.join(
     directory,
@@ -1066,16 +1161,29 @@ function validateStagingDirectoryV01(
     readFileSync(path.join(directory, STORE_MANIFEST_NAME_V01), "utf8"),
   );
   if (
+    canonicalizeProtocolValueV01(manifest.scoped_code_mode ?? null) !== canonicalizeProtocolValueV01(scopedCodeMode ? scopedManifestBindingV01() : null) ||
     canonicalizeProtocolValueV01(manifest.artifact_identity) !== canonicalizeProtocolValueV01(storeArtifactIdentityV01(selection.artifact)) ||
     sha256FileV01(nativePath) !== selection.artifact.native_executable_sha256 ||
     !dependencies.inspect_native(nativePath, selection.artifact) ||
     dependencies.read_cli_version(nativePath) !== selection.artifact.version
   ) throw new CodexManagedRuntimeStoreErrorV01("codex_managed_runtime_native_identity_mismatch");
+  if (scopedCodeMode) assertStoredCodeModeHostV01(directory, selection.artifact, 0o700);
+}
+
+function assertStoredCodeModeHostV01(directory: string, artifact: CodexQualifiedRuntimeArtifactV01, mode: number): void {
+  const filename = path.join(directory, CODEX_SCOPED_CODE_MODE_HOST_V01.relative_path);
+  const stat = lstatSync(filename);
+  if (!supportsScopedCodeModeV01(artifact) || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 ||
+      (stat.mode & 0o7777) !== mode || realpathSync.native(filename) !== filename ||
+      stat.size !== CODEX_SCOPED_CODE_MODE_HOST_V01.executable_bytes || !inspectNativeV01(filename, artifact) ||
+      sha256FileV01(filename) !== CODEX_SCOPED_CODE_MODE_HOST_V01.executable_sha256)
+    throw new CodexManagedRuntimeStoreErrorV01("codex_scoped_helper_native_identity_mismatch");
 }
 
 function extractReviewedArchiveV01(
   archive: Buffer,
   artifact: Pick<CodexQualifiedRuntimeArtifactV01, "upstream_target_triple">,
+  expectedName = `codex-${artifact.upstream_target_triple}`,
 ): { bytes: Buffer; mode: number } {
   let tar: Buffer;
   try {
@@ -1083,7 +1191,6 @@ function extractReviewedArchiveV01(
   } catch {
     throw new CodexManagedRuntimeStoreErrorV01("codex_managed_runtime_archive_unsafe");
   }
-  const expectedName = `codex-${artifact.upstream_target_triple}`;
   const seen = new Set<string>();
   let found: { bytes: Buffer; mode: number } | null = null;
   let sawEndMarker = false;
@@ -1259,15 +1366,17 @@ function parseStoreManifestV01(raw: string): StoreManifestV01 {
   const parsed: unknown = JSON.parse(raw);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
   const record = parsed as Record<string, unknown>;
+  const scoped = record.store_schema_version === SCOPED_STORE_SCHEMA_V01;
   if (canonicalizeProtocolValueV01(Object.keys(record).sort()) !== canonicalizeProtocolValueV01([
-    "artifact_identity", "manifest_fingerprint", "native_relative_path", "native_size_bytes", "store_schema_version",
+    "artifact_identity", "manifest_fingerprint", "native_relative_path", "native_size_bytes", "store_schema_version", ...(scoped ? ["scoped_code_mode"] : []),
   ].sort())) throw new Error();
   const { manifest_fingerprint: fingerprint, ...payload } = record;
   if (
     typeof fingerprint !== "string" ||
     !/^sha256:[a-f0-9]{64}$/u.test(fingerprint) ||
     createProtocolSha256V01(canonicalizeProtocolValueV01(payload)) !== fingerprint ||
-    record.store_schema_version !== CODEX_MANAGED_RUNTIME_STORE_SCHEMA_VERSION_V01 ||
+    record.store_schema_version !== (scoped ? SCOPED_STORE_SCHEMA_V01 : CODEX_MANAGED_RUNTIME_STORE_SCHEMA_VERSION_V01) ||
+    (scoped && canonicalizeProtocolValueV01(record.scoped_code_mode) !== canonicalizeProtocolValueV01(scopedManifestBindingV01())) ||
     record.native_relative_path !== STORE_NATIVE_RELATIVE_PATH_V01 ||
     !Number.isSafeInteger(record.native_size_bytes) ||
     Number(record.native_size_bytes) <= 0
@@ -1298,11 +1407,11 @@ function artifactDirectoryV01(root: string, artifact: CodexQualifiedRuntimeArtif
   return storePathV01(root, "artifacts", artifactKeyV01(artifact));
 }
 
-function artifactKeyV01(artifact: CodexQualifiedRuntimeArtifactV01): string {
+function artifactKeyV01(artifact: CodexQualifiedRuntimeArtifactV01, scopedCodeMode = false): string {
   const tupleFingerprint = createProtocolSha256V01(
     canonicalizeProtocolValueV01(storeArtifactIdentityV01(artifact)),
   ).slice("sha256:".length);
-  return `${artifact.entry_id}--${tupleFingerprint}`;
+  return `${artifact.entry_id}--${tupleFingerprint}${scopedCodeMode ? `--code-mode-${CODEX_SCOPED_CODE_MODE_PROFILE_FINGERPRINT_V01.slice(7)}` : ""}`;
 }
 
 function managedDirectNativeAdmittedV01(
@@ -1644,18 +1753,19 @@ function readEligibleLastKnownGoodV01(input: {
         ? record.store_manifest_fingerprint
         : record.rollback_store_manifest_fingerprint;
     if (!rollbackEntryId || !rollbackManifestFingerprint) return null;
-    const selection = selectFromStoreV01({
-      root: input.root,
-      mode: "pinned_exact",
-      lane: input.active.lane,
-      pinned_entry_id: rollbackEntryId,
-      registry: input.registry,
-      observed_at: input.observed_at,
-      dependencies: input.dependencies,
-    });
-    return selection.store_manifest_fingerprint === rollbackManifestFingerprint
-      ? selection
-      : null;
+    // The existing receipt already binds a manifest fingerprint. Resolve only
+    // that exact historical view; never transfer native-only evidence to a pair.
+    for (const scoped_code_mode of [false, true]) {
+      try {
+        const selection = selectFromStoreV01({
+          root: input.root, mode: "pinned_exact", lane: input.active.lane,
+          pinned_entry_id: rollbackEntryId, registry: input.registry,
+          observed_at: input.observed_at, dependencies: input.dependencies, scoped_code_mode,
+        });
+        if (selection.store_manifest_fingerprint === rollbackManifestFingerprint) return selection;
+      } catch { /* An unavailable view cannot satisfy the recorded fingerprint. */ }
+    }
+    return null;
   } catch {
     return null;
   }

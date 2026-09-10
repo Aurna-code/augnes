@@ -389,6 +389,8 @@ async function handle(message) {
         if (scenario === "scoped_ignored_mcp") config.mcp_servers.inherited.enabled = true;
         if (scenario === "scoped_ignored_permissions") config.permissions[scopedPermissions].filesystem["/"] = "read";
         if (scenario === "scoped_ignored_environment_filter") config.shell_environment_policy.include_only = ["*"];
+        if (scenario === "scoped_ignored_code_mode_host") config.features.code_mode_host = true;
+        if (scenario === "scoped_ignored_agents") config.agents.enabled = true;
         if (nativeCandidateScenario) {
           initializedCandidatePolicy = true;
           if (scenario === "candidate_canary_auth_mismatch") config.cli_auth_credentials_store = "file";

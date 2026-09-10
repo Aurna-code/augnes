@@ -33,6 +33,7 @@ import {
 import { observeCandidateConfigPolicyV01 } from "./codex-ordinary-runtime-candidate";
 import {
   CodexManagedRuntimeStoreErrorV01,
+  assertCodexManagedRuntimeSelectionUnchangedV01,
   ensurePinnedCodexManagedRuntimeV01,
   managedRootFromEnvironmentV01,
   recordCodexManagedRuntimeLastKnownGoodV01,
@@ -1095,6 +1096,7 @@ export function resolveDefaultCodexAppServerLaunchV01(
   testDependencies?: {
     resolve_production_runtime(): CodexProductionRuntimeIdentityV01;
   },
+  scopedCodeMode = false,
 ): CodexAppServerLaunchV01 {
   if (environment.AUGNES_CANONICAL_TEST_MODE === "1") {
     const qualifiedRuntimeSelection = selectPinnedCodexQualifiedRuntimeV01({
@@ -1124,7 +1126,7 @@ export function resolveDefaultCodexAppServerLaunchV01(
   }
   const productionRuntime = testDependencies
     ? testDependencies.resolve_production_runtime()
-    : resolveCodexProductionRuntimeV01({ environment });
+    : resolveCodexProductionRuntimeV01({ environment, scoped_code_mode: scopedCodeMode });
   assertCodexProductionRuntimeIdentityUnchangedV01(productionRuntime);
   return {
     command: productionRuntime.canonical_native_executable,
@@ -1951,7 +1953,8 @@ class CodexAppServerInvocationV01 {
         });
       }
       const launch =
-        this.options.launch ?? resolveDefaultCodexAppServerLaunchV01();
+        this.options.launch ?? resolveDefaultCodexAppServerLaunchV01(process.env, undefined,
+          !!this.options.scoped_task && selectPinnedCodexQualifiedRuntimeV01().artifact.version === "0.153.4");
       const selectedRuntime = launch.qualified_runtime_selection ??
         selectPinnedCodexQualifiedRuntimeV01({ lane: "ordinary_chatgpt_auth" });
       assertCurrentCodexQualifiedRuntimeSelectionV01(selectedRuntime);
@@ -1988,6 +1991,9 @@ class CodexAppServerInvocationV01 {
         launch.production_runtime_identity?.managed_runtime_selection ?? null;
       this.managedRuntimeRoot =
         launch.production_runtime_identity?.managed_runtime_root ?? null;
+      if (launch.production_runtime_identity && this.scopedLaunch?.code_mode_profile_fingerprint &&
+          this.managedRuntimeSelection?.scoped_code_mode?.profile_fingerprint !== this.scopedLaunch.code_mode_profile_fingerprint)
+        throw new Error("codex_scoped_code_mode_artifact_binding_mismatch");
       this.transport = new CodexStdioJsonRpcTransportV01({
         command: launch.command,
         args: [...(launch.prefix_args ?? []), ...(this.scopedLaunch?.args ?? []), "app-server", "--stdio"],
@@ -2145,6 +2151,7 @@ class CodexAppServerInvocationV01 {
 
   private async startNewThreadAndTurn(): Promise<void> {
     if (this.options.scoped_task) {
+      this.assertScopedManagedArtifactsCurrent();
       await assertCodexScopedTaskCurrentV01(this.options.scoped_task, this.request);
       this.scopedLaunch!.assert_sources_current();
       if (this.control.cancellation_signal.aborted || this.stopRequest || this.fatalError) throw new Error("codex_scoped_stopped_before_thread");
@@ -2500,8 +2507,15 @@ class CodexAppServerInvocationV01 {
     return matching[0] as Record<string, unknown>;
   }
 
+  private assertScopedManagedArtifactsCurrent(): void {
+    if (this.managedRuntimeSelection && this.managedRuntimeRoot) {
+      assertCodexManagedRuntimeSelectionUnchangedV01(this.managedRuntimeSelection, { root: this.managedRuntimeRoot });
+    }
+  }
+
   private async startTurn(): Promise<void> {
     if (this.options.scoped_task) {
+      this.assertScopedManagedArtifactsCurrent();
       await assertCodexScopedTaskCurrentV01(this.options.scoped_task, this.request);
       this.scopedLaunch!.assert_sources_current();
       if (this.control.cancellation_signal.aborted || this.stopRequest || this.fatalError) throw new Error("codex_scoped_stopped_before_turn");
@@ -3435,6 +3449,10 @@ class CodexAppServerInvocationV01 {
             scoped_task_contract: SCOPED_CODEX_CONTRACT_V01,
             scoped_task_fingerprint: this.options.scoped_task!.fingerprint,
             scoped_configuration_fingerprint: this.scopedLaunch.configuration_fingerprint,
+            ...(this.managedRuntimeSelection?.scoped_code_mode ? {
+              scoped_code_mode_profile_fingerprint: this.managedRuntimeSelection.scoped_code_mode.profile_fingerprint,
+              scoped_managed_manifest_fingerprint: this.managedRuntimeSelection.store_manifest_fingerprint,
+            } : {}),
             requested_model: SCOPED_CODEX_MODEL_V01, observed_model_selection: SCOPED_CODEX_MODEL_V01,
             requested_effort: SCOPED_CODEX_EFFORT_V01, observed_effort_selection: SCOPED_CODEX_EFFORT_V01,
             backend_serving_identity: "unknown", cold_isolation_claimed: false,

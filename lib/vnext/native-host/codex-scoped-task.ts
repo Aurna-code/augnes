@@ -7,6 +7,7 @@ import { parse } from "smol-toml";
 import { canonicalizeProtocolValueV01, createProtocolSha256V01 } from "@/lib/vnext/protocol-primitives";
 import { inspectNativeHostPhysicalRootIdentityV01 } from "@/lib/vnext/native-host/project-root-identity";
 import { selectPinnedCodexQualifiedRuntimeV01 } from "./codex-qualified-runtime-registry";
+import { CODEX_SCOPED_CODE_MODE_PROFILE_FINGERPRINT_V01 } from "./codex-managed-runtime-store";
 import type { NativeHostPhysicalRootIdentityV01, NativeHostRequestV01 } from "@/types/vnext/native-host-adapter";
 import type { NativeHostTimeoutSchedulerV01 } from "@/lib/vnext/runtime/direct-native-host-round-trip";
 
@@ -152,7 +153,7 @@ const DISABLED_FEATURES = [
   "auth_elicitation", "use_agent_identity", "shell_snapshot", "shell_snapshot_v2",
   "web_search_request", "web_search_cached", "standalone_web_search", "guardian_approval", "guardianv2",
   "guardian_ext", "step_model_switching",
-  "view_image", "code_mode", "code_mode_host", "code_mode_prewarm", "code_mode_only", "js_repl", "js_repl_tools_only",
+  "view_image", "code_mode", "code_mode_prewarm", "code_mode_only", "js_repl", "js_repl_tools_only",
   "deferred_executor", "local_thread_store_compression", "local_thread_store_shared_compression",
   "tool_call_mcp_elicitation", "unavailable_dummy_tools",
 ] as const;
@@ -260,6 +261,7 @@ export interface ScopedCodexLaunchV01 {
   readonly profile_name: string;
   readonly settings: Readonly<Record<string, unknown>>;
   readonly configuration_fingerprint: string;
+  readonly code_mode_profile_fingerprint: string | null;
   assert_sources_current(): void;
   assert_configuration(response: unknown): void;
   readonly command_environment_check: Readonly<{ command: readonly string[]; cwd: string; permissionProfile: string; timeoutMs: number; outputBytesCap: number }>;
@@ -295,6 +297,11 @@ function prepareRestrictedCodexLaunchV01(m: Pick<StageMaterial, "root" | "files"
   nativeCanary: boolean): ScopedCodexLaunchV01 {
   assertCodexScopedRuntimeArtifactV01(runtime);
   const runtimeVersion = runtime.version; // Detached; no mutable caller binding retained.
+  // Model metadata still owns tool-mode routing. Only the exact task extension
+  // selects the process provider; it neither forces code mode nor changes the
+  // catalog. Scalar false on the other routes replaces inherited host tables.
+  const processCodeMode = runtimeVersion === "0.153.4" && !nativeCanary;
+  const codeModeHost = processCodeMode ? { enabled: true, disable_in_process_fallback: true } : false;
   const disabledFeatures = [
     ...DISABLED_FEATURES,
     ...(runtimeVersion === "0.153.4" ? ["context_management", "mcp_oauth_refresh_coordination"] : []),
@@ -357,7 +364,10 @@ function prepareRestrictedCodexLaunchV01(m: Pick<StageMaterial, "root" | "files"
     model: SCOPED_CODEX_MODEL_V01, model_provider: "openai", model_reasoning_effort: SCOPED_CODEX_EFFORT_V01,
     default_permissions: profileName, permissions: { [profileName]: profile }, web_search: "disabled",
     approval_policy: "never", approvals_reviewer: "user",
-    features: { ...Object.fromEntries(disabledFeatures.map(f => [f, false])), skip_host_skill_discovery: true },
+    // Metadata can select multi-agent v2 despite both feature flags being off.
+    // This pinned Config consumer overrides that selection without a catalog edit.
+    ...(processCodeMode ? { agents: { enabled: false } } : {}),
+    features: { ...Object.fromEntries(disabledFeatures.map(f => [f, false])), code_mode_host: codeModeHost, skip_host_skill_discovery: true },
     memories: { use_memories: false, generate_memories: false },
     mcp_servers: Object.fromEntries([...servers].sort().map(name => [name, { enabled: false }])),
     skills: { bundled: { enabled: false }, include_instructions: false },
@@ -382,6 +392,12 @@ function prepareRestrictedCodexLaunchV01(m: Pick<StageMaterial, "root" | "files"
     for (const key of ["model", "model_provider", "model_reasoning_effort", "default_permissions", "web_search", "project_doc_max_bytes", "allow_login_shell"])
       if (!equal(c[key], settings[key])) refuse("effective_configuration_mismatch");
     const features = record(c.features);
+    // This typed host setting chooses a different executable. Checking only
+    // enabled (or accepting scalar true) would not establish the backend.
+    if (!equal(features.code_mode_host, codeModeHost)) refuse("code_mode_backend_mismatch");
+    if (processCodeMode && optionalRecord(c.agents).enabled !== false) refuse("agents_enabled");
+    if (processCodeMode && features.shell_tool != null && features.shell_tool !== true)
+      refuse("nested_command_tool_disabled");
     if (nativeCanary) for (const [key, expected] of nativeAuthInputs) {
       const actual = key === "secret_auth_storage" ? features[key] : c[key];
       if (!equal(actual, expected)) refuse("native_auth_effective_source_mismatch");
@@ -438,6 +454,7 @@ function prepareRestrictedCodexLaunchV01(m: Pick<StageMaterial, "root" | "files"
         refuse("command_environment_mismatch");
     },
     configuration_fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01({ settings, source_hashes: [...sourceHashes] })),
+    code_mode_profile_fingerprint: processCodeMode ? CODEX_SCOPED_CODE_MODE_PROFILE_FINGERPRINT_V01 : null,
     assert_sources_current: assertSources, assert_configuration: assertConfiguration, assert_thread: assertThread,
     assert_mcp_catalog(response: unknown) {
       const r = record(response);

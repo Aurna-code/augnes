@@ -672,3 +672,84 @@ freshly bind the then-current source, managed 0.153.4 artifact, ordinary native
 authentication/configuration, genuine stage-1 scope and reviewed capture. Its
 single-turn limits and authorization boundary remain separate from registration,
 staging, activation and the already consumed successful canary.
+# Scoped code-mode paired-artifact draft (#1234): HOLD
+
+This prospective connection is incomplete. It does not activate a helper or
+create another execution allowance. The historical post-adoption turn remains
+native-completed, task-partial/blocked, X unchecked, B unexposed, and Y deferred.
+
+The existing managed-store owner can explicitly install a separate paired view
+with `ensurePinnedCodexScopedManagedRuntimeV01`, given both exact reviewed
+archives. Its `codex_managed_scoped_runtime_store.v0.1` manifest binds the native,
+helper and scoped configuration fingerprint. Old native-only manifests,
+qualification records, pin, default selection and rollback evidence retain
+their meaning. There is no fallback download or last-known-good invocation
+fabrication. Production must not point at a disposable test store.
+
+The native remains the reviewed 0.153.4 executable, SHA-256
+`b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3`.
+The official helper asset is `545043539`,
+`codex-code-mode-host-aarch64-apple-darwin.tar.gz` (22,569,619 bytes), archive
+SHA-256 `45a9b0fdf53b98b85a6bb91e175dd90e961328a7a14fb50a40902205199df1df`.
+Its sole regular member is `codex-code-mode-host-aarch64-apple-darwin`, a
+62,767,552-byte Mach-O arm64 executable, SHA-256
+`d8a2222e017342718d16a5dbe092921c628961f812f62f42036b8d960e1ffe56`.
+The verified upstream layout is `bin/codex` plus sibling
+`bin/codex-code-mode-host`; no PATH lookup or unofficial rebuild is admitted.
+These are release-digest, byte and source observations, not signed build
+attestations.
+
+Only a genuine scoped 0.153.4 task selects this paired view. The launch sets
+`features.code_mode_host={enabled=true,disable_in_process_fallback=true}` while
+retaining code-mode feature selection, prewarm and ambient suppression. Model
+metadata still owns CodeMode/CodeModeOnly routing. The typed host readback must
+match exactly. `agents.enabled=false` is also necessary: the pinned consumer
+otherwise lets bundled model metadata select v2 despite disabled feature flags.
+The non-tool native canary and historical 0.152.1 projection stay separate.
+Managed artifact integrity is revalidated before thread and turn boundaries.
+Missing helper/backend or contradictory settings refuse; configuration alone
+does not attest a model-selected tool call.
+
+The explicit model-free regression extends the existing sandbox fixture:
+
+```sh
+npm run test:codex-sandbox-projection -- --scoped-code-mode-native \
+  <reviewed-native-archive> <reviewed-helper-archive>
+```
+
+It follows pinned upstream `app-server/tests/suite/v2/code_mode_host.rs`: fixed
+loopback Responses events substitute only for the model. Private empty auth and
+state replace the ordinary account context. The real native router, exact
+stdio helper, nested ExecCommandHandler, environment projection and named OS
+permission consumer execute. The local catalog returns an empty fixture;
+bundled metadata remains effective. No credential, provider or evaluator call
+is involved. This is not a native Augnes RunReceipt or live confirmation.
+
+Allowed synthetic reads and held/outside reads, writes, apply_patch and command
+network denials are exercised, along with absent process/require/fetch globals,
+rejected imports, interruption and parent/helper/command settlement. The helper
+itself is not spawned inside the task's OS sandbox: V8/import restrictions and
+the permissions applied to nested commands are distinct boundaries. Native
+input-request tools remain exposed and unexpected server requests still refuse;
+collaboration and MCP tools must be absent. The outer 180,000 ms execution and
+10,000 ms RPC/settlement ceilings and reserve are unchanged. Fixture limits are
+smaller; helper defaults do not extend an outer invocation.
+
+**Blocking negative:** after admission, an external synthetic actor replaces an
+approved file with a symlink before the next command's sandbox is compiled.
+The exact native consumer reads the held target. Pinned
+`sandboxing/src/seatbelt.rs` canonicalizes read roots when building each policy;
+Augnes's existing source validator rejects such a replacement at admission but
+does not run inside each native nested command. This is an observed fixture
+failure, not evidence that the historical worker changed files or read B.
+The failing assertion is retained. Do not waive it or treat ordinary negative
+checks as resolving it. No deciding verification or activation is justified
+until this required boundary has a reviewed resolution. That resolution must
+remain in this Draft's review scope; a different native artifact, weaker policy
+or new execution hook is not implicitly authorized.
+
+After the boundary is resolved and deciding evidence accepted, a later explicit
+activation may stage this exact pair through the owner in the actual service
+store on reviewed source. A separately authorized single-turn confirmation
+would then create fresh current scope/capture bindings and measure actual
+model-selected dispatch. Neither step is performed by this implementation task.

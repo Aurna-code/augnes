@@ -101,6 +101,8 @@ interface CodexProductionRuntimeResolverDependenciesV01 {
 export function resolveCodexProductionRuntimeV01(input: {
   environment?: NodeJS.ProcessEnv;
   cwd?: string;
+  /** Internal scoped adapter requirement. No PATH/config fallback. */
+  scoped_code_mode?: boolean;
 } = {}): CodexProductionRuntimeIdentityV01 {
   const environment = input.environment ?? process.env;
   const managedRoot = managedRootFromEnvironmentV01(environment);
@@ -109,6 +111,7 @@ export function resolveCodexProductionRuntimeV01(input: {
     mode: "pinned_exact",
     lane: "ordinary_chatgpt_auth",
     environment,
+    scoped_code_mode: input.scoped_code_mode,
   });
   return managedProductionIdentityV01(managedRoot, managedSelection, environment);
 }

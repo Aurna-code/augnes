@@ -28,12 +28,18 @@ import type {
   NativeHostLifecycleEventV01,
   NativeHostRequestV01,
 } from "@/types/vnext/native-host-adapter";
+import { scopedCodeModeNativeV01 } from "./test-codex-scoped-code-mode";
 
 async function main(): Promise<void> {
   const testRoot = realpathSync(
     mkdtempSync(path.join(tmpdir(), "augnes-codex-sandbox-test-")),
   );
   try {
+  const helperIndex = process.argv.indexOf("--scoped-code-mode-native");
+  if (helperIndex >= 0) {
+    assert(process.argv[helperIndex + 1] && process.argv[helperIndex + 2], "exact native and helper archives required");
+    await scopedCodeModeNativeV01(testRoot, process.argv[helperIndex + 1]!, process.argv[helperIndex + 2]!); return;
+  }
   if (process.argv.includes("--incident-message-only")) { await incidentMessageCaptureV01(testRoot); return; }
   await failedTerminalDiagnosticCaptureV01(testRoot);
   if (process.argv.includes("--failed-terminal-diagnostic-only")) return;
@@ -434,7 +440,7 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
   incidentRecorder!.closeCapture(); incidentRecorder!.closeIncidentCapture();
   assert.equal(incidentRecorder!.readIncidentCapture().artifact, null);
   assert.equal(incidentRecorder!.readIncidentCaptureStatus().hook_status, "not_observed");
-  const scenarios = ["scoped_success", "scoped_unsupported_capability", "scoped_ignored_memory", "scoped_ignored_mcp", "scoped_ignored_permissions", "scoped_ignored_environment_filter", "scoped_command_environment_mismatch", "scoped_mcp_tool", "scoped_profile_mismatch", "scoped_model_mismatch", "scoped_effort_mismatch", "scoped_approval", "scoped_effect", "scoped_settings_drift", "scoped_result_effect", "scoped_cancel"];
+  const scenarios = ["scoped_success", "scoped_unsupported_capability", "scoped_ignored_memory", "scoped_ignored_mcp", "scoped_ignored_permissions", "scoped_ignored_environment_filter", "scoped_ignored_code_mode_host", "scoped_ignored_agents", "scoped_command_environment_mismatch", "scoped_mcp_tool", "scoped_profile_mismatch", "scoped_model_mismatch", "scoped_effort_mismatch", "scoped_approval", "scoped_effect", "scoped_settings_drift", "scoped_result_effect", "scoped_cancel"];
   for (const scenario of scenarios) {
     const scope = await scopeFor();
     const tracePath = path.join(testRoot, `${scenario}.jsonl`);
@@ -509,9 +515,31 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
   assert.equal((candidateLaunch.settings.features as Record<string, unknown>).context_management, false);
   assert.equal((candidateLaunch.settings.features as Record<string, unknown>).mcp_oauth_refresh_coordination, false);
   assert.deepEqual(launch.settings, candidateLaunch.settings, "the adopted pin selects the reviewed exact scoped projection");
+  assert.deepEqual((candidateLaunch.settings.features as Record<string, unknown>).code_mode_host,
+    { enabled: true, disable_in_process_fallback: true });
+  const response = { config: structuredClone(candidateLaunch.settings), layers: [{ name: { type: "sessionFlags" } }] };
+  candidateLaunch.assert_configuration(response);
+  for (const host of [null, true, false, {}, { enabled: true }, { enabled: false, disable_in_process_fallback: true },
+    { enabled: true, disable_in_process_fallback: false }, { enabled: true, disable_in_process_fallback: true, unknown: true }])
+    assert.throws(() => candidateLaunch.assert_configuration({ ...response, config: { ...response.config,
+      features: { ...(response.config.features as object), code_mode_host: host } } }), /code_mode_backend_mismatch/);
+  for (const agents of [null, {}, { enabled: true }])
+    assert.throws(() => candidateLaunch.assert_configuration({ ...response, config: { ...response.config, agents } }), /agents_enabled/);
+  assert.throws(() => candidateLaunch.assert_configuration({ ...response, config: { ...response.config,
+    features: { ...(response.config.features as object), shell_tool: false } } }), /nested_command_tool_disabled/);
   const rollbackLaunch = prepareScopedCodexLaunchV01(scope, environment,
     getCodexReviewedRuntimeArtifactV01({ entry_id: "codex-rust-v0.152.1-darwin-arm64" }).artifact);
   assert.equal((rollbackLaunch.settings.features as Record<string, unknown>).context_management, undefined, "old extension projection stays exact");
+  assert.equal((rollbackLaunch.settings.features as Record<string, unknown>).code_mode_host, false);
+  assert.equal(rollbackLaunch.code_mode_profile_fingerprint, null);
+  const canaryLaunch = prepareCodexNativeCanaryLaunchV01({ root: stage, fingerprint: scope.fingerprint,
+    approved_instruction_files: [] }, environment, candidate);
+  assert.equal((canaryLaunch.settings.features as Record<string, unknown>).code_mode_host, false);
+  assert.equal((canaryLaunch.settings.features as Record<string, unknown>).shell_tool, false);
+  assert.equal(canaryLaunch.code_mode_profile_fingerprint, null);
+  canaryLaunch.assert_configuration({ config: structuredClone(canaryLaunch.settings), layers: [] });
+  assert.throws(() => canaryLaunch.assert_configuration({ config: { ...canaryLaunch.settings,
+    features: { ...(canaryLaunch.settings.features as object), code_mode_host: { enabled: false, disable_in_process_fallback: true } } }, layers: [] }), /code_mode_backend_mismatch/);
   for (const changed of [{ version: "0.153.5" }, { version: "0.152.1" }, { native_executable_sha256: "sha256:wrong" },
     { tagged_source_commit: "0".repeat(40) }, { compatibility_profile_fingerprint: "sha256:wrong" }])
     assert.throws(() => prepareScopedCodexLaunchV01(scope, environment, { ...candidate, ...changed }), /runtime_extension_unqualified/);
