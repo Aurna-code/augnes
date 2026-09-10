@@ -857,3 +857,23 @@ fixture substitutes App Server protocol responses; it does not execute a model
 or task command. The separate real native/helper fixture does not substitute for
 this event-consumer coverage. Historical X remains unchecked, and its actual
 triggering cwd was not retained; no historical result is rewritten by this fix.
+
+The complete initialization fixture and its fifteen-case scoped adapter/service
+matrix have separate `supporting-serial` Canonical children. Each has a 30,000 ms
+ceiling; the combined child allowance is now 60,000 ms instead of 30,000 ms.
+The default initialization entry no longer repeats the scoped matrix. This is
+coverage scheduling, not a production timeout change or a claimed speedup.
+The existing runner's `integration --project-work-only` focus executes both
+registered owners with normal environment isolation and deadlines; it is not
+deciding evidence or a complete integration suite.
+
+Before launching each child, the parent records and owns its disposable root's
+physical identity. Normal child cleanup still uses genuine scope/service owners.
+After an interrupted child tree settles, the parent may reclaim its own test
+root, restoring owner access only through checked directory descriptors. It
+does not follow symlinks, accept a replaced root or remove an unsettled child's
+resources. Independent cleanup attempts continue after a refusal, and execution
+and cleanup failures are reported together. This test-only ownership neither
+reconstructs a dead production scope nor changes snapshot lifetime semantics.
+Expected interruption regressions require both a failed child result and actual
+resource absence; cleanup cannot turn an unexpected deciding timeout into a pass.

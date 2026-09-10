@@ -111,8 +111,9 @@ void main().catch((error) => {
 });
 
 async function main(): Promise<void> {
+  const initializationStarted = performance.now();
   try {
-    if (process.argv.includes("--scoped-host-only")) {
+    if (process.argv.includes("--scoped-host-only") || scopedInterruptionPoint()) {
       await assertScopedNativeHostConnectionV01();
       return;
     }
@@ -136,7 +137,7 @@ async function main(): Promise<void> {
     await assertRetainedSourceRecallV01();
     await assertSeparateNativeHostStartV01();
     await assertRevisedNativeHostStartV01();
-    await assertScopedNativeHostConnectionV01();
+    console.log(JSON.stringify({ initialization_ms: performance.now() - initializationStarted, scoped_cases: 0 }));
     console.log(JSON.stringify({
       status: "pass",
       contract: "project_work_initialization.v0.1",
@@ -167,10 +168,27 @@ async function main(): Promise<void> {
   }
 }
 
+// Test-only fault injection: deliberately prevent child-local finally cleanup.
+// The existing parent child-runner must time out, settle the tree and reclaim
+// its already-owned resource root. No production scope handle is reconstructed.
+function scopedInterruptionPoint(): string | undefined {
+  if (process.argv.includes("--interrupt-scoped-after-snapshot")) return "snapshot";
+  if (process.argv.includes("--interrupt-scoped-after-host")) return "host";
+}
+function interruptScopedFixture(point: string, snapshotRoot: string, pid?: number): void {
+  if (scopedInterruptionPoint() !== point) return;
+  console.log(JSON.stringify({ scoped_interruption: point, snapshot_root: snapshotRoot, fake_host_pid: pid ?? null }));
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+}
+
 async function assertScopedNativeHostConnectionV01(): Promise<void> {
   for (const scenario of ["success", "cwd_alias", "cwd_relative", "cwd_source", "cwd_other_snapshot",
     "cwd_outside", "cwd_traversal", "cwd_invalid", "cwd_duplicate", "cwd_conflict",
     "default_success", "default_outside", "prestart_source", "running_source", "snapshot_corruption"] as const) {
+    if (scopedInterruptionPoint() && scenario !== "success") break;
+    const timing: Record<string, number> = {};
+    const caseStarted = performance.now();
+    let mark = caseStarted;
     const mismatch = scenario === "prestart_source";
     const scoped = !scenario.startsWith("default_");
     const commandItems = !["prestart_source", "running_source", "snapshot_corruption"].includes(scenario);
@@ -178,6 +196,7 @@ async function assertScopedNativeHostConnectionV01(): Promise<void> {
     const rejectedEvent = rejectedCwd || scenario === "cwd_conflict";
     const name = `scoped-${scenario}`;
     const fixture = createFixtureV01(name, false, true, true);
+    timing.fixture_ms = performance.now() - mark; mark = performance.now();
     let service: LiveNativeHostRunServiceV01 | null = null;
     let snapshotRoot: string | undefined;
     const scopes: Awaited<ReturnType<typeof createCodexScopedTaskV01>>[] = [];
@@ -198,6 +217,8 @@ async function assertScopedNativeHostConnectionV01(): Promise<void> {
       const scope = await createCodexScopedTaskV01(scopeInput); scopes.push(scope);
       const snapshot = readCodexScopedSnapshotV01(scope); snapshotRoot = snapshot.root;
       assert.notEqual(snapshotRoot, fixture.root);
+      timing.preparation_ms = performance.now() - mark; mark = performance.now();
+      interruptScopedFixture("snapshot", snapshotRoot);
       let commandCwd = scoped ? snapshot.root : fixture.root;
       if (scenario === "cwd_source") commandCwd = fixture.root;
       if (scenario === "cwd_outside" || scenario === "default_outside") commandCwd = ROOT;
@@ -232,8 +253,11 @@ async function assertScopedNativeHostConnectionV01(): Promise<void> {
         ...(scoped ? { scoped_task: { scope, window } } : {}), timeout_ms: 10_000, stop_settle_timeout_ms: 3_000,
         adapter_factory: bound => createCodexAppServerAdapterV01({ scoped_task: bound,
           observe: observation => {
-            if (observation.kind === "spawned" && observation.process_id) processes.add(observation.process_id);
+            if (observation.kind === "spawned" && observation.process_id) {
+              processes.add(observation.process_id);
+            }
             if (observation.kind !== "turn_started") return;
+            interruptScopedFixture("host", snapshot.root, [...processes][0]);
             if (scenario === "running_source") writeFileSync(taskFile, "Synthetic source drift after turn submission.\n");
             if (scenario === "snapshot_corruption") {
               // Independent controller-side corruption tests detection, not an
@@ -255,14 +279,22 @@ async function assertScopedNativeHostConnectionV01(): Promise<void> {
       const credential = credentialFromCookieV01(defined.session_admission.cookie_value);
       sessionId = credential.session_id;
       const start = () => service!.start({ config: fixture.config, mode: "interactive", operator_mutation: { credential, clock: fixedClock("2026-08-01T00:00:04.000Z") } });
+      timing.adapter_setup_ms = performance.now() - mark; mark = performance.now();
       if (mismatch) await assert.rejects(start(), /direct_host_scoped_snapshot_admission_changed/);
       const started = mismatch ? null : await start();
+      timing.start_ms = performance.now() - mark; mark = performance.now();
+      timing.poll_count = 0; timing.poll_read_ms = 0; timing.poll_wait_ms = 0;
       const deadline = performance.now() + 10_000;
       let projection = started?.projection ?? service.read(fixture.config);
       while (!["completed", "failed", "paused", "blocked", "cancelled", "timed_out"].includes(projection.status)) {
         assert(performance.now() < deadline, "scoped service must settle within its existing limit");
-        await new Promise(resolve => setTimeout(resolve, 10)); projection = service.read(fixture.config);
+        const waitStart = performance.now();
+        await new Promise(resolve => setTimeout(resolve, 10));
+        timing.poll_wait_ms += performance.now() - waitStart;
+        const readStart = performance.now(); projection = service.read(fixture.config);
+        timing.poll_read_ms += performance.now() - readStart; timing.poll_count += 1;
       }
+      timing.execution_settlement_ms = performance.now() - mark; mark = performance.now();
       if (mismatch) {
         assert.notEqual(projection.status, "completed");
         assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["run_receipt"], limit: 10 }).length, 0);
@@ -329,13 +361,21 @@ async function assertScopedNativeHostConnectionV01(): Promise<void> {
       assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["state_transition_receipt"], limit: 10 }).length, 0);
       if (scoped) await assert.rejects(service.start({ config: fixture.config, mode: "interactive", operator_mutation: { credential } }), /window_start_refused/);
     } finally {
+      timing.assertions_ms = performance.now() - mark; mark = performance.now();
       try {
         await service?.shutdown();
+        timing.service_shutdown_ms = performance.now() - mark; mark = performance.now();
         for (const scope of scopes) await releaseCodexScopedTaskV01(scope);
+        timing.scope_release_ms = performance.now() - mark; mark = performance.now();
         if (snapshotRoot) assert.equal(existsSync(snapshotRoot), false);
         for (const pid of processes) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
         if (sessionId) assert(revokeVNextLocalOperatorSessionByIdV01(fixture.db, { config: fixture.config, session_id: sessionId, clock: fixedClock("2026-08-01T00:01:00.000Z") }).revoked_at);
-      } finally { fixture.db.close(); assert.equal(fixture.db.open, false); }
+      } finally {
+        fixture.db.close(); assert.equal(fixture.db.open, false);
+        timing.session_db_cleanup_ms = performance.now() - mark;
+        timing.total_ms = performance.now() - caseStarted;
+        console.log(JSON.stringify({ scoped_case_timing: scenario, ...timing }));
+      }
     }
   }
   console.log("scoped disposable service: fake App Server command items exercise the real adapter/service, authenticated synthetic admission, receipt/proposal and source/snapshot lineage; cwd aliases/default parity/replay pass; source/foreign snapshot/outside/traversal/forged binding/conflict refuse; checkpoints retained; source drift blocks and snapshot corruption invalidates; processes/sessions/DBs/snapshots settled; model calls=0; no actual task-command execution claimed");

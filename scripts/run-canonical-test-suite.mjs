@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,6 +13,8 @@ import {
 } from "./canonical-child-runner.mjs";
 import {
   buildCanonicalChildEnvironment,
+  createCanonicalTestResourceRoot,
+  cleanupCanonicalTestResources,
   findForbiddenAmbientKeysForwarded,
 } from "./canonical-test-environment.mjs";
 import { buildRuntimeOperabilityCanonicalSteps } from "./runtime-operability-ownership.mjs";
@@ -28,11 +29,9 @@ const repoRoot = path.resolve(
 );
 const nestedAppRoot = path.join(repoRoot, "apps/augnes_apps");
 const suiteName = process.argv[2];
-const temporaryRoot = realpathSync(
-  mkdtempSync(path.join(tmpdir(), "ag-suite-")),
-);
-const ownedResourceRoots = [];
-
+const projectWorkFocus = process.argv[3] === "--project-work-only";
+if (process.argv.length > 3 && (!projectWorkFocus || suiteName !== "integration" || process.argv.length !== 4))
+  throw new Error("unsupported canonical suite focus");
 const rootNode = (...args) => ({
   command: process.execPath,
   args: ["--import", "tsx", ...args],
@@ -607,6 +606,17 @@ const suites = {
       timeoutMs: 30_000,
     },
     {
+      id: "project-work-scoped-host",
+      group: "supporting-serial",
+      requirements: ["database", "migrations", "filesystem", "process-owning"],
+      label: "scoped snapshot command events, source lineage, receipt persistence and cleanup",
+      ...rootNode("scripts/test-vnext-project-work-initialization.ts", "--scoped-host-only"),
+      // Separate serial ownership, not a larger deadline for the original child.
+      // Initialization + scoped coverage now have 30s + 30s aggregate ceilings.
+      timeoutMs: 30_000,
+      requireNaturalExit: true,
+    },
+    {
       id: "executed-reviewed-follow-up",
       group: "supporting-serial",
       requirements: ["database", "migrations", "filesystem", "mutable-module-state"],
@@ -1114,23 +1124,30 @@ if (!(suiteName in suites)) {
   process.exit(2);
 }
 
+const temporaryOwner = createCanonicalTestResourceRoot("ag-suite-");
+const temporaryRoot = temporaryOwner.root;
+console.log(JSON.stringify({ suite_resource_owned: suiteName, ...temporaryOwner }));
+const ownedResourceRoots = [];
 const results = [];
 let forbiddenEnvironmentKeysForwarded = 0;
 let canonicalChildrenChecked = 0;
 let serviceMaintenance = null;
 let serviceMaintenanceRelease = null;
+let suiteFailure = null;
+let summary;
 
 try {
   assertCanonicalConcurrentChildLabelsV01(
     integrationInventory.map((step) => step.label),
   );
-  const preparedSteps = suites[suiteName].map((step, index) => {
-    const resourceRoot = realpathSync(
-      mkdtempSync(
-        path.join(tmpdir(), `ag-c${String(index + 1).padStart(2, "0")}-`),
-      ),
-    );
-    ownedResourceRoots.push(resourceRoot);
+  const selectedSteps = projectWorkFocus
+    ? suites[suiteName].filter(step => ["project-work-initialization", "project-work-scoped-host"].includes(step.id))
+    : suites[suiteName];
+  const preparedSteps = selectedSteps.map((step, index) => {
+    const resourceOwner = createCanonicalTestResourceRoot(`ag-c${String(index + 1).padStart(2, "0")}-`);
+    const resourceRoot = resourceOwner.root;
+    ownedResourceRoots.push(resourceOwner);
+    console.log(JSON.stringify({ child_resource_owned: step.id ?? index + 1, ...resourceOwner }));
     for (const directory of [
       path.join(resourceRoot, "home"),
       path.join(resourceRoot, "home", "AppData", "Local"),
@@ -1173,6 +1190,7 @@ try {
       timeoutMs,
       requireNaturalExit: step.requireNaturalExit === true,
       resourceRoot,
+      resourceOwner,
     };
   });
   const metadataByLabel = new Map(
@@ -1219,8 +1237,8 @@ try {
       (step) => step.group === "supporting-serial",
     );
     if (
-      operator.length !== 1 ||
-      supporting.length !== preparedSteps.length - 1
+      operator.length !== (projectWorkFocus ? 0 : 1) ||
+      supporting.length !== preparedSteps.length - operator.length
     ) {
       throw new Error(
         "integration concurrent ownership inventory is incomplete",
@@ -1228,9 +1246,9 @@ try {
     }
     completedResults = await runCanonicalChildGroups({
       suite: suiteName,
-      maxConcurrency: 2,
+      maxConcurrency: projectWorkFocus ? 1 : 2,
       groups: [
-        { id: "operator-process", children: operator },
+        ...(projectWorkFocus ? [] : [{ id: "operator-process", children: operator }]),
         { id: "supporting-serial", children: supporting },
       ],
     });
@@ -1279,18 +1297,17 @@ try {
     });
   }
 
-  console.log(
-    JSON.stringify(
-      {
+  summary = {
         suite: suiteName,
+        coverage: projectWorkFocus ? "focused_project_work_children_only" : "complete_suite",
         status: "pass",
         environment_isolation_verified: forbiddenEnvironmentKeysForwarded === 0,
         forbidden_environment_keys_forwarded: forbiddenEnvironmentKeysForwarded,
         canonical_children_checked: canonicalChildrenChecked,
         ...(suiteName === "integration"
           ? {
-              concurrency_bound: 2,
-              integration_groups: ["operator-process", "supporting-serial"],
+              concurrency_bound: projectWorkFocus ? 1 : 2,
+              integration_groups: projectWorkFocus ? ["supporting-serial"] : ["operator-process", "supporting-serial"],
               child_resource_isolation: [
                 "HOME",
                 "USERPROFILE",
@@ -1316,20 +1333,22 @@ try {
                 serviceMaintenanceRelease.released === true,
             }
           : null,
-      },
-      null,
-      2,
-    ),
-  );
+      };
+} catch (error) {
+  suiteFailure = error;
 } finally {
+  const failures = suiteFailure ? [suiteFailure] : [];
   if (serviceMaintenance && !serviceMaintenanceRelease) {
-    serviceMaintenanceRelease = await releaseCompanionServiceMaintenance({
-      repositoryRoot: repoRoot,
-      lease: serviceMaintenance.lease,
-    });
+    try {
+      serviceMaintenanceRelease = await releaseCompanionServiceMaintenance({
+        repositoryRoot: repoRoot, lease: serviceMaintenance.lease,
+      });
+    } catch (error) { failures.push(error); }
   }
-  for (const resourceRoot of ownedResourceRoots) {
-    rmSync(resourceRoot, { recursive: true, force: true });
-  }
-  rmSync(temporaryRoot, { recursive: true, force: true });
+  const resourceCleanup = cleanupCanonicalTestResources([...ownedResourceRoots, temporaryOwner]);
+  console.log(JSON.stringify({ suite: suiteName, resource_cleanup: resourceCleanup }));
+  for (const result of resourceCleanup) if (!result.completed)
+    failures.push(new Error(`canonical resource cleanup refused: ${result.root}: ${result.failures.join(",")}`));
+  if (failures.length) throw new AggregateError(failures, "canonical suite execution or cleanup failed");
 }
+console.log(JSON.stringify(summary, null, 2));

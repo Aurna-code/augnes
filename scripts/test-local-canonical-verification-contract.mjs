@@ -1006,15 +1006,16 @@ for (const fragment of [
   `runCanonicalChildGroups,`,
   `assertCanonicalConcurrentChildLabelsV01,`,
   `integrationInventory.map((step) => step.label)`,
-  `maxConcurrency: 2`,
+  `maxConcurrency: projectWorkFocus ? 1 : 2`,
   `{ id: "operator-process", children:`,
   `{ id: "supporting-serial", children:`,
   `new Set(preparedSteps.map((step) => step.resourceRoot)).size`,
   `joinAncestorLease: true`,
-  `const temporaryRoot = realpathSync(`,
-  `mkdtempSync(`,
-  `ownedResourceRoots.push(resourceRoot)`,
-  `for (const resourceRoot of ownedResourceRoots)`,
+  `const temporaryOwner = createCanonicalTestResourceRoot("ag-suite-")`,
+  "createCanonicalTestResourceRoot(`ag-c",
+  `ownedResourceRoots.push(resourceOwner)`,
+  `cleanupCanonicalTestResources([...ownedResourceRoots, temporaryOwner])`,
+  `new AggregateError(failures, "canonical suite execution or cleanup failed")`,
   `scripts/test-canonical-child-runner.mjs`,
   `scripts/test-local-canonical-verification-contract.mjs`,
 ]) {
@@ -1028,7 +1029,7 @@ const integrationLabelPreflightIndex = canonicalSuite.indexOf(
   `assertCanonicalConcurrentChildLabelsV01(\n    integrationInventory.map((step) => step.label),\n  );`,
 );
 const integrationResourcePreparationIndex = canonicalSuite.indexOf(
-  `const preparedSteps = suites[suiteName].map((step, index) => {`,
+  `const preparedSteps = selectedSteps.map((step, index) => {`,
 );
 assert.notEqual(
   integrationLabelPreflightIndex,
@@ -1060,6 +1061,7 @@ const integrationChildren = [
   "policy-triggered-model-run",
   "project-home",
   "project-work-initialization",
+  "project-work-scoped-host",
   "executed-reviewed-follow-up",
   "blank-state",
   "guide-brief-current-project",
@@ -1123,6 +1125,19 @@ for (const childId of integrationChildren) {
     `integration child must have exactly one owner: ${childId}`,
   );
 }
+// Both complete owners retain their own 30s ceiling; no duplicate scoped run.
+for (const id of ["project-work-initialization", "project-work-scoped-host"]) {
+  const registration = readCanonicalChildRegistration(integrationSource, id);
+  requireText(registration.block, `timeoutMs: 30_000`, `${id} deadline changed`);
+  requireText(registration.block, `group: "supporting-serial"`, `${id} scheduling changed`);
+}
+requireText(readCanonicalChildRegistration(integrationSource, "project-work-scoped-host").block,
+  `"--scoped-host-only"`, "scoped matrix must have one complete child");
+const firstWorkFixture = readFileSync(path.join(repositoryRoot, "scripts/test-vnext-project-work-initialization.ts"), "utf8");
+assert.equal(countOccurrences(firstWorkFixture, "await assertScopedNativeHostConnectionV01();"), 1,
+  "the default initialization path must not repeat the scoped matrix");
+requireText(canonicalSuite, `coverage: projectWorkFocus ? "focused_project_work_children_only" : "complete_suite"`,
+  "focused children cannot impersonate a complete suite");
 const qualifiedRuntimeRegistryRegistration = readCanonicalChildRegistration(
   integrationSource,
   "codex-qualified-runtime-registry",
