@@ -1072,12 +1072,13 @@ export function observeOrdinaryCodexAppServerUserAgentV01(
       throw new CodexProductionRuntimeErrorV01(
         "codex_production_runtime_protocol_drift",
       );
-    return observeCodexAppServerUserAgentV01({
+    // Qualification/currentness is established above. The generic parser binds
+    // the selected version without returning Strict's frozen 0.152.1 label.
+    return observeReviewedCandidateCodexAppServerUserAgentV01({
       raw_user_agent: rawUserAgent,
       expected_client_name: "augnes",
       expected_client_version: CODEX_APP_SERVER_ADAPTER_VERSION_V01,
-      expected_codex_cli_version:
-        selectedRuntime.artifact.version as typeof CODEX_ISOLATED_AUTH_SUPPORTED_CLI_VERSION_V01,
+      expected_codex_cli_version: selectedRuntime.artifact.version,
     }).codex_cli_version;
   } catch (error) {
     if (error instanceof CodexAppServerUserAgentErrorV01) {

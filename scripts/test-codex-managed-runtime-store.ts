@@ -27,6 +27,7 @@ import {
   codexManagedRuntimeArtifactDirectoryForTestV01,
   enforceCodexManagedRuntimeRetentionForTestV01,
   ensurePinnedCodexManagedRuntimeForTestV01,
+  ensurePinnedCodexManagedRuntimeV01,
   recordCodexManagedRuntimeLastKnownGoodV01,
   selectCodexManagedRuntimeForTestV01,
   stageCodexManagedRuntimeForTestV01,
@@ -57,6 +58,7 @@ async function main(): Promise<void> {
   await testDirectNativeRegistryAuthority();
   await testPublishedSealContract();
   await testExactStagingAndSafety();
+  await testLocalArchiveCannotBypassReviewedIdentity();
   await testSelectionPoliciesAndLanes();
   await testConcurrencyAndRecovery();
   await testRetentionAndImmediateRevalidation();
@@ -1217,5 +1219,27 @@ function lstatSafe(target: string) {
     return lstatSync(target);
   } catch {
     return null;
+  }
+}
+
+async function testLocalArchiveCannotBypassReviewedIdentity(): Promise<void> {
+  const root = rootFor("local-unreviewed-archive");
+  const archive = Buffer.from("synthetic unreviewed archive");
+  const before = Buffer.from(archive);
+  const originalFetch = globalThis.fetch;
+  let networkCalls = 0;
+  globalThis.fetch = async () => { networkCalls += 1; throw new Error("unexpected network"); };
+  try {
+    await assert.rejects(ensurePinnedCodexManagedRuntimeV01({
+      root, reviewed_archive_bytes: archive,
+    }), (error: unknown) => error instanceof CodexManagedRuntimeStoreErrorV01 &&
+      error.code === "codex_managed_runtime_archive_identity_mismatch");
+    assert.equal(networkCalls, 0, "local acquisition must not fall back to a download");
+    assert.deepEqual(archive, before);
+    assert.equal(existsSync(path.join(root, "state")), false);
+    assert.equal(countOwnedStagingRoots(), 0);
+    assert.equal(countOwnedLockRoots(), 0);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 }

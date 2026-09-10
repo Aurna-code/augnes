@@ -124,13 +124,13 @@ async function main(): Promise<void> {
     }
     assert.equal(JSON.stringify(CODEX_QUALIFIED_RUNTIME_REGISTRY_V01), originalRegistry);
     const production = selectPinnedCodexQualifiedRuntimeV01();
-    assert.equal(production.artifact.version, "0.152.1");
+    assert.equal(production.artifact.version, "0.153.4");
     assert.equal(production.artifact.lanes.strict_agent_identity.status, "hold");
     assert.equal(CODEX_QUALIFIED_RUNTIME_REGISTRY_V01.artifacts.find((entry) => entry.version === "0.153.2")!.lanes.ordinary_chatgpt_auth.status, "candidate");
   } finally { globalThis.fetch = originalFetch; rmSync(root, { recursive: true, force: false }); }
   assert.equal(existsSync(root), false);
   console.log(JSON.stringify({ status: "passed", contract: "codex_rolling_stable_candidate.v0.1", synthetic_only: true, live_candidate_attempts: 0,
-    provider_model_calls: 0, external_network_calls: 0, owned_process_residue: 0, disposable_state_removed: true, production: "0.152.1 pinned_exact" }));
+    provider_model_calls: 0, external_network_calls: 0, owned_process_residue: 0, disposable_state_removed: true, production: "0.153.4 pinned_exact" }));
 }
 async function fullFailureAndReplay(): Promise<void> {
   const archive = tar(); // Deliberately non-runnable synthetic Mach-O; never an upstream release.

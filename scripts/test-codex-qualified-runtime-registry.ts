@@ -8,6 +8,7 @@ import {
   CodexQualifiedRuntimeRegistryErrorV01,
   codexRuntimeCompatibilityProfileFingerprintV01,
   getPinnedCodexReviewedRuntimeArtifactV01,
+  selectCodexQualifiedRuntimeEntryV01,
   legacyExactCodexQualificationEvidenceV01,
   selectPinnedCodexQualifiedRuntimeV01,
   validateCodexQualifiedRuntimeRegistryV01,
@@ -31,6 +32,7 @@ const selected = selectPinnedCodexQualifiedRuntimeV01({
 });
 
 exactSeedIdentityV01();
+reviewedAdoptionAndRollbackIdentityV01();
 profileSemanticsAreReusableAndDeterministicV01();
 invalidRegistryMutationsFailClosedV01();
 laneSelectionIsIndependentV01();
@@ -69,11 +71,11 @@ function exactSeedIdentityV01(): void {
     production_promotion: "checked_in_reviewed_manifest_change_required",
   });
   assert.equal(registry.compatibility_profiles.length, 1);
-  assert.equal(registry.artifacts.length, 2);
+  assert.equal(registry.artifacts.length, 3);
   assert.deepEqual(registry.production_selection, {
     mode: "pinned_exact",
     lane: "ordinary_chatgpt_auth",
-    entry_id: "codex-rust-v0.152.1-darwin-arm64",
+    entry_id: "codex-rust-v0.153.4-darwin-arm64",
   });
   const artifact = registry.artifacts[0]!;
   assert.equal(artifact.version, "0.152.1");
@@ -275,7 +277,7 @@ function invalidRegistryMutationsFailClosedV01(): void {
 }
 
 function laneSelectionIsIndependentV01(): void {
-  assert.equal(selected.artifact.version, "0.152.1");
+  assert.equal(selected.artifact.version, "0.153.4");
   assert.equal(selected.artifact.lanes.ordinary_chatgpt_auth.status, "qualified");
   assert.equal(selected.artifact.lanes.strict_agent_identity.status, "hold");
   expectSelectionFailureV01(
@@ -288,7 +290,7 @@ function laneSelectionIsIndependentV01(): void {
   );
   assert.equal(
     CODEX_ISOLATED_AUTH_PRODUCTION_SELECTION_V01.selected_registry_entry_id,
-    selected.artifact.entry_id,
+    "codex-rust-v0.152.1-darwin-arm64",
   );
   assert.equal(
     CODEX_ISOLATED_AUTH_PRODUCTION_SELECTION_V01
@@ -403,7 +405,7 @@ function implementedProfileBindingRefusesSemanticMutationV01(): void {
 
 function revocationExpiryAndSecurityFloorFailClosedV01(): void {
   const revoked = mutableRegistryV01();
-  revoked.artifacts[0]!.revocation = {
+  revoked.artifacts[2]!.revocation = {
     revoked_at: "2026-09-03T02:00:00.000Z",
     reason: "synthetic_registry_test_revocation",
     evidence_refs: ["test:synthetic-revocation"],
@@ -418,7 +420,7 @@ function revocationExpiryAndSecurityFloorFailClosedV01(): void {
   );
 
   const expired = mutableRegistryV01();
-  expired.artifacts[0]!.not_after = "2026-09-03T01:17:35.000Z";
+  expired.artifacts[2]!.not_after = "2026-09-03T01:17:35.000Z";
   expectSelectionFailureV01(
     () =>
       selectPinnedCodexQualifiedRuntimeV01({
@@ -429,7 +431,7 @@ function revocationExpiryAndSecurityFloorFailClosedV01(): void {
   );
 
   const belowFloor = mutableRegistryV01();
-  belowFloor.artifacts[0]!.security_floor = {
+  belowFloor.artifacts[2]!.security_floor = {
     floor_id: "synthetic-floor",
     evaluation: "unsatisfied",
     evidence_refs: ["test:synthetic-floor"],
@@ -444,8 +446,8 @@ function revocationExpiryAndSecurityFloorFailClosedV01(): void {
   );
 
   const ordinaryHold = mutableRegistryV01();
-  ordinaryHold.artifacts[0]!.lanes.ordinary_chatgpt_auth = {
-    ...ordinaryHold.artifacts[0]!.lanes.ordinary_chatgpt_auth,
+  ordinaryHold.artifacts[2]!.lanes.ordinary_chatgpt_auth = {
+    ...ordinaryHold.artifacts[2]!.lanes.ordinary_chatgpt_auth,
     status: "hold",
     qualified_at: null,
   };
@@ -467,7 +469,7 @@ function manifestIsReviewControlledAndRuntimeImmutableV01(): void {
   const qualificationOutput = mutableRegistryV01();
   qualificationOutput.artifacts[0]!.version = "0.153.0";
   assert.equal(canonicalizeProtocolValueV01(registry), before);
-  assert.equal(selected.artifact.version, "0.152.1");
+  assert.equal(selected.artifact.version, "0.153.4");
   const ownerSource = readFileSync(
     path.join(
       process.cwd(),
@@ -536,4 +538,33 @@ function reverseObjectInsertionOrderV01(value: unknown): unknown {
 function restoreEnvironmentV01(key: string, value: string | undefined): void {
   if (value === undefined) delete process.env[key];
   else process.env[key] = value;
+}
+
+function reviewedAdoptionAndRollbackIdentityV01(): void {
+  const artifact = selected.artifact;
+  assert.equal(artifact.entry_id, "codex-rust-v0.153.4-darwin-arm64");
+  assert.equal(artifact.tagged_source_commit, "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a");
+  assert.equal(artifact.official_release.release_id, 383061770);
+  assert.equal(artifact.qualified_provenance_asset.asset_id, 545043537);
+  assert.equal(artifact.qualified_provenance_asset.size_bytes, 87323149);
+  assert.equal(artifact.qualified_provenance_asset.digest,
+    "sha256:8cf911ea676523bfb2121ec561848d2aba564890ad536db4d8a3353f2b9850b1");
+  assert.equal(artifact.native_executable_sha256,
+    "sha256:b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3");
+  assert.deepEqual(artifact.admitted_discovery_launch_shapes.map((shape) => shape.shape), ["direct_native"]);
+  assert.equal(artifact.qualification_evidence.kind, "reviewed_exact_ordinary_qualified_v0_1");
+  assert.equal(artifact.qualification_evidence.ordinary_deciding_receipt_fingerprint,
+    "47ddc938886a5da308f9fa9d30330730ed4417f4e6b8731b84101591b13a40f5");
+  assert.ok(artifact.lanes.ordinary_chatgpt_auth.evidence_refs.includes(
+    "native_ordinary_canary_terminal_outcome_fingerprint:sha256:b2abd85cf69105484f07a3209f6e57d68cef0eaaf2a11f26d651fc3d6975dc9d"));
+  assert.notEqual(artifact.compatibility_profile_fingerprint,
+    "sha256:0e88b70eda8ffd3957f47de7d3661830c4a00130fa68dea1c289abd3f2f291aa");
+  const rollback = selectCodexQualifiedRuntimeEntryV01({
+    entry_id: "codex-rust-v0.152.1-darwin-arm64", lane: "ordinary_chatgpt_auth",
+  });
+  assert.equal(rollback.artifact.lanes.ordinary_chatgpt_auth.status, "qualified");
+  assert.equal(rollback.artifact.lanes.strict_agent_identity.status, "hold");
+  assert.throws(() => legacyExactCodexQualificationEvidenceV01(artifact),
+    (error: unknown) => error instanceof CodexQualifiedRuntimeRegistryErrorV01 &&
+      error.code === "codex_qualified_runtime_registry_legacy_evidence_unavailable");
 }

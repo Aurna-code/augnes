@@ -19,9 +19,9 @@ import {
   observeCodexAppServerUserAgentV01,
 } from "@/lib/vnext/native-host/codex-app-server-user-agent";
 import {
-  getPinnedCodexReviewedRuntimeArtifactV01,
+  getCodexReviewedRuntimeArtifactV01,
   legacyExactCodexQualificationEvidenceV01,
-  selectPinnedCodexQualifiedRuntimeV01,
+  selectCodexQualifiedRuntimeEntryV01,
   type CodexQualifiedRuntimeSelectionV01,
 } from "@/lib/vnext/native-host/codex-qualified-runtime-registry";
 import {
@@ -588,8 +588,10 @@ export const CODEX_0_152_1_QUALIFICATION_SEMANTIC_PROFILE_V01:
   ...SEMANTIC_PROFILE_MATERIAL_0_152_1_V01,
   integrity: integrityV01(SEMANTIC_PROFILE_MATERIAL_0_152_1_V01),
 });
+// Strict's frozen 0.152.1 profile/HOLD is independent of ordinary pin adoption.
+const STRICT_RUNTIME_ENTRY_ID_V01 = "codex-rust-v0.152.1-darwin-arm64";
 const REVIEWED_PRODUCTION_RUNTIME_SELECTION_V01 =
-  getPinnedCodexReviewedRuntimeArtifactV01();
+  getCodexReviewedRuntimeArtifactV01({ entry_id: STRICT_RUNTIME_ENTRY_ID_V01 });
 if (
   REVIEWED_PRODUCTION_RUNTIME_SELECTION_V01.artifact.version !==
     CODEX_ISOLATED_AUTH_SUPPORTED_CLI_VERSION_V01 ||
@@ -1044,14 +1046,18 @@ export async function provisionCodexIsolatedAuthProjectionV01(
 function assertCodexStrictAgentIdentityProductionEligibilityV01(
   registry?: unknown,
 ): CodexQualifiedRuntimeSelectionV01 {
-  const reviewed = getPinnedCodexReviewedRuntimeArtifactV01({ registry });
+  const reviewed = getCodexReviewedRuntimeArtifactV01({
+    entry_id: STRICT_RUNTIME_ENTRY_ID_V01,
+    registry,
+  });
   const status = reviewed.artifact.lanes.strict_agent_identity.status;
   if (status !== "qualified") {
     throw new CodexIsolatedAuthProjectionErrorV01(
       `codex_isolated_auth_strict_runtime_lane_${status}`,
     );
   }
-  return selectPinnedCodexQualifiedRuntimeV01({
+  return selectCodexQualifiedRuntimeEntryV01({
+    entry_id: STRICT_RUNTIME_ENTRY_ID_V01,
     lane: "strict_agent_identity",
     registry,
   });

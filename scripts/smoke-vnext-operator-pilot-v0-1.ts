@@ -127,6 +127,7 @@ import {
   type CodexAppServerAdapterObservationV01,
   type CodexAppServerAdapterOptionsV01,
 } from "../lib/vnext/native-host/codex-app-server-adapter";
+import { selectPinnedCodexQualifiedRuntimeV01 } from "../lib/vnext/native-host/codex-qualified-runtime-registry";
 import { canonicalizeRepositoryRelativePathV01 } from "../lib/vnext/repository-relative-path";
 import { materializeRunAssessmentProposalV01 } from "../lib/vnext/run-assessment-proposal";
 import { materializeStrategicAdvantageTransferProposalV01 } from "../lib/vnext/strategic-advantage-transfer";
@@ -8699,7 +8700,8 @@ async function assertLiveCodexGoldenApprovalOnCloneV01(input: {
         );
         assert.equal(
           projection.capability.cli_version,
-          "0.152.1",
+          selectPinnedCodexQualifiedRuntimeV01({ lane: "ordinary_chatgpt_auth" })
+            .artifact.version,
         );
         assert.equal(projection.pending_approval.command_summary, "npm test");
         assert.equal(projection.pending_approval.decision_submitted, false);

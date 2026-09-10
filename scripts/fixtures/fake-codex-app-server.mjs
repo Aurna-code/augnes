@@ -1006,7 +1006,7 @@ function fakeCodexUserAgentV01(value, clientInfo) {
     return `${name}/${cliVersion} (Mac OS 15.7.1; arm64) fake-terminal/1.0 (${name}; ${version})`;
   }
   if (!value.startsWith("isolated_auth_"))
-    return `${name}/0.152.1 (Mac OS 15.7.1; arm64) fake-terminal/1.0 (${name}; ${version})`;
+    return `${name}/0.153.4 (Mac OS 15.7.1; arm64) fake-terminal/1.0 (${name}; ${version})`;
   const qualification01521 = value.startsWith(
     "isolated_auth_qualification_0_152_1",
   );
@@ -1862,7 +1862,7 @@ function thread(options = {}) {
     status: turnActive ? { type: "active", activeFlags: [] } : { type: "idle" },
     path: null,
     cwd: root,
-    cliVersion: candidateCanaryScenario ? candidateCanaryVersion : isolatedAuthScenario || scopedScenario ? "0.152.1" : "0.147.0",
+    cliVersion: candidateCanaryScenario ? candidateCanaryVersion : isolatedAuthScenario ? "0.152.1" : scopedScenario ? "0.153.4" : "0.147.0",
     source: "appServer",
     threadSource: null,
     agentNickname: null,
