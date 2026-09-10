@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { genericCliBuilderInputFixture } from "@/fixtures/vnext/protocol/task-context-packet-v0-1";
 import { createCodexAppServerAdapterV01, CODEX_APP_SERVER_ADAPTER_VERSION_V01, type CodexAppServerAdapterOptionsV01 } from "@/lib/vnext/native-host/codex-app-server-adapter";
-import { assertCodexScopedTaskCurrentV01, createCodexScopedTaskV01, createCodexFeasibilityWindowV01, prepareScopedCodexLaunchV01, prepareCodexNativeCanaryLaunchV01 } from "@/lib/vnext/native-host/codex-scoped-task";
+import { assertCodexScopedTaskCurrentV01, createCodexScopedTaskV01 as createOwnedScopeV01, bindCodexScopedRequestV01, readCodexScopedRequestBindingV01, consumeScopedCodexTaskV01, settleCodexScopedTaskV01, releaseCodexScopedTaskV01, readCodexScopedSnapshotV01, assertCodexScopedSnapshotCurrentV01, createCodexFeasibilityWindowV01, prepareScopedCodexLaunchV01, prepareCodexNativeCanaryLaunchV01 } from "@/lib/vnext/native-host/codex-scoped-task";
 import { inspectNativeHostPhysicalRootIdentityV01 } from "@/lib/vnext/native-host/project-root-identity";
 import { resolveCodexProductionRuntimeV01 } from "@/lib/vnext/native-host/codex-production-runtime";
 import { extractDiscoveredCodexCandidateArchiveV01 } from "@/lib/vnext/native-host/codex-managed-runtime-store";
@@ -29,6 +29,11 @@ import type {
   NativeHostRequestV01,
 } from "@/types/vnext/native-host-adapter";
 import { scopedCodeModeNativeV01 } from "./test-codex-scoped-code-mode";
+
+const ownedScopes: Awaited<ReturnType<typeof createOwnedScopeV01>>[] = [];
+async function createCodexScopedTaskV01(input: Parameters<typeof createOwnedScopeV01>[0]) {
+  const scope = await createOwnedScopeV01(input); ownedScopes.push(scope); return scope;
+}
 
 async function main(): Promise<void> {
   const testRoot = realpathSync(
@@ -127,9 +132,73 @@ async function main(): Promise<void> {
   assert.equal(readFileSync(cleanupPath, "utf8"), "settled\n");
   console.log("codex app-server sandbox projection: passed");
   await scopedProjectionV01(testRoot);
+  await snapshotBindingsV01(testRoot);
   } finally {
+    for (const scope of ownedScopes) await releaseCodexScopedTaskV01(scope);
     rmSync(testRoot, { recursive: true, force: true });
   }
+}
+
+async function snapshotBindingsV01(testRoot: string): Promise<void> {
+  const source = path.join(testRoot, "snapshot-source"), held = path.join(testRoot, "snapshot-held.txt");
+  mkdirSync(source); writeFileSync(held, "SYNTHETIC_HELD\n");
+  const contents = "SYNTHETIC_APPROVED\n";
+  const files = ["TASK.txt", "A.json", "X.json"].map(relative_path => {
+    writeFileSync(path.join(source, relative_path), contents);
+    return { relative_path, sha256: createHash("sha256").update(contents).digest("hex") };
+  });
+  const request = requestV01(source);
+  request.root_scope.physical_root_identity = await inspectNativeHostPhysicalRootIdentityV01(source);
+  const input = { stage: 1 as const, canonical_root: source, packet_id: request.packet.packet_id,
+    packet_fingerprint: request.packet.integrity.fingerprint, guide_brief_fingerprint: createProtocolSha256V01("null"), files };
+  const scope = await createCodexScopedTaskV01(input), snapshot = readCodexScopedSnapshotV01(scope);
+  assert(Object.isFrozen(snapshot)); assert(Object.isFrozen(snapshot.files));
+  assert.notEqual(snapshot.root, source);
+  for (const f of files) {
+    const staged = path.join(snapshot.root, f.relative_path);
+    assert.equal(readFileSync(staged, "utf8"), contents);
+    assert.notEqual(lstatSync(staged).ino, lstatSync(path.join(source, f.relative_path)).ino);
+    assert.equal(lstatSync(staged).nlink, 1); assert.equal(lstatSync(staged).isSymbolicLink(), false);
+  }
+  for (const changed of [
+    { ...request, root_scope: { ...request.root_scope, canonical_root: snapshot.root, physical_root_identity: snapshot.physical } },
+    { ...request, root_scope: { ...request.root_scope, physical_root_identity: snapshot.physical } },
+    { ...request, packet: { ...request.packet, packet_id: "foreign-packet" } },
+  ]) await assert.rejects(bindCodexScopedRequestV01(scope, changed), /request_binding_mismatch/);
+  await bindCodexScopedRequestV01(scope, request);
+  assert.match(readCodexScopedRequestBindingV01(scope, request), /^sha256:[a-f0-9]{64}$/);
+  assert.throws(() => readCodexScopedRequestBindingV01(scope, { ...request, request_id: "foreign-request" }), /binding_missing/);
+  const env: NodeJS.ProcessEnv = { NODE_ENV: "test", HOME: path.join(testRoot, "home"), CODEX_HOME: path.join(testRoot, "empty-codex-home"), PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
+  const launch = prepareScopedCodexLaunchV01(scope, env);
+  assert.equal(launch.command_environment_check.cwd, snapshot.root);
+  const fs = (launch.settings.permissions as any)[launch.profile_name].filesystem;
+  for (const f of files) { assert.equal(fs[path.join(snapshot.root, f.relative_path)], "read"); assert.equal(fs[path.join(source, f.relative_path)], undefined); }
+  await consumeScopedCodexTaskV01(scope, request);
+  await assert.rejects(releaseCodexScopedTaskV01(scope), /consumers_unsettled/);
+  assert(existsSync(snapshot.root)); settleCodexScopedTaskV01(scope);
+  await releaseCodexScopedTaskV01(scope); assert(!existsSync(snapshot.root));
+  await assert.rejects(assertCodexScopedTaskCurrentV01(scope), /not_source_owned/);
+  for (const fileSet of [files.slice(1), [...files, files[0]!], [{ ...files[0]!, relative_path: "../held.txt" }],
+    [{ ...files[0]!, relative_path: "AGENTS.md" }], files.map((f, i) => i ? f : { ...f, sha256: "0".repeat(64) })])
+    await assert.rejects(createCodexScopedTaskV01({ ...input, files: fileSet }), /files_invalid|stage_inventory_changed|stage_hash_changed/);
+  const selected = path.join(source, "TASK.txt");
+  rmSync(selected); symlinkSync(held, selected);
+  await assert.rejects(createCodexScopedTaskV01(input), /file_unavailable_or_changed/);
+  rmSync(selected); linkSync(held, selected);
+  await assert.rejects(createCodexScopedTaskV01(input), /file_unavailable_or_changed/);
+  rmSync(selected); writeFileSync(selected, contents);
+  const corrupted = await createCodexScopedTaskV01(input), view = readCodexScopedSnapshotV01(corrupted);
+  chmodSync(path.join(view.root, "TASK.txt"), 0o600); writeFileSync(path.join(view.root, "TASK.txt"), "CORRUPTED");
+  await assert.rejects(bindCodexScopedRequestV01(corrupted, request), /snapshot_content_changed/);
+  await releaseCodexScopedTaskV01(corrupted);
+  const replacement = await createCodexScopedTaskV01(input), root = readCodexScopedSnapshotV01(replacement).root;
+  renameSync(root, `${root}-owned`); mkdirSync(root);
+  try {
+    await assert.rejects(assertCodexScopedSnapshotCurrentV01(replacement), /snapshot_root_changed/);
+    await assert.rejects(releaseCodexScopedTaskV01(replacement), /cleanup_root_changed/);
+    assert(existsSync(root));
+  } finally { rmSync(root, { recursive: true }); renameSync(`${root}-owned`, root); await releaseCodexScopedTaskV01(replacement); }
+  console.log("snapshot bindings: independent staged bytes, exact inventory/hash/path/source/request identity, no source grants, corruption/root-drift refusal, unsettled release refusal and finite cleanup passed");
 }
 
 async function failedTerminalDiagnosticCaptureV01(testRoot: string): Promise<void> {
@@ -447,6 +516,7 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
     const cleanupPath = path.join(testRoot, `${scenario}.cleanup`);
     const networkPath = path.join(testRoot, `${scenario}.network`);
     const cancellation = new AbortController();
+    await bindCodexScopedRequestV01(scope, request);
     const adapter = createCodexAppServerAdapterV01({ scoped_task: scope,
       observe: observation => {
         if (scenario === "scoped_cancel" && observation.kind === "turn_started") {
@@ -488,6 +558,7 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
     assert(received.filter(v => v.method === "turn/start").length <= 1);
     for (const v of received.filter(v => ["thread/start", "turn/start"].includes(v.method))) {
       assert.equal(v.permissions, `augnes_synthetic_${scope.fingerprint.slice(7)}`);
+      assert.equal(v.cwd, readCodexScopedSnapshotV01(scope).root);
       assert.equal(v.legacy_policy_present, false);
       assert.equal(v.model, "gpt-6-astra");
       assert.equal(v.approval_policy, "never");
@@ -519,6 +590,10 @@ async function scopedProjectionV01(testRoot: string): Promise<void> {
     { enabled: true, disable_in_process_fallback: true });
   const response = { config: structuredClone(candidateLaunch.settings), layers: [{ name: { type: "sessionFlags" } }] };
   candidateLaunch.assert_configuration(response);
+  for (const field of ["code_mode", "code_mode_only"]) for (const mode of [true, { enabled: false },
+    { enabled: false, excluded_tool_namespaces: ["functions"] }, { enabled: false, direct_only_tool_namespaces: ["functions"] }])
+    assert.throws(() => candidateLaunch.assert_configuration({ ...response, config: { ...response.config,
+      features: { ...(response.config.features as object), [field]: mode } } }), /code_mode_routing_override/);
   for (const host of [null, true, false, {}, { enabled: true }, { enabled: false, disable_in_process_fallback: true },
     { enabled: true, disable_in_process_fallback: false }, { enabled: true, disable_in_process_fallback: true, unknown: true }])
     assert.throws(() => candidateLaunch.assert_configuration({ ...response, config: { ...response.config,
@@ -702,12 +777,13 @@ async function pinnedSandboxV01(testRoot: string, stage: string, held: string, e
     writeFileSync(configFile, nativeConfigBefore);
   }
   const launch = prepareScopedCodexLaunchV01(scope, environment, runtime);
+  const executionRoot = readCodexScopedSnapshotV01(scope).root;
   assert.equal(statExistsV01(startupMarker), false, "Inherited MCP must be disabled before process startup");
   // The pinned diagnostic subcommand explicitly does not support strict-config.
   // Its named permission/profile projection is the same; App Server retains
   // strict-config and its separate configuration/handshake refusal checks.
-  const command = (args: string[], afterPolicyInstalled?: () => void) => boundedCommandV01(executable, [...launch.args.filter(arg => arg !== "--strict-config"), "sandbox", "--permission-profile", launch.profile_name, "--cd", stage, "--", ...args], environment, stage, afterPolicyInstalled);
-  const allowed = await command(["/bin/cat", path.join(stage, "TASK.txt")]);
+  const command = (args: string[], afterPolicyInstalled?: () => void) => boundedCommandV01(executable, [...launch.args.filter(arg => arg !== "--strict-config"), "sandbox", "--permission-profile", launch.profile_name, "--cd", executionRoot, "--", ...args], environment, executionRoot, afterPolicyInstalled);
+  const allowed = await command(["/bin/cat", path.join(executionRoot, "TASK.txt")]);
   assert.equal(allowed.code, 0, allowed.stderr);
   assert.equal(allowed.stdout, "Synthetic approved read only.\n");
   const denied = await command(["/bin/cat", held]);
@@ -719,16 +795,13 @@ async function pinnedSandboxV01(testRoot: string, stage: string, held: string, e
   const write = await command(["/bin/sh", "-c", 'printf forbidden > TASK.txt']);
   assert.notEqual(write.code, 0);
   assert.equal(readFileSync(path.join(stage, "TASK.txt"), "utf8"), "Synthetic approved read only.\n");
-  // Pre-existing selected symlinks are refused by the real source/hash gate
-  // above. The pinned diagnostic canonicalizes them before compiling policy.
-  // Test the OS boundary after policy installation, including an external
-  // swap the read-only worker itself cannot perform.
+  // Original-source replacement retains the original after-policy timing. The
+  // task grant now names independent snapshot files, not mutable source paths.
   const selectedEscape = await command(["/bin/sh", "-c", 'printf "POLICY_READY\\n"; read token; /bin/cat TASK.txt'], () => {
     rmSync(path.join(stage, "TASK.txt")); symlinkSync(held, path.join(stage, "TASK.txt"));
   });
   rmSync(path.join(stage, "TASK.txt")); writeFileSync(path.join(stage, "TASK.txt"), "Synthetic approved read only.\n");
-  assert.notEqual(selectedEscape.code, 0); assert.equal(selectedEscape.stdout, "POLICY_READY\n");
-  assert.match(selectedEscape.stderr, /Operation not permitted|Permission denied/);
+  assert.equal(selectedEscape.code, 0); assert.equal(selectedEscape.stdout, "POLICY_READY\nSynthetic approved read only.\n");
   let requests = 0;
   const server = createServer((_req, res) => { requests++; res.end("synthetic\n"); });
   try {
@@ -741,7 +814,7 @@ async function pinnedSandboxV01(testRoot: string, stage: string, held: string, e
     assert.notEqual(network.code, 0); assert.equal(requests, 1);
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   assert.equal(statExistsV01(startupMarker), false);
-  console.log(`exact ${runtime.version} macOS sandbox: approved read allowed; held read, symlink, write, loopback command network denied; credential-free; model turns=0; cleanup settled`);
+  console.log(`exact ${runtime.version} macOS sandbox: approved snapshot read survives source replacement after policy compilation; held/escape reads, writes and loopback command network denied; credential-free; model turns=0; cleanup settled`);
 }
 
 function statExistsV01(filename: string): boolean {
@@ -753,7 +826,8 @@ async function pinnedConfigurationV01(executable: string, launch: ReturnType<typ
   // denial even if a launch suppression regresses. Never start a thread/turn.
   // The diagnostic's synthetic HOME and file-only store cannot select the
   // user's ordinary keyring. These are test controls, not product auth changes.
-  const outerProfile = `permissions.protocol_test={filesystem={":minimal"="read",${JSON.stringify(testRoot)}="write",${JSON.stringify(executable)}="read"},network={enabled=false}}`;
+  stage = launch.command_environment_check.cwd;
+  const outerProfile = `permissions.protocol_test={filesystem={":minimal"="read",${JSON.stringify(testRoot)}="write",${JSON.stringify(stage)}="read",${JSON.stringify(executable)}="read"},network={enabled=false}}`;
   const args = ["-c", outerProfile, "-c", 'shell_environment_policy.inherit="all"', "sandbox", "--permission-profile", "protocol_test", "--cd", stage, "--", executable,
     ...launch.args, "-c", 'cli_auth_credentials_store="file"', "app-server", "--stdio"];
   const child = spawn(executable, args, { cwd: stage, env: environment, stdio: ["pipe", "pipe", "pipe"] });

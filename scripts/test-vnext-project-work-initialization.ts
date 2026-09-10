@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import { LiveNativeHostRunServiceV01 } from "../lib/vnext/runtime/live-native-host-run-service";
 import { createCodexAppServerAdapterV01 } from "../lib/vnext/native-host/codex-app-server-adapter";
-import { createCodexScopedTaskV01, createCodexFeasibilityWindowV01 } from "../lib/vnext/native-host/codex-scoped-task";
+import { createCodexScopedTaskV01, createCodexFeasibilityWindowV01, readCodexScopedSnapshotV01 } from "../lib/vnext/native-host/codex-scoped-task";
 import { buildTaskStartGuideBriefCodexProjectionV02 } from "../lib/vnext/guide-brief/project-guide-brief";
 import { buildSelectedWorkSourceEntry, compareSelectedWorkSources, normalizeSelectedWorkSources, readSelectedWorkSources } from "../lib/intake/selected-work-source-comparison";
 import { SELECTED_WORK_SOURCE_LABELS } from "../types/vnext/project-work-revision";
@@ -165,10 +165,12 @@ async function main(): Promise<void> {
 }
 
 async function assertScopedNativeHostConnectionV01(): Promise<void> {
-  for (const mismatch of [false, true]) {
-    const name = mismatch ? "scoped-source-refusal" : "scoped-native-result";
+  for (const scenario of ["success", "prestart_source", "running_source", "snapshot_corruption"] as const) {
+    const mismatch = scenario === "prestart_source";
+    const name = `scoped-${scenario}`;
     const fixture = createFixtureV01(name, false, true, true);
     let service: LiveNativeHostRunServiceV01 | null = null;
+    let snapshotRoot: string | undefined;
     try {
       const taskFile = path.join(fixture.root, "TASK.txt");
       writeFileSync(taskFile, "Synthetic scoped native result check.\n");
@@ -181,13 +183,25 @@ async function assertScopedNativeHostConnectionV01(): Promise<void> {
         guide_brief_fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01(buildTaskStartGuideBriefCodexProjectionV02({ packet: defined.packet, project_name: `First work ${name}` }))),
         files: [{ relative_path: "TASK.txt", sha256: createHash("sha256").update(readFileSync(taskFile)).digest("hex") }],
       });
+      const snapshot = readCodexScopedSnapshotV01(scope); snapshotRoot = snapshot.root;
+      assert.notEqual(snapshotRoot, fixture.root);
       const hostHome = path.join(ROOT, `${name}-home`); mkdirSync(hostHome);
       const trace = path.join(ROOT, `${name}-trace.jsonl`);
       const cleanup = path.join(ROOT, `${name}-cleanup`);
       const window = createCodexFeasibilityWindowV01();
       service = new LiveNativeHostRunServiceV01({ now: timestampSequenceV01("2026-08-01T00:00:04.000Z"),
         scoped_task: { scope, window }, timeout_ms: 10_000, stop_settle_timeout_ms: 3_000,
-        adapter_factory: bound => createCodexAppServerAdapterV01({ scoped_task: bound, launch: {
+        adapter_factory: bound => createCodexAppServerAdapterV01({ scoped_task: bound,
+          observe: observation => {
+            if (observation.kind !== "turn_started") return;
+            if (scenario === "running_source") writeFileSync(taskFile, "Synthetic source drift after turn submission.\n");
+            if (scenario === "snapshot_corruption") {
+              // Independent controller-side corruption tests detection, not an
+              // authorized worker writer or a hostile-host prevention claim.
+              const file = path.join(snapshot.root, "TASK.txt");
+              chmodSync(file, 0o600); writeFileSync(file, "Synthetic snapshot corruption.\n");
+            }
+          }, launch: {
           command: process.execPath, prefix_args: [path.join(process.cwd(), "scripts/fixtures/fake-codex-app-server.mjs")],
           environment: { NODE_ENV: "test", HOME: hostHome, CODEX_HOME: hostHome, PATH: process.env.PATH,
             FAKE_CODEX_SCENARIO: "scoped_success", FAKE_CODEX_TRACE_PATH: trace, FAKE_CODEX_CLEANUP_MARKER_PATH: cleanup },
@@ -196,7 +210,7 @@ async function assertScopedNativeHostConnectionV01(): Promise<void> {
       if (mismatch) writeFileSync(taskFile, "Synthetic drift after admission preparation.\n");
       const credential = credentialFromCookieV01(defined.session_admission.cookie_value);
       const start = () => service!.start({ config: fixture.config, mode: "interactive", operator_mutation: { credential, clock: fixedClock("2026-08-01T00:00:04.000Z") } });
-      if (mismatch) await assert.rejects(start(), /direct_host_repository_launch_gate_blocked/);
+      if (mismatch) await assert.rejects(start(), /direct_host_scoped_snapshot_admission_changed/);
       const started = mismatch ? null : await start();
       const deadline = performance.now() + 10_000;
       let projection = started?.projection ?? service.read(fixture.config);
@@ -210,16 +224,31 @@ async function assertScopedNativeHostConnectionV01(): Promise<void> {
         assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 10 }).length, 0);
         assert.equal(readdirSync(ROOT).includes(path.basename(trace)), false, "Refused source must not spawn even the fake host");
       } else {
-        assert.equal(projection.status, "completed");
-        assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["run_receipt"], limit: 10 }).length, 1);
+        assert.equal(projection.status, scenario === "success" ? "completed" : scenario === "running_source" ? "blocked" : "failed");
+        const receipts = listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["run_receipt"], limit: 10 });
+        assert.equal(receipts.length, 1);
+        const durable = canonicalizeProtocolValueV01(receipts);
+        assert(durable.includes(snapshot.fingerprint));
+        assert(durable.includes("trusted_local_read_snapshot.v0.1"));
+        assert(durable.includes('snapshot valid: ' + (scenario !== "snapshot_corruption")));
+        assert(durable.includes('original source current at return: ' + (scenario !== "running_source")));
+        assert(durable.includes('host outcome before input validation: completed'));
+        assert(durable.includes(defined.packet.packet_id));
+        assert(!durable.includes(snapshot.root), "physical execution path is local binding, not a portable project root");
         assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 10 }).length, 1);
         assert.equal(readFileSync(cleanup, "utf8"), "settled\n");
+        const rows = readFileSync(trace, "utf8").trim().split("\n").map(line => JSON.parse(line));
+        for (const row of rows.filter(row => row.kind === "received" && ["thread/start", "turn/start"].includes(row.value.method)))
+          assert.equal(row.value.cwd, snapshot.root);
       }
       assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["state_transition_receipt"], limit: 10 }).length, 0);
       await assert.rejects(service.start({ config: fixture.config, mode: "interactive", operator_mutation: { credential } }), /window_start_refused/);
-    } finally { await service?.shutdown(); fixture.db.close(); }
+    } finally {
+      try { await service?.shutdown(); if (snapshotRoot) assert.equal(existsSync(snapshotRoot), false); }
+      finally { fixture.db.close(); }
+    }
   }
-  console.log("scoped disposable service: authenticated admission, exact packet/guide/root scope, native result/receipt/proposal, no implicit Transition, source-drift refusal without host/receipt/proposal, no replay; model calls=0");
+  console.log("scoped disposable service: normal authenticated admission binds source packet/guide to a distinct snapshot cwd; receipt readback retains snapshot/source-currentness separately; prestart drift refuses, running source drift blocks completion, snapshot corruption invalidates; no Transition/replay; settled snapshots removed; model calls=0");
 }
 
 async function assertExecutedReviewedFollowUpV01(): Promise<void> {

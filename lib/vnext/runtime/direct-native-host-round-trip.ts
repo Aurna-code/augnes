@@ -74,6 +74,8 @@ import {
   type VNextLocalOperatorSessionMutationAdmissionV01,
 } from "@/lib/vnext/runtime/local-operator-session";
 import type { VNextLocalRuntimeClockV01 } from "@/lib/vnext/runtime/local-runtime-clock";
+import { bindCodexScopedRequestV01, assertCodexScopedSourceCurrentV01, assertCodexScopedSnapshotCurrentV01,
+  readCodexScopedSnapshotV01, readCodexScopedRequestBindingV01, type CodexScopedTaskV01 } from "@/lib/vnext/native-host/codex-scoped-task";
 import {
   buildTaskStartGuideBriefCodexProjectionV02,
   unavailableGuideBriefCodexProjectionV02,
@@ -285,6 +287,8 @@ export interface DirectNativeHostRoundTripDependenciesV01 {
   repository_delegation_context?: NativeHostRepositoryDelegationContextV01 | null;
   repository_resume_context?: NativeHostRepositoryResumeContextV01 | null;
   before_adapter_invoke?: (request: NativeHostRequestV01) => Promise<void>;
+  /** Trusted local input profile, never accepted from the operator HTTP body. */
+  scoped_task?: CodexScopedTaskV01;
   on_adapter_invocation_started?: (request: NativeHostRequestV01) => void;
   proposal_admission?: RunAssessmentProposalAdmissionDependenciesV01;
   on_invocation_admitted?: (input: {
@@ -968,6 +972,17 @@ export async function runDirectNativeHostRoundTripV01(
     adapter,
     guide_brief: taskStartGuide,
   });
+  let snapshotValidation: ScopedSnapshotValidationV01 | undefined;
+  if (dependencies.scoped_task) {
+    // Construct the source-to-execution binding from the real admitted request.
+    // The source root and packet are not rewritten to impersonate the snapshot.
+    try { await bindCodexScopedRequestV01(dependencies.scoped_task, request); }
+    catch {
+      markRunLaunchGateBlockedV01(db, { run_id: identity.run_id, admission: admitted,
+        observed_at: strictTimestamp(now()), reason: "scoped_snapshot_admission_changed" });
+      throw new DirectNativeHostRoundTripErrorV01("direct_host_scoped_snapshot_admission_changed", 409);
+    }
+  }
   dependencies.on_invocation_admitted?.({
     request,
     session_admission: sessionAdmission,
@@ -1042,6 +1057,38 @@ export async function runDirectNativeHostRoundTripV01(
       }),
     );
   }
+  if (dependencies.scoped_task) {
+    const scope = dependencies.scoped_task, snapshot = readCodexScopedSnapshotV01(scope);
+    let snapshotValid = true, sourceCurrent = true;
+    try { await assertCodexScopedSnapshotCurrentV01(scope); } catch { snapshotValid = false; }
+    try { await assertCodexScopedSourceCurrentV01(scope, request); } catch { sourceCurrent = false; }
+    const nativeOutcome = hostResult.outcome;
+    snapshotValidation = {
+      profile: snapshot.profile, fingerprint: snapshot.fingerprint,
+      request_binding: readCodexScopedRequestBindingV01(scope, request),
+      valid: snapshotValid, source_current: sourceCurrent, native_outcome: nativeOutcome,
+    };
+    if (!snapshotValid) {
+      hostResult = buildBoundaryTerminalResult({ request, adapter, outcome: "failed",
+        reason: "scoped_snapshot_integrity_invalid", prior_result: hostResult, now });
+    } else if (!sourceCurrent) {
+      // Preserve valid bounded observations about the frozen input, but prevent
+      // this result from being accepted as completed/current-source evidence.
+      hostResult = { ...hostResult,
+        outcome: hostResult.outcome === "completed" ? "blocked" : hostResult.outcome,
+        public_stop_reason: "scoped_snapshot_source_changed",
+        uncertainty: [...hostResult.uncertainty, "The result concerns the approved input snapshot; original source currentness changed."],
+      };
+    }
+    hostResult = assertNativeHostResultV01(request, { ...hostResult, adapter_extension: {
+      ...hostResult.adapter_extension, bounded_metadata: { ...hostResult.adapter_extension.bounded_metadata,
+        input_profile: snapshot.profile, input_snapshot_fingerprint: snapshot.fingerprint,
+        source_snapshot_request_binding: readCodexScopedRequestBindingV01(scope, request),
+        input_snapshot_valid: snapshotValid, original_source_current_at_return: sourceCurrent,
+        host_outcome_before_input_validation: nativeOutcome,
+      },
+    } });
+  }
   let synthesizedSkippedCheckIds = new Set<string>();
   try {
     hostResult = materializeValidatedPacketDeliveryCheckV01({
@@ -1112,6 +1159,7 @@ export async function runDirectNativeHostRoundTripV01(
       refuse("direct_host_run_conflict", 409);
     }
     receipt = buildDirectHostRunReceipt({
+      snapshot_validation: snapshotValidation,
       request,
       result: hostResult,
       admission: admitted,
@@ -2299,7 +2347,16 @@ export function materializeValidatedPacketDeliveryCheckV01(input: {
   };
 }
 
+interface ScopedSnapshotValidationV01 {
+  profile: string;
+  fingerprint: string;
+  request_binding: string;
+  valid: boolean;
+  source_current: boolean;
+  native_outcome: NativeHostTerminalOutcomeV01;
+}
 function buildDirectHostRunReceipt(input: {
+  snapshot_validation?: ScopedSnapshotValidationV01;
   request: NativeHostRequestV01;
   result: NativeHostResultV01;
   admission: PersistedHostPacketAdmissionV01;
@@ -2394,6 +2451,17 @@ function buildDirectHostRunReceipt(input: {
   const packetObservationId = `observation:packet-binding:${request.request_id}`;
   const mainAttestationId = `attestation:host-result:${request.request_id}`;
   const observations: RunReceiptObservationV01[] = [
+    ...(input.snapshot_validation ? [{
+      observation_id: `observation:input-snapshot:${request.request_id}`,
+      observation_kind: "source_bound_input_snapshot",
+      summary: `Input profile ${input.snapshot_validation.profile}; snapshot valid: ${input.snapshot_validation.valid}; original source current at return: ${input.snapshot_validation.source_current}; host outcome before input validation: ${input.snapshot_validation.native_outcome}. The result concerns frozen inputs, not continuously current source.`,
+      event_at: result.finished_at, observed_at: result.finished_at,
+      observer_ref: reporterRef, trust_class: "direct_local_observation" as const,
+      source_refs: [runRef, admission.packet_ref, admission.root_scope.root_scope_ref,
+        localRef("native_host_input_snapshot", input.snapshot_validation.fingerprint, result.finished_at, null, DIRECT_NATIVE_HOST_ROUND_TRIP_VERSION_V01),
+        localRef("native_host_input_request_binding", input.snapshot_validation.request_binding, result.finished_at, null, DIRECT_NATIVE_HOST_ROUND_TRIP_VERSION_V01)],
+      related_command_ids: [], related_check_ids: [], related_artifact_refs: [],
+    }] : []),
     {
       observation_id: mainObservationId,
       observation_kind: "structured_host_result_received",

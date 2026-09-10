@@ -6,6 +6,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import {
   assertCodexScopedTaskCurrentV01, consumeScopedCodexTaskV01, prepareScopedCodexLaunchV01,
+  readCodexScopedRequestBindingV01, readCodexScopedSnapshotV01, settleCodexScopedTaskV01,
   SCOPED_CODEX_CONTRACT_V01, SCOPED_CODEX_MODEL_V01, SCOPED_CODEX_EFFORT_V01,
   type CodexScopedTaskV01, type ScopedCodexLaunchV01,
 } from "@/lib/vnext/native-host/codex-scoped-task";
@@ -1026,6 +1027,7 @@ export function createCodexAppServerAdapterV01(
             !Number.isInteger(control.timeout_ms) || control.timeout_ms <= 0 || control.timeout_ms > Math.min(180_000, request.policy.timeout_ms) ||
             !Number.isInteger(control.stop_settle_timeout_ms) || control.stop_settle_timeout_ms <= 0 || control.stop_settle_timeout_ms > Math.min(10_000, request.policy.stop_settle_timeout_ms))
           throw new Error("codex_scoped_invocation_refused");
+        readCodexScopedRequestBindingV01(options.scoped_task, request);
         request = deepFreezeAdapterValueV01(structuredClone(request));
       }
       if (options.candidate_canary) {
@@ -1774,6 +1776,10 @@ class CodexAppServerInvocationV01 {
     });
   }
 
+  private get executionRoot(): string {
+    return this.options.scoped_task ? readCodexScopedSnapshotV01(this.options.scoped_task).root : this.request.root_scope.canonical_root;
+  }
+
   private async execute(): Promise<void> {
     let cleanupError: Error | null = null;
     const cancelCanary = () => { void this.requestStop({ reason: "cancellation_requested" }).catch(() => undefined); };
@@ -1888,6 +1894,7 @@ class CodexAppServerInvocationV01 {
           publicCleanupDiagnosticCodeV01(asErrorV01(error)),
         );
       }
+      if (!cleanupError && this.options.scoped_task) settleCodexScopedTaskV01(this.options.scoped_task);
       this.cleanupSettled = cleanupError === null;
       this.observe("settled");
       if (cleanupError) this.settledDeferred.reject(cleanupError);
@@ -1997,7 +2004,7 @@ class CodexAppServerInvocationV01 {
       this.transport = new CodexStdioJsonRpcTransportV01({
         command: launch.command,
         args: [...(launch.prefix_args ?? []), ...(this.scopedLaunch?.args ?? []), "app-server", "--stdio"],
-        cwd: this.request.root_scope.canonical_root,
+        cwd: this.executionRoot,
         environment:
           launch.environment ??
           boundedCodexChildEnvironmentV01(process.env, false),
@@ -2162,7 +2169,7 @@ class CodexAppServerInvocationV01 {
       await this.transport!.request(
         CURRENT_REQUIRED_APP_SERVER_METHODS_V01.thread_start,
         {
-          cwd: this.request.root_scope.canonical_root,
+          cwd: this.executionRoot,
           approvalPolicy: this.scopedLaunch ? "never" :
             this.qualifiedRuntimeSelection.compatibility_profile.semantics
               .server_requests.approval_policy,
@@ -2359,7 +2366,7 @@ class CodexAppServerInvocationV01 {
         CURRENT_REQUIRED_APP_SERVER_METHODS_V01.thread_resume,
         {
           threadId: this.threadId,
-          cwd: this.request.root_scope.canonical_root,
+          cwd: this.executionRoot,
           approvalPolicy:
             this.qualifiedRuntimeSelection.compatibility_profile.semantics
               .server_requests.approval_policy,
@@ -2409,7 +2416,7 @@ class CodexAppServerInvocationV01 {
     const cwd = stringV01(response.cwd) ?? stringV01(thread.cwd);
     if (
       !cwd ||
-      !sameCanonicalRootV01(this.request.root_scope.canonical_root, cwd)
+      !sameCanonicalRootV01(this.executionRoot, cwd)
     ) {
       throw this.reconciliationError("codex_thread_root_mismatch");
     }
@@ -2478,7 +2485,7 @@ class CodexAppServerInvocationV01 {
     const cwd = stringV01(thread.cwd);
     if (
       cwd &&
-      !sameCanonicalRootV01(this.request.root_scope.canonical_root, cwd)
+      !sameCanonicalRootV01(this.executionRoot, cwd)
     ) {
       throw this.reconciliationError("codex_thread_root_mismatch");
     }
@@ -2535,7 +2542,7 @@ class CodexAppServerInvocationV01 {
           threadId: this.threadId,
           clientUserMessageId: this.request.request_id,
           input: [{ type: "text", text: renderedPacket, text_elements: [] }],
-          cwd: this.request.root_scope.canonical_root,
+          cwd: this.executionRoot,
           approvalPolicy:
             this.qualifiedRuntimeSelection.compatibility_profile.semantics
               .server_requests.approval_policy,
@@ -3443,6 +3450,7 @@ class CodexAppServerInvocationV01 {
           live_host_invoked: true,
           packet_delivery_initiated: !this.candidateCanary && this.packetDeliveryInitiated,
           ...this.candidateEvidenceMetadataV01(),
+          ...this.snapshotEvidenceMetadataV01(),
           app_server_transport: "stdio_jsonl",
           experimental_api: Boolean(this.scopedLaunch),
           ...(this.scopedLaunch && this.options.scoped_task ? {
@@ -3479,6 +3487,14 @@ class CodexAppServerInvocationV01 {
         },
       },
     };
+  }
+
+  private snapshotEvidenceMetadataV01(): Record<string, string | boolean> {
+    if (!this.options.scoped_task) return {};
+    const snapshot = readCodexScopedSnapshotV01(this.options.scoped_task);
+    return { input_profile: snapshot.profile, input_snapshot_fingerprint: snapshot.fingerprint,
+      source_snapshot_request_binding: readCodexScopedRequestBindingV01(this.options.scoped_task, this.request),
+      snapshot_describes_current_source: false };
   }
 
   private candidateEvidenceMetadataV01(): Record<string, string | boolean> {
@@ -3572,6 +3588,7 @@ class CodexAppServerInvocationV01 {
             this.transport !== null || this.isolatedPreflightSession !== null,
           packet_delivery_initiated: !this.candidateCanary && this.packetDeliveryInitiated,
           ...this.candidateEvidenceMetadataV01(),
+          ...this.snapshotEvidenceMetadataV01(),
           app_server_transport: "stdio_jsonl",
           experimental_api: false,
           cli_version: this.cliVersion,

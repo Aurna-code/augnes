@@ -66,9 +66,10 @@ export const CODEX_SCOPED_CODE_MODE_HOST_V01 = Object.freeze({
   relative_path: "bin/codex-code-mode-host",
 });
 export const CODEX_SCOPED_CODE_MODE_PROFILE_FINGERPRINT_V01 = createProtocolSha256V01(canonicalizeProtocolValueV01({
-  contract: "codex_scoped_code_mode.v0.1", artifact: CODEX_SCOPED_CODE_MODE_HOST_V01,
+  contract: "codex_scoped_code_mode.v0.2", artifact: CODEX_SCOPED_CODE_MODE_HOST_V01,
   backend: "process_owned_stdio", host: { enabled: true, disable_in_process_fallback: true },
-  prewarm: false, agents_enabled: false, task_permissions: "unchanged_exact_named_read_scope",
+  prewarm: false, agents_enabled: false, task_permissions: "exact_named_snapshot_read_scope",
+  input_profile: "trusted_local_read_snapshot.v0.1",
 }));
 const SCOPED_STORE_SCHEMA_V01 = "codex_managed_scoped_runtime_store.v0.1" as const;
 const LOCK_STALE_AFTER_MS_V01 = 30_000;
