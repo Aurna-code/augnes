@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -36,10 +36,15 @@ async function createCodexScopedTaskV01(input: Parameters<typeof createOwnedScop
 }
 
 async function main(): Promise<void> {
+  const fifoChild = process.argv.indexOf("--fifo-owner-child");
+  if (fifoChild >= 0) {
+    await fifoOwnerChildV01(process.argv[fifoChild + 1]!, process.argv[fifoChild + 2]!); return;
+  }
   const testRoot = realpathSync(
     mkdtempSync(path.join(tmpdir(), "augnes-codex-sandbox-test-")),
   );
   try {
+  if (process.argv.includes("--fifo-only")) { await fifoBindingsV01(testRoot); return; }
   const helperIndex = process.argv.indexOf("--scoped-code-mode-native");
   if (helperIndex >= 0) {
     assert(process.argv[helperIndex + 1] && process.argv[helperIndex + 2], "exact native and helper archives required");
@@ -133,10 +138,74 @@ async function main(): Promise<void> {
   console.log("codex app-server sandbox projection: passed");
   await scopedProjectionV01(testRoot);
   await snapshotBindingsV01(testRoot);
+  await fifoBindingsV01(testRoot);
   } finally {
     for (const scope of ownedScopes) await releaseCodexScopedTaskV01(scope);
     rmSync(testRoot, { recursive: true, force: true });
   }
+}
+
+async function fifoOwnerChildV01(source: string, scenario: string): Promise<void> {
+  assert(["admission", "currentness"].includes(scenario));
+  const contents = "SYNTHETIC_APPROVED\n", request = requestV01(source);
+  const input = { stage: 1 as const, canonical_root: source, packet_id: request.packet.packet_id,
+    packet_fingerprint: request.packet.integrity.fingerprint, guide_brief_fingerprint: createProtocolSha256V01("null"),
+    files: [{ relative_path: "TASK.txt", sha256: createHash("sha256").update(contents).digest("hex") }] };
+  let scope: Awaited<ReturnType<typeof createOwnedScopeV01>> | undefined;
+  try {
+    if (scenario === "currentness") {
+      scope = await createOwnedScopeV01(input);
+      assert.equal(readFileSync(path.join(readCodexScopedSnapshotV01(scope).root, "TASK.txt"), "utf8"), contents);
+      await assertCodexScopedTaskCurrentV01(scope);
+      const continued = new Promise<void>(resolve => process.stdin.once("data", () => resolve()));
+      process.stdout.write("POLICY_READY\n");
+      await continued;
+    }
+    assert(lstatSync(path.join(source, "TASK.txt")).isFIFO());
+    const started = performance.now();
+    await assert.rejects(scope ? assertCodexScopedTaskCurrentV01(scope) : createOwnedScopeV01(input), /file_unavailable_or_changed/);
+    console.log(JSON.stringify({ scenario, refusal: "file_unavailable_or_changed", validation_ms: performance.now() - started }));
+  } finally {
+    if (scope) {
+      const snapshot = readCodexScopedSnapshotV01(scope).root;
+      await releaseCodexScopedTaskV01(scope); assert(!existsSync(snapshot));
+    }
+  }
+}
+
+async function fifoBindingsV01(testRoot: string): Promise<void> {
+  if (process.platform !== "darwin") { console.log("FIFO owner regression: skipped outside supported macOS target"); return; }
+  const outcomes: Array<{ scenario: string; code: number | null; timed_out: boolean; stdout: string; stderr: string; duration_ms: number }> = [];
+  for (const scenario of ["admission", "currentness"]) {
+    const root = path.join(testRoot, `fifo-${scenario}`), source = path.join(root, "source"), temporary = path.join(root, "temporary");
+    mkdirSync(source, { recursive: true }); mkdirSync(temporary);
+    const selected = path.join(source, "TASK.txt"), fifo = path.join(root, "replacement.fifo");
+    const environment: NodeJS.ProcessEnv = { NODE_ENV: "test", HOME: root, CODEX_HOME: path.join(root, "empty-codex-home"),
+      TMPDIR: temporary, TSX_DISABLE_CACHE: "1", PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
+    const made = await boundedCommandV01("/usr/bin/mkfifo", [fifo], environment, process.cwd());
+    assert.equal(made.code, 0, made.stderr); assert.equal(made.timed_out, false); assert(lstatSync(fifo).isFIFO());
+    writeFileSync(selected, "SYNTHETIC_APPROVED\n");
+    const replace = () => { rmSync(selected); renameSync(fifo, selected); };
+    if (scenario === "admission") replace();
+    const started = performance.now();
+    try {
+      const result = await boundedCommandV01(process.execPath, ["--import", "tsx", path.resolve(__filename), "--fifo-owner-child", source, scenario],
+        environment, process.cwd(), scenario === "currentness" ? replace : undefined);
+      outcomes.push({ scenario, ...result, duration_ms: performance.now() - started });
+      if (result.code === 0) assert.deepEqual(readdirSync(temporary), [], "normal refusal must release its snapshot");
+    } finally {
+      // The parent owns this private child TMPDIR. Only after child settlement,
+      // reclaim a readonly snapshot if a regression killed the child before its finally.
+      for (const name of readdirSync(temporary)) {
+        assert(name.startsWith("augnes-scoped-input-"));
+        const snapshot = path.join(temporary, name); assert(lstatSync(snapshot).isDirectory());
+        chmodSync(snapshot, 0o700);
+      }
+      rmSync(root, { recursive: true }); assert(!existsSync(root));
+    }
+  }
+  console.log(JSON.stringify({ fifo_owner_regression: outcomes, native_starts: 0, model_calls: 0, cleanup_settled: true }));
+  for (const result of outcomes) { assert.equal(result.timed_out, false, `FIFO ${result.scenario} blocked in validation`); assert.equal(result.code, 0, result.stderr); }
 }
 
 async function snapshotBindingsV01(testRoot: string): Promise<void> {
@@ -889,7 +958,7 @@ async function pinnedConfigurationV01(executable: string, launch: ReturnType<typ
   console.log("pinned App Server: strict launch, effective closed shell filter and actual command/exec environment predicate passed; inherited PATH replaced, secret-like/ordinary/profile/CODEX sentinels excluded; zero callable MCP; externalSandbox command uses existing outer OS network denial; no account/thread/turn RPC");
 }
 
-async function boundedCommandV01(command: string, args: string[], environment: NodeJS.ProcessEnv, cwd: string, afterPolicyInstalled?: () => void): Promise<{ code: number | null; stdout: string; stderr: string }> {
+async function boundedCommandV01(command: string, args: string[], environment: NodeJS.ProcessEnv, cwd: string, afterPolicyInstalled?: () => void): Promise<{ code: number | null; stdout: string; stderr: string; timed_out: boolean }> {
   const child = spawn(command, args, { cwd, env: environment, stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "", stderr = "";
   let released = false;
@@ -900,10 +969,11 @@ async function boundedCommandV01(command: string, args: string[], environment: N
     }
   }); child.stderr.on("data", data => { stderr += data; });
   if (!afterPolicyInstalled) child.stdin.end();
-  const timer = setTimeout(() => { void stopOwnedProcessTreeV01(child, { graceful_timeout_ms: 500, forced_timeout_ms: 2_000 }); }, 10_000);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; void stopOwnedProcessTreeV01(child, { graceful_timeout_ms: 500, forced_timeout_ms: 2_000 }); }, 10_000);
   try {
     const code = await new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
-    return { code, stdout, stderr };
+    return { code, stdout, stderr, timed_out: timedOut };
   } finally {
     clearTimeout(timer);
     assert.equal((await stopOwnedProcessTreeV01(child, { graceful_timeout_ms: 500, forced_timeout_ms: 2_000 })).settled, true);

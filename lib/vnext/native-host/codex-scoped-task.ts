@@ -90,7 +90,9 @@ function material(scope: CodexScopedTaskV01): Readonly<StageMaterial> {
 function fileBytes(filename: string, limit = 128 * 1024): Buffer {
   let fd: number | undefined;
   try {
-    fd = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Reject the opened object without waiting for a writer if a FIFO is
+    // supplied or replaces an approved path before this open.
+    fd = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > limit || realpathSync(filename) !== filename)
       refuse("file_identity_invalid");
