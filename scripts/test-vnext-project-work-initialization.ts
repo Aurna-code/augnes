@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 
 import Database from "better-sqlite3";
-import { readAutonomyRunLedgerRecord } from "../lib/autonomy/runner-ledger";
+import { readAutonomyRunLedgerRecord, updateAutonomyRunLedgerFields } from "../lib/autonomy/runner-ledger";
 import { LiveNativeHostRunServiceV01 } from "../lib/vnext/runtime/live-native-host-run-service";
 import { createCodexAppServerAdapterV01 } from "../lib/vnext/native-host/codex-app-server-adapter";
-import { createCodexScopedTaskV01, createCodexFeasibilityWindowV01, readCodexScopedSnapshotV01, releaseCodexScopedTaskV01 } from "../lib/vnext/native-host/codex-scoped-task";
+import { createCodexScopedTaskV01, createCodexFeasibilityWindowV01, createPersistedCodexFeasibilityContinuationV01, readCodexScopedSnapshotV01, releaseCodexScopedTaskV01 } from "../lib/vnext/native-host/codex-scoped-task";
 import { buildTaskStartGuideBriefCodexProjectionV02 } from "../lib/vnext/guide-brief/project-guide-brief";
 import { buildSelectedWorkSourceEntry, compareSelectedWorkSources, normalizeSelectedWorkSources, readSelectedWorkSources } from "../lib/intake/selected-work-source-comparison";
 import { SELECTED_WORK_SOURCE_LABELS } from "../types/vnext/project-work-revision";
@@ -70,7 +70,7 @@ import {
   buildPreExecutionProjectWorkRevisionPacketV01,
   inspectPreExecutionProjectWorkRevisionChainV01,
 } from "../lib/vnext/runtime/pre-execution-project-work-revision";
-import { VNEXT_PERSISTED_SEMANTIC_CONTEXT_COMPILER_VERSION_V01 } from "../lib/vnext/runtime/persisted-semantic-context-compiler";
+import { compileTaskContextPacketFromPersistedSemanticStateV01, VNEXT_PERSISTED_SEMANTIC_CONTEXT_COMPILER_VERSION_V01 } from "../lib/vnext/runtime/persisted-semantic-context-compiler";
 import {
   buildDirectNativeHostRunIdentityV01,
   admitPersistedHostTaskContextPacketV01,
@@ -119,6 +119,10 @@ async function main(): Promise<void> {
     }
     if (process.argv.includes("--executed-follow-up-only")) {
       await assertExecutedReviewedFollowUpV01();
+      return;
+    }
+    if (process.argv.includes("--persisted-continuation-only")) {
+      await assertPersistedScopedContinuationV01();
       return;
     }
     assertNormalizationAndCompilerV01();
@@ -561,6 +565,291 @@ async function assertExecutedReviewedFollowUpV01(): Promise<void> {
       returned_selected_entries: admitted.packet.selected_context.length, actions, requests: requests.map((request) => ({ request_id: request.request_id, run_id: request.run_id, packet_id: request.packet.packet_id, packet_fingerprint: request.packet.integrity.fingerprint })),
       record_counts: counts(), live_provider_calls: 0, billed_tokens: 0, disk_io_measured: false, human_burden_measured: false, local_context_use_probe_required: false, application_reconstruction: true, cold_model_isolation: false }));
   } finally { if (fixture.db.open) fixture.db.close(); globalThis.fetch = originalFetch; }
+}
+
+// Synthetic X is produced by the normal round-trip with a deterministic
+// adapter, then its DB is closed/reopened. B uses protocol-faithful fake App
+// Server command items through the production scoped adapter and service.
+// These are model-free substitutions, not observed native task-file reads.
+async function assertPersistedScopedContinuationV01(): Promise<void> {
+  for (const scenario of ["complete", "expired_review", "repeat_arm", "auth_refused", "missing_transition",
+    "expired_start", "wrong_scope", "failed_B", "wrong_context", "wrong_prior", "superseded", "request_refusal"] as const) {
+    const started = performance.now();
+    const wallBase = Date.now() - 60_000;
+    const wall = (seconds: number) => new Date(wallBase + seconds * 1_000).toISOString();
+    const name = `persisted-${scenario}`;
+    const fixture = createFixtureV01(name, false, true, true);
+    let coordinator: Awaited<ReturnType<typeof createPersistedCodexFeasibilityContinuationV01>> | undefined;
+    let service: LiveNativeHostRunServiceV01 | undefined;
+    const scopes: Awaited<ReturnType<typeof createCodexScopedTaskV01>>[] = [];
+    const processes = new Set<number>();
+    let sessionId: string | undefined;
+    let time = 0, fakeLaunches = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new Error("continuation_test_network_forbidden"); }) as typeof fetch;
+    try {
+      const file = path.join(fixture.root, "sample.txt");
+      writeFileSync(file, "Synthetic sample 9; reference 4. Later calibration is separate.\n");
+      const files = [{ relative_path: "sample.txt", sha256: createHash("sha256").update(readFileSync(file)).digest("hex") }];
+      const bootstrap = issueVNextLocalOperatorBootstrapV01(fixture.db, { config: fixture.config, clock: fixedClock(wall(0)) });
+      const session = consumeVNextLocalOperatorBootstrapV01(fixture.db, { config: fixture.config, bootstrap_token: bootstrap.bootstrap_token, clock: fixedClock(wall(1)) });
+      const initial = defineInitialProjectWorkV01(fixture.db, { config: fixture.config, credential: session.credential,
+        request: requestV01(fixture, { goal: "Review a bounded sample and choose a calibration follow-up", success_criteria: ["Compare the recorded sample with its reference"], non_goals: ["No unmeasured-condition execution"] }), clock: fixedClock(wall(2)) });
+      let credential = credentialFromCookieV01(initial.session_admission.cookie_value); sessionId = credential.session_id;
+      let xInvocations = 0;
+      let originalRequest: NativeHostRequestV01 | undefined;
+      const base = createDeterministicCodexAdapterV01({ now: timestampSequenceV01(wall(4)) });
+      const first = await runDirectNativeHostRoundTripV01(fixture.db, { config: fixture.config, mode: "interactive", operator_mutation: { credential, clock: fixedClock(wall(4)) } }, {
+        adapter: { ...base, invoke(request, control) {
+          xInvocations += 1;
+          originalRequest = structuredClone(request);
+          const handle = base.invoke(request, control);
+          const result = handle.result.then(value => ({ ...value, summary: "The recorded sample exceeds its reference. Other conditions remain unknown.",
+            checks: [...value.checks, { check_id: "recorded_sample", required: true, status: "failed" as const, summary: "Recorded sample exceeds reference." }] }));
+          return { ...handle, result, settled: result.then(() => undefined, () => undefined) };
+        } }, now: timestampSequenceV01(wall(4)),
+      });
+      credential = credentialFromCookieV01(first.session_admission!.cookie_value);
+      assert.equal(first.receipt.execution.status, "completed"); assert.equal(first.receipt.verification.status, "failed");
+      assert.equal(first.proposal.status, "available");
+      const original = listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 1 })[0]!.payload as EpisodeDeltaProposalV01;
+      const historical = canonicalizeProtocolValueV01({ receipt: first.receipt, proposal: original });
+      const originalCandidate = original.proposed_deltas[0]!;
+      assert.equal(originalCandidate.operation, "unknown");
+      const originalDecision = { proposal_id: original.proposal_id, proposal_fingerprint: original.integrity.fingerprint,
+        candidate_id: originalCandidate.candidate_id, candidate_fingerprint: createEpisodeDeltaCandidateFingerprintV01(originalCandidate), decision: "accept", rationale_summary: "Synthetic acceptance must still refuse unknown operation." };
+      assert.throws(() => recordVNextOperatorPilotReviewDecisionV01(fixture.db, { config: fixture.config, credential, request: originalDecision, clock: fixedClock(wall(6)) }), /pilot_candidate_operation_not_transitionable/);
+      // The original runner no longer owns this persisted DB. No old window,
+      // fake finish(true), row transplant, or X replay prepares the continuation.
+      fixture.db.close(); fixture.db = new Database(fixture.config.database_path);
+      const input = { config: fixture.config, receipt_id: first.receipt.receipt_id, proposal_id: original.proposal_id };
+      if (scenario === "complete") {
+        await assert.rejects(createPersistedCodexFeasibilityContinuationV01(fixture.db, { ...input, receipt_id: "run-receipt:missing" }), /receipt_missing/);
+        await assert.rejects(createPersistedCodexFeasibilityContinuationV01(fixture.db, { ...input, proposal_id: "episode-delta-proposal:missing" }), /proposal/);
+        await assert.rejects(createPersistedCodexFeasibilityContinuationV01(fixture.db, { ...input, config: { ...fixture.config, project_id: "project:unrelated" } }), /receipt_missing/);
+        const run = readAutonomyRunLedgerRecord(first.receipt.run_id, { db: fixture.db })!;
+        for (const bad of [{ status: "paused" as const, metadata: { ...run.metadata, reconciliation_required: true } },
+          { metadata: { ...run.metadata, terminal_receipt_persisted: false } },
+          { metadata: { ...run.metadata, adapter_version: "unrelated-producer" } }]) {
+          updateAutonomyRunLedgerFields(run.run_id, bad, { db: fixture.db });
+          await assert.rejects(createPersistedCodexFeasibilityContinuationV01(fixture.db, input), /predecessor|producer|receipt/);
+          updateAutonomyRunLedgerFields(run.run_id, { status: run.status, metadata: run.metadata }, { db: fixture.db });
+        }
+        const moved = fixture.root + "-moved";
+        renameSync(fixture.root, moved); mkdirSync(fixture.root);
+        try { await assert.rejects(createPersistedCodexFeasibilityContinuationV01(fixture.db, input), /producer_identity/); }
+        finally { rmSync(fixture.root, { recursive: true }); renameSync(moved, fixture.root); }
+      }
+      const readBefore = fixture.db.serialize();
+      coordinator = await createPersistedCodexFeasibilityContinuationV01(fixture.db, input, () => time);
+      assert(readBefore.equals(fixture.db.serialize()), "Continuation preparation is read-only");
+      const rival = scenario === "complete" ? await createPersistedCodexFeasibilityContinuationV01(fixture.db, input, () => time) : undefined;
+      assert.equal(coordinator.predecessor.verification_status, "failed");
+      assert.deepEqual(coordinator.window.snapshot(), { attempts: 0, active: false, stopped: false, remaining_window_ms: null });
+      assert.equal(existsSync(coordinator.disposition_path), false, "Read-only preparation does not arm or claim");
+      const revisionRequest = { action: "revise", ...originalDecision, delta_type: "validation_delta", operation: "add", title: "Clarify sample scope and defer the next condition",
+        proposed_state_summary: "User-declared sampling condition limits the interpretation. Keep the failed reading and uncertainty; compare calibration before revisiting untested conditions.",
+        rationale_summary: "Synthetic delegated declaration, not an observed condition or contemporaneous human inspection.", uncertainties: ["Cause remains unknown."], limitations: ["No further condition is executed by acceptance."] };
+      // Remove Decision-only keys: the normal strict revision parser remains in control.
+      const { decision: _decision, ...revision } = revisionRequest;
+      time = 1_000;
+      if (scenario === "auth_refused") {
+        assert.throws(() => coordinator!.revise({ credential: { ...credential, session_id: "session:forged" }, request: revision, clock: fixedClock(wall(7)) }), /session/);
+        assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 10 }).length, 1);
+        assert.equal(coordinator.window.snapshot().attempts, 0);
+        continue;
+      }
+      const revised = coordinator.revise({ credential, request: revision, clock: { now() {
+        assert.equal(coordinator!.window.snapshot().remaining_window_ms, 600_000, "Armed before normal semantic writer clock/authentication is invoked");
+        assert.equal(JSON.parse(readFileSync(coordinator!.disposition_path, "utf8").split("\n")[0]!).kind, "armed");
+        return wall(7);
+      } } });
+      credential = credentialFromCookieV01(revised.session_cookie.value);
+      assert.deepEqual(revised.proposal.source_assessment, original.source_assessment);
+      assert.deepEqual(revised.proposal.observations, original.observations);
+      assert.deepEqual(revised.proposal.attestations, original.attestations);
+      assert.deepEqual(revised.proposal.inferences, original.inferences);
+      assert.equal(revised.proposal.operation_revision!.authored_by_ref.trust_class, "user_declaration");
+      await assert.rejects(createPersistedCodexFeasibilityContinuationV01(fixture.db, input), /disposition_exists/);
+      if (rival) {
+        const journal = readFileSync(coordinator.disposition_path, "utf8");
+        assert.throws(() => rival.revise({ credential, request: revision }), /disposition_refused/);
+        assert.equal(readFileSync(coordinator.disposition_path, "utf8"), journal, "Losing exclusive claim cannot append to the winner");
+      }
+      if (scenario === "repeat_arm") {
+        time += 40_000;
+        assert.throws(() => coordinator!.revise({ credential, request: revision }), /revision_already_recorded/);
+        assert.equal(coordinator.window.snapshot().remaining_window_ms, 560_000);
+        assert.equal(coordinator.window.snapshot().stopped, true);
+        continue;
+      }
+      const candidate = revised.proposal.proposed_deltas.find(c => c.candidate_id === revised.proposal.operation_revision!.revised_candidate.candidate_id)!;
+      const decisionRequest = { proposal_id: revised.proposal.proposal_id, proposal_fingerprint: revised.proposal.integrity.fingerprint,
+        candidate_id: candidate.candidate_id, candidate_fingerprint: createEpisodeDeltaCandidateFingerprintV01(candidate), decision: "accept", rationale_summary: "Accept only the synthetic declaration; no execution grant." };
+      if (scenario === "expired_review") {
+        time += 600_000;
+        assert.throws(() => coordinator!.decide({ credential, request: decisionRequest }), /continuation_window_unavailable/);
+        assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["review_decision"], limit: 10 }).length, 0);
+        assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 10 }).length, 2, "Committed revision prefix survives expiry");
+        await coordinator.close(); coordinator = undefined;
+        fixture.db.close(); fixture.db = new Database(fixture.config.database_path);
+        await assert.rejects(createPersistedCodexFeasibilityContinuationV01(fixture.db, input), /disposition_exists/, "A restarted reader cannot renew the retained disposition");
+        continue;
+      }
+      time += 2_000;
+      const accepted = coordinator.decide({ credential, request: decisionRequest, clock: fixedClock(wall(8)) });
+      credential = credentialFromCookieV01(accepted.session_cookie.value);
+      const binding = { proposal_id: revised.proposal.proposal_id, proposal_fingerprint: revised.proposal.integrity.fingerprint,
+        decision_id: accepted.decision.decision_id, decision_fingerprint: accepted.decision.integrity.fingerprint };
+      assert.throws(() => coordinator!.preview({ credential, request: { ...binding, decision_id: "review-decision:unrelated" } }), /decision_source/);
+      const preview = coordinator.preview({ credential, request: binding, clock: fixedClock(wall(9)) });
+      if (scenario === "missing_transition") {
+        await assert.rejects(coordinator.prepareStage2({ files }), /transition_required/);
+        assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["state_transition_receipt"], limit: 10 }).length, 0);
+        assert.equal(coordinator.window.snapshot().attempts, 0);
+        continue;
+      }
+      const gate = coordinator.confirm({ credential, request: { ...binding, confirmation_digest: preview.preview.confirmation_digest }, preview_binding_cookie: preview.preview_binding_cookie, clock: fixedClock(wall(10)) });
+      credential = credentialFromCookieV01(gate.session_admission.cookie_value);
+      if (scenario === "wrong_prior") {
+        assert.throws(() => coordinator!.apply({ credential, request: { ...binding, gate_record_id: gate.gate_record.gate_record_id, gate_record_fingerprint: gate.gate_record.integrity.fingerprint,
+          prior_packet_id: "task-context-packet:unrelated", prior_packet_fingerprint: initial.packet.integrity.fingerprint }, clock: fixedClock(wall(11)) }), /prior_packet/);
+        assert.equal(coordinator.window.snapshot().attempts, 0);
+        continue;
+      }
+      const applied = coordinator.apply({ credential, request: { ...binding, gate_record_id: gate.gate_record.gate_record_id, gate_record_fingerprint: gate.gate_record.integrity.fingerprint,
+        prior_packet_id: initial.packet.packet_id, prior_packet_fingerprint: initial.packet.integrity.fingerprint }, clock: fixedClock(wall(11)) });
+      credential = credentialFromCookieV01(applied.session_admission.cookie_value);
+      assert.equal(applied.status, "applied");
+      assert.notEqual(applied.later_packet.packet_id, initial.packet.packet_id);
+      assert.deepEqual(applied.later_packet.work_ref, initial.packet.work_ref);
+      if (scenario === "superseded") {
+        // A separate normal compilation supersedes the exact later packet
+        // retained by this coordinator; an applied Decision alone cannot admit B.
+        const later = compileTaskContextPacketFromPersistedSemanticStateV01(fixture.db, {
+          workspace_id: fixture.workspace_id, project_id: fixture.project_id, prior_packet: initial.packet,
+          transition_receipt_id: applied.transition_receipt.transition_receipt_id,
+          transition_receipt_fingerprint: applied.transition_receipt.integrity.fingerprint,
+          expiry_policy: { mode: "reuse_prior" }, clock: fixedClock(wall(13)),
+        });
+        assert.notEqual(later.later_packet.packet_id, applied.later_packet.packet_id);
+        await assert.rejects(coordinator.prepareStage2({ files }), /transition_superseded/);
+        continue;
+      }
+      if (scenario === "wrong_context") {
+        const other = getOrCreateCanonicalProjectForLocalRootV01(fixture.db, { workspace_id: fixture.workspace_id,
+          local_root: normalizeLocalProjectRootRefV01(ROOT, { base_path: ROOT }), display_name: "Other synthetic project" });
+        const selection = readActiveProjectSelectionV01(fixture.db, fixture.workspace_id)!;
+        selectActiveProjectV01(fixture.db, { workspace_id: fixture.workspace_id, project_id: other.project.project_id,
+          expected_project_id: selection.project_id, expected_revision: selection.selection_revision, now: wall(12) });
+        await assert.rejects(coordinator.prepareStage2({ files }), /project_not_active/);
+        continue;
+      }
+      const laterPacketId = applied.later_packet.packet_id;
+      // Returned material is detached from the coordinator's retained authority.
+      applied.later_packet.packet_id = initial.packet.packet_id;
+      applied.transition_receipt.source_decision.decision_id = "decision:unrelated";
+      const prepared = await coordinator.prepareStage2({ files }); scopes.push(prepared.scope);
+      const snapshot = readCodexScopedSnapshotV01(prepared.scope);
+      assert.equal(prepared.admission.packet.packet_id, laterPacketId);
+      assert(prepared.admission.packet.selected_context.some(entry => entry.bounded_summary === revision.proposed_state_summary));
+      assert.equal(coordinator.window.snapshot().attempts, 0);
+      assert.equal(coordinator.window.snapshot().remaining_window_ms, 598_000, "Review, compilation and scope creation do not reset the clock");
+      assert.throws(() => new LiveNativeHostRunServiceV01({ scoped_task: { scope: prepared.scope, window: { ...prepared.window } } }).readCapabilityContractV01(), /window_not_source_owned|scope/);
+      if (scenario === "expired_start") {
+        time = 601_000;
+        assert.throws(() => prepared.window.begin(prepared.scope, 180_000, 10_000), /window_expired|window_start_refused/);
+        assert.equal(fakeLaunches, 0);
+        continue;
+      }
+      if (scenario === "wrong_scope") {
+        const other = await createCodexScopedTaskV01({ stage: 2, canonical_root: fixture.root,
+          packet_id: laterPacketId, packet_fingerprint: prepared.admission.packet.integrity.fingerprint,
+          guide_brief_fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01(prepared.guide)), files }); scopes.push(other);
+        assert.throws(() => prepared.window.begin(other, 180_000, 10_000), /window_start_refused/);
+        assert.throws(() => prepared.window.begin(prepared.scope, 180_000, 10_000), /window_start_refused/);
+        continue;
+      }
+      if (scenario === "request_refusal") {
+        time = 590_999; // 600s from arming, less the unchanged 10s reserve.
+        const attempt = prepared.window.begin(prepared.scope, 999_999, 99_999);
+        assert.equal(attempt.timeout_ms, 1); assert.equal(attempt.stop_settle_timeout_ms, 10_000);
+        await assert.rejects(attempt.before_invoke(originalRequest!), /request_lineage|snapshot_request_binding_missing/, "A reused X packet cannot become B");
+        await assert.rejects(attempt.before_invoke({ ...originalRequest!, packet: prepared.admission.packet,
+          root_scope: { ...prepared.admission.root_scope, canonical_root: ROOT } }), /request_lineage|snapshot_request_binding_missing/);
+        time += 1;
+        await assert.rejects(attempt.before_invoke(originalRequest!), /window_expired/);
+        // Local disposition failure cannot replace a settled host result.
+        // Retain the file, obstruct its exact name, and require cleanup reporting.
+        renameSync(coordinator.disposition_path, coordinator.disposition_path + ".retained");
+        mkdirSync(coordinator.disposition_path);
+        assert.doesNotThrow(() => attempt.finish(false));
+        await assert.rejects(coordinator.close(), /disposition_refused/);
+        assert.equal(existsSync(snapshot.root), false);
+        coordinator = undefined;
+        await assert.rejects(createPersistedCodexFeasibilityContinuationV01(fixture.db, input), /direct_host_packet_stale/);
+        continue;
+      }
+      const hostHome = path.join(ROOT, `${name}-home`); mkdirSync(hostHome);
+      const trace = path.join(ROOT, `${name}-trace.jsonl`), cleanup = path.join(ROOT, `${name}-cleanup`);
+      let adapter: ReturnType<typeof createCodexAppServerAdapterV01> | undefined;
+      service = new LiveNativeHostRunServiceV01({ scoped_task: prepared, now: timestampSequenceV01(wall(12)),
+        timeout_ms: 10_000, stop_settle_timeout_ms: 3_000,
+        adapter_factory: scope => adapter ??= createCodexAppServerAdapterV01({ scoped_task: scope,
+          observe: observation => { if (observation.kind === "spawned" && observation.process_id) { fakeLaunches += 1; processes.add(observation.process_id); } },
+          launch: { command: process.execPath, prefix_args: [path.join(process.cwd(), "scripts/fixtures/fake-codex-app-server.mjs")],
+            environment: { NODE_ENV: "test", HOME: hostHome, CODEX_HOME: hostHome, PATH: process.env.PATH,
+              FAKE_CODEX_SCENARIO: "scoped_command_cwd", FAKE_CODEX_COMMAND_CWD: scenario === "failed_B" ? fixture.root : snapshot.root,
+              FAKE_CODEX_COMMAND_TERMINAL: scenario === "failed_B" ? "withhold" : "complete", FAKE_CODEX_TRACE_PATH: trace, FAKE_CODEX_CLEANUP_MARKER_PATH: cleanup } } }),
+      });
+      const startInput = { config: fixture.config, mode: "interactive" as const, operator_mutation: { credential, clock: fixedClock(wall(12)) } };
+      const pending = service.start(startInput);
+      await assert.rejects(service.start(startInput), /window_start_refused/);
+      await pending;
+      const deadline = performance.now() + 10_000;
+      let projection = service.read(fixture.config);
+      while (!["completed", "failed", "paused", "blocked", "cancelled", "timed_out"].includes(projection.status)) {
+        assert(performance.now() < deadline, "Synthetic continuation must settle");
+        await new Promise(resolve => setTimeout(resolve, 10)); projection = service.read(fixture.config);
+      }
+      assert.equal(projection.status, scenario === "failed_B" ? "paused" : "completed");
+      assert.equal(projection.reconciliation_required, scenario === "failed_B");
+      assert.notEqual(projection.run_ref, first.receipt.run_id);
+      const run = readAutonomyRunLedgerRecord(projection.run_ref!, { db: fixture.db })!;
+      assert.equal(run.events.filter(event => event.payload?.checkpoint).length, 2);
+      const receipts = listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["run_receipt"], limit: 10 }).map(row => row.payload as RunReceiptV01);
+      assert.equal(receipts.length, scenario === "failed_B" ? 1 : 2);
+      if (scenario === "complete") {
+        const receipt = receipts.find(row => row.run_id === projection.run_ref)!;
+        assert.equal(receipt.execution.status, "completed"); assert.equal(receipt.task_context_packet_ref?.external_id, laterPacketId);
+        assert(receipt.source_refs.some(ref => ref.ref_type === "project_root_scope" && ref.source_ref === coordinator!.predecessor.root_fingerprint));
+        assert(receipt.observations.some(observation => observation.observation_kind === "source_bound_input_snapshot" && observation.source_refs.some(ref => ref.external_id === snapshot.fingerprint)));
+        assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 10 }).length, 3);
+      }
+      assert.equal(xInvocations, 1, "No replay of the synthetic predecessor");
+      assert.equal(fakeLaunches, 1); assert.equal(coordinator.window.snapshot().attempts, 1);
+      await assert.rejects(service.start(startInput), /window_start_refused/);
+      const rows = readFileSync(trace, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      assert.equal(rows.filter(row => row.kind === "received" && row.value.method === "turn/start").length, 1);
+      assert.equal(readFileSync(cleanup, "utf8"), "settled\n");
+      const originalReceipt = receipts.find(row => row.receipt_id === first.receipt.receipt_id)!;
+      const source = readVNextOperatorPilotSemanticReviewV01(fixture.db, { config: fixture.config, proposal_id: original.proposal_id, authenticated_session_id: null }).proposal;
+      assert.equal(canonicalizeProtocolValueV01({ receipt: originalReceipt, proposal: source }), historical);
+    } finally {
+      try { await service?.shutdown(); }
+      finally {
+        try { await coordinator?.close(); }
+        finally {
+          try {
+            for (const scope of scopes) await releaseCodexScopedTaskV01(scope);
+            for (const pid of processes) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+            if (sessionId) assert(revokeVNextLocalOperatorSessionByIdV01(fixture.db, { config: fixture.config, session_id: sessionId, clock: fixedClock(wall(60)) }).revoked_at);
+          } finally { if (fixture.db.open) fixture.db.close(); globalThis.fetch = originalFetch; }
+        }
+      }
+      console.log(JSON.stringify({ persisted_continuation: scenario, elapsed_ms: performance.now() - started, fake_host_launches: fakeLaunches, model_calls: 0 }));
+    }
+  }
 }
 
 async function assertRetainedSourceRecallV01(): Promise<void> {

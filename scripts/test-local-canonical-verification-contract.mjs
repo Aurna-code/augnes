@@ -1062,7 +1062,8 @@ const integrationChildren = [
   "project-home",
   "project-work-initialization",
   "project-work-scoped-host",
-  "executed-reviewed-follow-up",
+    "executed-reviewed-follow-up",
+    "persisted-scoped-continuation",
   "blank-state",
   "guide-brief-current-project",
   "codex-read-guide-brief",
@@ -1136,6 +1137,11 @@ requireText(readCanonicalChildRegistration(integrationSource, "project-work-scop
 const firstWorkFixture = readFileSync(path.join(repositoryRoot, "scripts/test-vnext-project-work-initialization.ts"), "utf8");
 assert.equal(countOccurrences(firstWorkFixture, "await assertScopedNativeHostConnectionV01();"), 1,
   "the default initialization path must not repeat the scoped matrix");
+const continuationRegistration = readCanonicalChildRegistration(integrationSource, "persisted-scoped-continuation");
+for (const fragment of ['group: "supporting-serial"', 'timeoutMs: 30_000', '"process-owning"', '"--persisted-continuation-only"'])
+  requireText(continuationRegistration.block, fragment, "persisted continuation must retain bounded serial ownership");
+assert.equal(countOccurrences(firstWorkFixture, "await assertPersistedScopedContinuationV01();"), 1,
+  "persisted continuation cases run once through their complete child");
 requireText(canonicalSuite, `coverage: projectWorkFocus ? "focused_project_work_children_only" : "complete_suite"`,
   "focused children cannot impersonate a complete suite");
 const qualifiedRuntimeRegistryRegistration = readCanonicalChildRegistration(

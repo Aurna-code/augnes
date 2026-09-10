@@ -10,6 +10,8 @@ import { selectPinnedCodexQualifiedRuntimeV01 } from "./codex-qualified-runtime-
 import { CODEX_SCOPED_CODE_MODE_PROFILE_FINGERPRINT_V01 } from "./codex-managed-runtime-store";
 import type { NativeHostPhysicalRootIdentityV01, NativeHostRequestV01 } from "@/types/vnext/native-host-adapter";
 import type { NativeHostTimeoutSchedulerV01 } from "@/lib/vnext/runtime/direct-native-host-round-trip";
+import type Database from "better-sqlite3";
+import { preparePersistedCodexContinuationV01, type PersistedCodexContinuationInputV01 } from "@/lib/vnext/runtime/persisted-codex-continuation";
 
 // An application-local restriction. It is never serialized as an authority
 // grant, accepted from an HTTP body, or used by the default desktop route.
@@ -604,10 +606,95 @@ export interface CodexScopedAttemptV01 {
 
 /** One disposable case, one shared clock, no timer or durable/global budget. */
 export function createCodexFeasibilityWindowV01(now_ms: () => number = () => performance.now()): CodexFeasibilityWindowV01 {
+  return createWindow(now_ms).window;
+}
+
+/** Trusted local study coordinator. Preparation is read-only. revise() arms
+ * immediately before the first normal authenticated semantic write; every
+ * subsequent write passes the same guard. Neither the clock nor the local
+ * disposition creates a Decision or grants semantic authority. No HTTP route
+ * accepts this object. The third argument is the existing fake-clock test seam,
+ * never a historical timestamp or serialized start value. */
+export async function createPersistedCodexFeasibilityContinuationV01(
+  db: Database.Database, input: PersistedCodexContinuationInputV01,
+  now_ms: () => number = () => performance.now(),
+) {
+  const owner = await preparePersistedCodexContinuationV01(db, input);
+  const clock = createWindow(now_ms, owner);
+  let scope: CodexScopedTaskV01 | undefined, preparing = false;
+  const close = async (primary?: unknown) => {
+    const errors: unknown[] = primary === undefined ? [] : [primary];
+    try { clock.stop(); } catch (error) { errors.push(error); }
+    try { if (scope) await releaseCodexScopedTaskV01(scope); } catch (error) { errors.push(error); }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, "codex_scoped_continuation_cleanup_failed");
+  };
+  return Object.freeze({
+    predecessor: freeze(structuredClone(owner.predecessor)),
+    disposition_path: owner.dispositionPath,
+    window: clock.window,
+    revise: (input: Parameters<typeof owner.revise>[0]) => clock.modify(() => owner.revise(input), true),
+    decide: (input: Parameters<typeof owner.decide>[0]) => clock.modify(() => owner.decide(input)),
+    preview: (input: Parameters<typeof owner.preview>[0]) => { clock.check(); return owner.preview(input); },
+    confirm: (input: Parameters<typeof owner.confirm>[0]) => clock.modify(() => owner.confirm(input)),
+    apply: (input: Parameters<typeof owner.apply>[0]) => clock.modify(() => owner.apply(input)),
+    async prepareStage2(input: Pick<Parameters<typeof createCodexScopedTaskV01>[0], "files" | "approved_instruction_files">) {
+      clock.check();
+      if (scope || preparing) refuse("continuation_scope_already_prepared");
+      preparing = true;
+      try {
+        const prepared = await owner.admitB(); clock.check();
+        scope = await createCodexScopedTaskV01({ ...input, stage: 2,
+          canonical_root: prepared.admission.root_scope.canonical_root,
+          packet_id: prepared.admission.packet.packet_id, packet_fingerprint: prepared.admission.packet.integrity.fingerprint,
+          guide_brief_fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01(prepared.guide)) });
+        clock.check(); clock.bind(scope, prepared.admission);
+        return { scope, window: clock.window, admission: prepared.admission, guide: prepared.guide };
+      } catch (error) {
+        await close(error);
+        throw error;
+      } finally { preparing = false; }
+    },
+    // Finite coordinator cleanup. The service must settle/release any submitted
+    // scope first; the ordinary scope owner refuses unsettled consumers.
+    close: () => close(),
+  });
+}
+
+type ContinuationOwner = Awaited<ReturnType<typeof preparePersistedCodexContinuationV01>>;
+function createWindow(now_ms: () => number, continuation?: ContinuationOwner) {
   let deadline: number | null = null, last = -Infinity, count = 0, active = false, failed = false;
   let prior: Readonly<StageMaterial> | null = null;
+  let preparedScope: CodexScopedTaskV01 | undefined;
+  let preparedAdmission: Parameters<ContinuationOwner["assertBStart"]>[0] | undefined;
+  let dispositionStopped = false;
+  let terminalDispositionError: unknown;
   const now = () => {
     const n = now_ms(); if (!Number.isFinite(n) || n < last) refuse("clock_invalid"); last = n; return n;
+  };
+  const stop = () => {
+    failed = true;
+    if (terminalDispositionError) throw terminalDispositionError;
+    if (continuation && deadline !== null && !dispositionStopped) {
+      dispositionStopped = true; continuation.append("stopped");
+    }
+  };
+  const check = () => {
+    if (failed || active || count !== 0 || deadline === null || now() >= deadline) {
+      stop(); refuse("continuation_window_unavailable");
+    }
+    continuation?.assertPredecessor();
+  };
+  const modify = <T>(action: () => T, arm = false): T => {
+    try {
+      if (arm && deadline === null && !failed) {
+        continuation!.assertPredecessor();
+        // Start at the first modifying coordinator action, including claim I/O.
+        deadline = now() + 600_000; continuation!.append("armed");
+      }
+      check();
+      const result = action(); continuation!.append("semantic_action"); return result;
+    } catch (error) { try { stop(); } catch { /* Preserve the original refusal; disposition remains fail-closed. */ } throw error; }
   };
   const window = Object.freeze({
     snapshot() {
@@ -616,24 +703,37 @@ export function createCodexFeasibilityWindowV01(now_ms: () => number = () => per
       return Object.freeze({ attempts: count, active, stopped: failed, remaining_window_ms: remaining });
     },
     begin(scope: CodexScopedTaskV01, timeout: number, settle: number): CodexScopedAttemptV01 {
-      const time = now(); deadline ??= time + 600_000;
+      const time = now(); if (!continuation) deadline ??= time + 600_000;
       const m = material(scope);
-      if (failed || active || count >= 2 || m.stage !== count + 1 ||
+      if (continuation) {
+        try {
+          if (failed || active || count !== 0 || deadline === null || m.stage !== 2 || scope !== preparedScope || !preparedAdmission)
+            refuse("window_start_refused");
+          // Zero new attempts until this first actual Start. Historical X is
+          // predecessor evidence, not a fictitious local attempt/finish.
+          count += 1;
+          continuation.assertBStart(preparedAdmission);
+        } catch (error) { try { stop(); } catch { /* Refusal preserved. */ } throw error; }
+      } else if (failed || active || count >= 2 || m.stage !== count + 1 ||
         (prior && (m.root !== prior.root || !equal(m.physical, prior.physical) || m.packet_id === prior.packet_id || m.packet_fingerprint === prior.packet_fingerprint))) {
         failed = true; refuse("window_start_refused");
       }
-      count += 1;
+      if (!continuation) count += 1;
       if (!Number.isInteger(timeout) || timeout <= 0 || !Number.isInteger(settle) || settle <= 0) { failed = true; refuse("limit_invalid"); }
-      const stop = Math.min(settle, 10_000);
-      const allowance = Math.floor(Math.min(timeout, 180_000, deadline - time - stop));
+      const settleLimit = Math.min(settle, 10_000);
+      const allowance = Math.floor(Math.min(timeout, 180_000, deadline! - time - settleLimit));
       if (allowance <= 0) { failed = true; refuse("window_expired"); }
       active = true; prior = m;
       let finished = false;
-      const remaining = () => Math.floor(Math.min(allowance, deadline! - now() - stop));
+      const remaining = () => Math.floor(Math.min(allowance, deadline! - now() - settleLimit));
       return Object.freeze({
-        scope, timeout_ms: allowance, stop_settle_timeout_ms: stop,
+        scope, timeout_ms: allowance, stop_settle_timeout_ms: settleLimit,
         async before_invoke(request: NativeHostRequestV01) {
           if (remaining() <= 0) { failed = true; refuse("window_expired"); }
+          if (continuation) {
+            readCodexScopedRequestBindingV01(scope, request);
+            await continuation.assertBRequest(request, preparedAdmission!);
+          }
           await assertCodexScopedTaskCurrentV01(scope, request);
           if (remaining() <= 0) { failed = true; refuse("window_expired"); }
         },
@@ -645,10 +745,25 @@ export function createCodexFeasibilityWindowV01(now_ms: () => number = () => per
             return scheduler({ ...input, timeout_ms: ms, on_timeout });
           };
         },
-        finish(completed: boolean) { if (finished) return; finished = true; active = false; if (!completed || now() > deadline!) failed = true; },
+        finish(completed: boolean) {
+          if (finished) return; finished = true; active = false;
+          if (!completed || now() > deadline!) failed = true;
+          if (continuation) {
+            dispositionStopped = true;
+            try { continuation.append(failed ? "stopped" : "completed"); }
+            catch (error) {
+              // The normal result/receipt has already settled. Local disposition
+              // failure is reported by close(), never a new host outcome.
+              failed = true; terminalDispositionError = error;
+            }
+          }
+        },
       });
     },
   });
   windows.add(window);
-  return window;
+  return { window, check, modify, stop,
+    bind(scope: CodexScopedTaskV01, admission: NonNullable<typeof preparedAdmission>) {
+      check(); preparedScope = scope; preparedAdmission = structuredClone(admission);
+    } };
 }

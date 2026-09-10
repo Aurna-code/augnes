@@ -632,6 +632,15 @@ const suites = {
       requireNaturalExit: true,
     },
     {
+      id: "persisted-scoped-continuation",
+      group: "supporting-serial",
+      requirements: ["database", "migrations", "filesystem", "mutable-module-state", "process-owning"],
+      label: "persisted completed predecessor, bounded review clock, Transition-gated scoped service",
+      ...rootNode("scripts/test-vnext-project-work-initialization.ts", "--persisted-continuation-only"),
+      timeoutMs: 30_000,
+      requireNaturalExit: true,
+    },
+    {
       id: "blank-state",
       group: "supporting-serial",
       requirements: ["database", "migrations", "filesystem"],

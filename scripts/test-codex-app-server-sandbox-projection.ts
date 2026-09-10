@@ -760,6 +760,7 @@ async function clockBoundaryV01(scopeFor: (stage?: 1 | 2, packet?: NativeHostReq
   const successor = { ...request, packet: successorPacket, task_context_packet_ref: refV01("task_context_packet", successorPacket.packet_id) };
   let time = 0;
   const window = createCodexFeasibilityWindowV01(() => time);
+  assert.throws(() => createCodexFeasibilityWindowV01(() => time).begin(scope2, 180_000, 10_000), /window_start_refused/);
   assert.deepEqual(window.snapshot(), { attempts: 0, active: false, stopped: false, remaining_window_ms: null });
   const first = window.begin(scope1, 999_999, 10_000);
   assert.equal(first.timeout_ms, 180_000);

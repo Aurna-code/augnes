@@ -755,6 +755,76 @@ replacement timing while changing the actual consumer root to an independently
 validated snapshot. It does not claim to repair mutable-path authorization in
 the native artifact itself.
 
+## Persisted completed-X continuation (#1234)
+
+The application-local `createPersistedCodexFeasibilityContinuationV01` in
+`codex-scoped-task.ts` is the separate entry for an explicitly authorized
+continuation after the original X runner and window have ended. The legacy
+`createCodexFeasibilityWindowV01` same-window stage-1/stage-2 path is unchanged.
+An ordinary fresh window still cannot start at stage 2.
+
+The new coordinator reads the actual completed receipt, original automatically
+produced proposal, recomputed assessment, run ledger, current packet and
+registered physical root through existing result, review and admission owners.
+It rechecks the original producer's persisted adapter/capability identity;
+this implementation's source identity does not replace X provenance. Completed
+execution with failed criterion verification is eligible predecessor evidence,
+not semantic acceptance. Paused/unresolved state, mismatches and a later run
+refuse. The unknown-operation original candidate remains non-transitionable.
+
+Trusted disposable orchestration uses this sequence (no HTTP/worker flag):
+
+1. Open the completed study DB through its normal lifecycle and call the
+   factory with its real config, receipt ID and original proposal ID. This is
+   read-only preparation. `window.snapshot().attempts` is zero; the historical
+   predecessor is reported separately.
+2. Call `coordinator.revise` with the authenticated normal revision request.
+   It arms the monotonic 600,000 ms window immediately before that normal
+   semantic mutation. Continue through `decide`, `preview`, `confirm`, and
+   `apply`, using the actual returned bindings/cookies and inspecting preview
+   effects. These call the existing authenticated owners; they neither choose
+   semantic content nor create eligibility or nondelegable human authority.
+   Every modifying call checks the same clock. There is no clock reset or
+   automatic rollback of a committed semantic prefix.
+3. Only after application, call `prepareStage2` with the separately authorized
+   file/instruction hashes. It validates the full revised-proposal/Decision/
+   gate/Transition relation and freshly admits the exact compiler-produced
+   later packet and GuideBrief. Work/task and stable project/root lineage must
+   remain the same. Only the root reference's producer-supported observation
+   time refresh differs. Source and snapshot identities remain distinct.
+4. Supply the returned genuine `{scope, window}` to the existing
+   `LiveNativeHostRunServiceV01` and its scope-bound, cached recording adapter
+   factory. `start` consumes the single new attempt via `window.begin`; before
+   adapter invocation it revalidates the actual request and fresh admission.
+   B is bounded by 180,000 ms, remaining window less settlement reserve, and
+   all smaller existing service/RPC/settlement limits. No X replay is performed.
+5. In `finally`, shut down the service, close/read captures, then call
+   `coordinator.close`, revoke the disposable session and close the DB. The
+   ordinary snapshot owner refuses release while consumers remain unsettled.
+
+Before any semantic write, an exclusive owner-only, bounded disposition JSONL
+is created beside the actual study DB, outside its task root. It records the
+verified predecessor and bounded phase names, never credentials or semantic
+payloads. Existing disposition means refusal, including after process loss;
+it is retained as evidence, not read back as a renewed grant. Two prepared
+coordinators cannot both acquire that file. In-process genuine handles, exact
+scope binding and consumed attempt accounting prevent clone/replay renewal.
+Failure to record a terminal disposition is reported separately by coordinator
+cleanup; it does not replace an already persisted host result or receipt.
+This is not a distributed budget service or cross-process exactly-once claim:
+automatic restart, removal of the disposition, moving/copying a consumed DB,
+or reconstruction of a lost coordinator is unsupported. Such cases require a
+separate reconciliation/authorization decision. No Core schema changes.
+
+The synthetic regression uses the existing bounded child runner, normal
+persisted-result/revision/Transition/compiler owners and a fake App Server
+through the real scoped adapter/service/receipt consumer. Its fixed command
+events do not establish native file consumption. This change neither applies
+the real frozen clarification nor runs X, B or Y. Historical failed checks,
+attested reads, user-declaration boundaries and all original evidence remain
+unchanged. Review/merge, deployment and a new explicit continuation dispatch
+remain separate from this implementation and its model-free verification.
+
 ## Trusted-local snapshot connection (#1241, revised product scope)
 
 The supported input profile is `trusted_local_read_snapshot.v0.1`; the scoped
