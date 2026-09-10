@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { beginCanonicalTestResourceUse, settleCanonicalTestResourceUse } from "./canonical-test-environment.mjs";
 
 import {
   registerOwnedChild,
@@ -47,6 +48,7 @@ export async function runCanonicalChild({
   stderr = process.stderr,
   log = (line) => console.log(line),
   onSpawn = () => {},
+  resourceOwner,
 }) {
   const safeSuite = safeIdentifier(suite, "unknown");
   const safeLabel = safeText(label, "unnamed child");
@@ -56,6 +58,7 @@ export async function runCanonicalChild({
   );
 
   const owner = new Set();
+  if (resourceOwner) beginCanonicalTestResourceUse(resourceOwner);
   const child = spawn(command, args, {
     cwd,
     env,
@@ -181,6 +184,8 @@ export async function runCanonicalChild({
   log(
     `[canonical:${safeSuite}] child_result label=${JSON.stringify(safeLabel)} duration_ms=${durationMs} exit_code=${result.exit_code ?? "null"} signal=${result.signal ?? "null"} timed_out=${timedOut} exit_observed=${result.exit_observed} streams_closed=${result.streams_closed} cleanup_completed=${result.cleanup_completed} remaining_owned_processes=${result.remaining_owned_processes ?? "unknown"} termination_reason=${result.termination_reason}`,
   );
+  if (resourceOwner && result.exit_observed && result.streams_closed && result.cleanup_completed && result.remaining_owned_processes === 0)
+    settleCanonicalTestResourceUse(resourceOwner, result);
   return result;
 }
 

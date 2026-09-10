@@ -835,3 +835,45 @@ activation may stage this exact pair through the owner in the actual service
 store on reviewed source. A separately authorized single-turn confirmation
 would then create fresh current scope/capture bindings and measure actual
 model-selected dispatch. Neither step is performed by this implementation task.
+
+
+## Completed-command snapshot cwd observation (#1234)
+
+Completed `commandExecution` items validate cwd against the execution root of
+the genuine scoped request/snapshot binding. The original registered source
+root, physical identity and packet lineage remain unchanged. This check admits
+an observation; it grants no filesystem access. Non-scoped observations and
+permission/file-change consumers retain their existing original-root rules.
+Checkpoint recording still precedes cwd validation, so rejected observations
+retain potentially observed effects and the existing reconciliation disposition.
+
+The production adapter/service fixture now sends explicit started/completed
+command items with a distinct snapshot cwd and a bounded terminal result. It
+checks normal receipt/proposal persistence and original-source plus snapshot
+lineage; source cwd, unrelated and foreign snapshot paths, traversal, forged
+bindings and conflicting replay refuse. Canonical aliases, relative cwd,
+duplicate replay and the default route retain their existing behavior. The
+fixture substitutes App Server protocol responses; it does not execute a model
+or task command. The separate real native/helper fixture does not substitute for
+this event-consumer coverage. Historical X remains unchecked, and its actual
+triggering cwd was not retained; no historical result is rewritten by this fix.
+
+The complete initialization fixture and its fifteen-case scoped adapter/service
+matrix have separate `supporting-serial` Canonical children. Each has a 30,000 ms
+ceiling; the combined child allowance is now 60,000 ms instead of 30,000 ms.
+The default initialization entry no longer repeats the scoped matrix. This is
+coverage scheduling, not a production timeout change or a claimed speedup.
+The existing runner's `integration --project-work-only` focus executes both
+registered owners with normal environment isolation and deadlines; it is not
+deciding evidence or a complete integration suite.
+
+Before launching each child, the parent records and owns its disposable root's
+physical identity. Normal child cleanup still uses genuine scope/service owners.
+After an interrupted child tree settles, the parent may reclaim its own test
+root, restoring owner access only through checked directory descriptors. It
+does not follow symlinks, accept a replaced root or remove an unsettled child's
+resources. Independent cleanup attempts continue after a refusal, and execution
+and cleanup failures are reported together. This test-only ownership neither
+reconstructs a dead production scope nor changes snapshot lifetime semantics.
+Expected interruption regressions require both a failed child result and actual
+resource absence; cleanup cannot turn an unexpected deciding timeout into a pass.

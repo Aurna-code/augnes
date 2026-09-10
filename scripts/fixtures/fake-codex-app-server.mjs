@@ -719,6 +719,10 @@ async function handle(message) {
           completeSuccess();
         else if (scenario.startsWith("terminal_diagnostic_")) completeDiagnosticFailure();
         else if (scenario === "turn_failure" || scenario === "candidate_canary_failed") completeFailure();
+        else if (scenario === "scoped_command_cwd" || scenario === "command_cwd") {
+          emitCommandCwdItems();
+          if (process.env.FAKE_CODEX_COMMAND_TERMINAL !== "withhold") completeSuccess();
+        }
         else if (scenario === "scoped_approval") requestCommandApproval();
         else if (scenario === "scoped_effect") {
           notify("item/started", { threadId, turnId, item: { id: "unexpected-tool", type: "webSearch" } });
@@ -1510,6 +1514,26 @@ function emitObservedItems(filePath = "src/live-result.ts") {
   });
 }
 
+function emitCommandCwdItems() {
+  // Protocol items exercise Augnes's production event consumer, not a real
+  // command/model. Keep cwd explicit: omitting it hid the snapshot mismatch.
+  const command = {
+    type: "commandExecution", id: "snapshot-command-item", command: "/bin/cat TASK.txt",
+    cwd: process.env.FAKE_CODEX_COMMAND_CWD ?? root, processId: null,
+    source: "unifiedExecStartup", status: "inProgress",
+    commandActions: [{ type: "unknown", command: "/bin/cat TASK.txt" }],
+    aggregatedOutput: null, exitCode: null, durationMs: null,
+  };
+  notify("item/started", { item: command, threadId, turnId, startedAtMs: Date.now() });
+  const completion = { item: { ...command, status: "completed", exitCode: 0, durationMs: 1 },
+    threadId, turnId, completedAtMs: Date.now() };
+  trace("command_cwd_items", { cwd: command.cwd, item_id: command.id });
+  notify("item/completed", completion);
+  if (process.env.FAKE_CODEX_COMMAND_REPLAY === "duplicate") notify("item/completed", completion);
+  if (process.env.FAKE_CODEX_COMMAND_REPLAY === "conflict")
+    notify("item/completed", { ...completion, item: { ...completion.item, exitCode: 7 } });
+}
+
 function completeSuccess() {
   if (completed) return;
   completed = true;
@@ -1746,7 +1770,7 @@ function completeUnsafeTextStructuredResult(summary) {
 }
 
 function structuredResult() {
-  if (scopedScenario && !candidateCanaryScenario && scenario !== "scoped_result_effect") return JSON.stringify({
+  if ((scopedScenario && !candidateCanaryScenario && scenario !== "scoped_result_effect") || scenario === "command_cwd") return JSON.stringify({
     result_version: "codex_host_structured_result.v0.1", summary: "The synthetic scoped fixture returned a bounded result.",
     changed_files: [], artifacts: [], observed_actions: [], commands: [],
     checks: [{ check_id: "synthetic_fixture", required: false, status: "passed", summary: "Deterministic contract check only." }],

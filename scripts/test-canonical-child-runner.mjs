@@ -4,6 +4,12 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  renameSync,
+  symlinkSync,
+  writeFileSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -22,6 +28,11 @@ import {
   runCanonicalChild,
   runCanonicalChildGroups,
 } from "./canonical-child-runner.mjs";
+
+import {
+  buildCanonicalChildEnvironment, createCanonicalTestResourceRoot,
+  beginCanonicalTestResourceUse, cleanupCanonicalTestResources,
+} from "./canonical-test-environment.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -45,6 +56,7 @@ const observedPorts = new Set();
 const summaries = [];
 
 try {
+  await assertParentResourceCleanup();
   const maximumSafeLabel = "a".repeat(160);
   assert.equal(
     normalizeCanonicalConcurrentChildLabelV01(maximumSafeLabel),
@@ -468,6 +480,9 @@ console.log(
       concurrent_failure_timeout_and_cleanup_fail_closed: true,
       concurrent_incomplete_conflicting_and_duplicate_results_refused: true,
       owner_specific_natural_exit_acceptance_refusal_matrix: true,
+      parent_owned_interrupted_snapshot_cleanup: true,
+      replaced_root_and_unsettled_cleanup_refused: true,
+      symlink_targets_untouched_and_independent_cleanup_continues: true,
       temporary_root_removed: true,
       repository_database_unchanged: true,
       owned_processes_after: 0,
@@ -567,4 +582,103 @@ function snapshotFile(filePath) {
     mtime_ns: stats.mtimeNs.toString(),
     sha256: createHash("sha256").update(readFileSync(filePath)).digest("hex"),
   };
+}
+
+
+async function assertParentResourceCleanup() {
+  const resources = [];
+  const create = () => { const owner = createCanonicalTestResourceRoot("ag-resource-test-"); resources.push(owner); return owner; };
+  let failure;
+  try {
+  // Reproduce the nested readonly-removal failure in a disposable tree. It is
+  // platform-dependent; the parent result below must be absence, not an error label.
+  const readonly = create();
+  const snapshot = path.join(readonly.root, "snapshot");
+  mkdirSync(snapshot); writeFileSync(path.join(snapshot, "input.txt"), "synthetic"); chmodSync(snapshot, 0o500);
+  let plainRemoval = "removed";
+  try { rmSync(readonly.root, { recursive: true, force: true }); } catch (error) { plainRemoval = error.code; }
+  const readonlyResult = cleanupCanonicalTestResources([readonly]);
+  assert(readonlyResult[0].completed); assert.equal(existsSync(readonly.root), false);
+  console.log(JSON.stringify({ readonly_plain_rm: plainRemoval, parent_cleanup: readonlyResult }));
+
+  for (const point of ["snapshot", "host"]) {
+    const owner = create();
+    for (const sub of ["home/AppData/Local", "home/AppData/Roaming", "runtime-state"])
+      mkdirSync(path.join(owner.root, sub), { recursive: true, mode: 0o700 });
+    let output = ""; let errors = ""; let childPid;
+    const result = await runCanonicalChild({
+      suite: "runner-regression", label: `interrupted scoped ${point}`,
+      command: process.execPath,
+      args: ["--import", "tsx", "scripts/test-vnext-project-work-initialization.ts", `--interrupt-scoped-after-${point}`],
+      cwd: repositoryRoot,
+      env: buildCanonicalChildEnvironment({ temporaryRoot: owner.root, resourceRoot: owner.root }),
+      resourceOwner: owner, timeoutMs: 5_000, heartbeatMs: 0, termGraceMs: 250, killGraceMs: 2_000,
+      stdout: { write: chunk => { output += chunk.toString(); assert(output.length < 32_768); } },
+      stderr: { write: chunk => { errors += chunk.toString(); assert(errors.length < 32_768); } },
+      onSpawn: pid => { childPid = pid; },
+    });
+    const marker = output.split("\n").filter(line => line.startsWith("{")).map(line => JSON.parse(line))
+      .find(row => row.scoped_interruption === point);
+    assert(marker, `interruption must occur after actual ${point} preparation: ${errors}`);
+    assert.equal(path.dirname(marker.snapshot_root), owner.root);
+    assert.equal(lstatSync(marker.snapshot_root).isSymbolicLink(), false);
+    assert.equal(result.timed_out, true); assert.notEqual(result.exit_code, 0);
+    assert.equal(result.cleanup_completed, true); assert.equal(result.remaining_owned_processes, 0);
+    assert(canonicalChildAcceptanceFailure(result, { suite: "runner-regression", timeoutMs: 5_000 }),
+      "expected interruption must remain a failed execution result");
+    await assertProcessGone(childPid);
+    if (point === "host") { assert(marker.fake_host_pid); await assertProcessGone(marker.fake_host_pid); }
+    const cleanup = cleanupCanonicalTestResources([owner]);
+    assert(cleanup[0].completed); assert.equal(existsSync(owner.root), false);
+    assert.equal(existsSync(marker.snapshot_root), false);
+    console.log(JSON.stringify({ expected_interruption: point, timed_out: result.timed_out, resource_cleanup: cleanup }));
+  }
+
+  const outside = path.join(temporaryRoot, "resource-outside"); mkdirSync(outside);
+  writeFileSync(path.join(outside, "sentinel.txt"), "outside sentinel");
+  const linked = create(); symlinkSync(outside, path.join(linked.root, "outside"), "dir");
+  assert(cleanupCanonicalTestResources([linked])[0].completed);
+  assert.equal(readFileSync(path.join(outside, "sentinel.txt"), "utf8"), "outside sentinel");
+
+  const replaced = create(); const original = replaced.root + "-original";
+  renameSync(replaced.root, original); symlinkSync(outside, replaced.root, "dir");
+  const independent = create();
+  try {
+    const combined = cleanupCanonicalTestResources([replaced, independent]);
+    assert.equal(combined[0].completed, false); assert(combined[0].failures.includes("resource_root_changed"));
+    assert.equal(combined[1].completed, true); assert.equal(existsSync(independent.root), false);
+    assert.equal(readFileSync(path.join(outside, "sentinel.txt"), "utf8"), "outside sentinel");
+  } finally { rmSync(replaced.root); renameSync(original, replaced.root); }
+  // Restoring this test's original physical directory permits ordinary cleanup.
+  assert(cleanupCanonicalTestResources([replaced])[0].completed);
+
+  const replacedDirectory = create(); const heldOriginal = replacedDirectory.root + "-original";
+  renameSync(replacedDirectory.root, heldOriginal); mkdirSync(replacedDirectory.root);
+  try {
+    assert.equal(cleanupCanonicalTestResources([replacedDirectory])[0].completed, false);
+  } finally { rmSync(replacedDirectory.root, { recursive: true }); renameSync(heldOriginal, replacedDirectory.root); }
+  assert(cleanupCanonicalTestResources([replacedDirectory])[0].completed);
+
+  const active = create(); beginCanonicalTestResourceUse(active);
+  try {
+    assert.deepEqual(cleanupCanonicalTestResources([active])[0].failures, ["resource_consumers_unsettled"]);
+  } finally {
+    // No child was actually started in this synthetic refusal; remove only the
+    // empty directory this test just created, without inventing a settled result.
+    rmSync(active.root, { recursive: true });
+  }
+  const missing = create(); rmSync(missing.root, { recursive: true });
+  assert.throws(() => beginCanonicalTestResourceUse(missing), /resource_root_missing/);
+  assert.equal(cleanupCanonicalTestResources([{ root: outside }])[0].completed, false);
+  assert.equal(readFileSync(path.join(outside, "sentinel.txt"), "utf8"), "outside sentinel");
+  for (const owner of resources) assert.equal(existsSync(owner.root), false);
+  } catch (error) { failure = error; }
+  finally {
+    const pending = resources.filter(owner => lstatSync(owner.root, { throwIfNoEntry: false }));
+    const cleanup = cleanupCanonicalTestResources(pending);
+    const failures = cleanup.filter(result => !result.completed)
+      .map(result => new Error(`resource regression cleanup refused: ${result.root}: ${result.failures.join(",")}`));
+    if (failure) failures.unshift(failure);
+    if (failures.length) throw new AggregateError(failures, "resource regression or cleanup failed");
+  }
 }
