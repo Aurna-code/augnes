@@ -578,6 +578,46 @@ unchanged. Portable project v0.1, backup, restore, and recovery preserve and
 canonically revalidate the entire chain without a schema or portable-contract
 version bump.
 
+#### Trusted-local read-only input snapshots
+
+An explicitly selected local host profile may execute independent copies of
+approved input files. `trusted_local_read_snapshot.v0.1` distinguishes the
+registered source root from the separately observed execution root. It does not
+change canonical project identity, TaskContextPacket/GuideBrief lineage, cutoff,
+expiry, or execution authority. Normal admission constructs the producing
+request against the original source; a local binding joins that exact request,
+source physical identity, approved relative paths/hashes, and the validated
+execution inventory. Neither a worker nor an HTTP body can supply this binding.
+
+The controller finishes exclusive regular-file copies, closes writers, and
+verifies the staged inventory and hashes before granting worker access. Only
+snapshot task-data paths are granted; source, held material and evidence are
+not added. The native boundary must deny worker writes, escapes and delegated
+tool/IPC paths to an out-of-scope writer. Filesystem mode bits are hygiene, not
+proof of immutable backing. Snapshots remain owned until all consumers settle;
+unsettled cleanup or a replaced execution root requires reconciliation instead
+of deletion or mutable-source fallback.
+
+This profile trusts the controller/lifecycle manager, reviewed runtime and OS.
+Model output, task material, worker commands, subprocesses and accessible
+services remain untrusted. Independent non-cooperating host writers, a
+compromised controller/runtime/account/OS, OS-enforced immutable backing and
+cold isolation are excluded. Those exclusions never permit a supported worker
+path to disclose private data. Integrity checks detect observed corruption;
+they cannot undo disclosure or establish immunity to transient hostile changes.
+
+Results describe the approved input snapshot. Later source changes cannot
+refresh it. Existing source-currentness checks remain; observed drift uses the
+stop/refusal path and prevents completion as current-source evidence while
+retaining valid frozen-input observations separately. A local receipt
+observation retains the producing request/snapshot binding and the distinct
+integrity/currentness disposition, using existing observation/reference fields.
+No Core migration or provider-specific Core record is introduced. This opt-in
+does not restrict repository-editing delegation, zero-model continuity,
+ordinary native-only operation or other host integrations. Platform support
+and study-specific file/tool/time limits belong to the implemented profile's
+[execution card](../verification/P51_SCOPED_NATIVE_HOST_EXECUTION_CARD.md).
+
 #### RepositoryExecutionAttachment and managed delegation v0.1
 
 Repository identity, local root binding, node-local physical-root baseline,

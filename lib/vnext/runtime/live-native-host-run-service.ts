@@ -13,7 +13,7 @@ import { isTerminalRunnerStatus } from "@/lib/autonomy/runner-state";
 import { assertNativeHostPublicTextV01 } from "@/lib/vnext/native-host/native-host-contract";
 import { createCodexAppServerAdapterV01, assertCodexScopedAdapterV01 } from "@/lib/vnext/native-host/codex-app-server-adapter";
 import type { CodexScopedTaskV01, CodexFeasibilityWindowV01, CodexScopedAttemptV01 } from "@/lib/vnext/native-host/codex-scoped-task";
-import { assertCodexScopedExecutionV01 } from "@/lib/vnext/native-host/codex-scoped-task";
+import { assertCodexScopedExecutionV01, releaseCodexScopedTaskV01 } from "@/lib/vnext/native-host/codex-scoped-task";
 import { scheduleNativeHostTimeoutV01 } from "@/lib/vnext/runtime/direct-native-host-round-trip";
 import { createCanonicalRepositoryDelegationTestAdapterV01 } from "@/lib/vnext/native-host/canonical-repository-delegation-test-adapter";
 import { canonicalizeRepositoryRelativePathV01 } from "@/lib/vnext/repository-relative-path";
@@ -1386,6 +1386,7 @@ export class LiveNativeHostRunServiceV01 {
     );
     controllers.forEach((controller) => controller.cancel());
     await Promise.allSettled(controllers.map((controller) => controller.completion));
+    if (this.options.scoped_task) await releaseCodexScopedTaskV01(this.options.scoped_task.scope);
   }
 
   private async launch(input: {
@@ -1450,6 +1451,7 @@ export class LiveNativeHostRunServiceV01 {
       },
       {
         adapter: controller.adapter,
+        scoped_task: input.scoped_attempt?.scope,
         now: this.now,
         timeout_ms: input.scoped_attempt?.timeout_ms ?? this.options.timeout_ms ?? DEFAULT_LIVE_TIMEOUT_MS,
         stop_settle_timeout_ms: input.scoped_attempt?.stop_settle_timeout_ms ??

@@ -1,5 +1,12 @@
 # P5.1 scoped native-host execution card amendment
 
+**Current Draft #1241 contract:** trusted-local, source-bound read-only
+snapshots, described in the final section below. It supersedes the proposed
+immutable-mount/hardened-host requirement. Earlier sections preserve historical
+preparation and execution dispositions; they do not grant a new attempt.
+The post-adoption incident is consumed: native completed, task partial/blocked,
+X unchecked, B unexposed, Y deferred. This Draft has no live-call authority.
+
 **Issue #1234: BLOCKED / live study `not_run` / study model calls 0.**
 This is the implementation amendment authorized by
 [review 5582629291](https://github.com/hynk-studio/augnes/issues/1234#issuecomment-5582629291).
@@ -672,3 +679,159 @@ freshly bind the then-current source, managed 0.153.4 artifact, ordinary native
 authentication/configuration, genuine stage-1 scope and reviewed capture. Its
 single-turn limits and authorization boundary remain separate from registration,
 staging, activation and the already consumed successful canary.
+# Scoped code-mode snapshot draft (#1234 / #1241): HOLD for review
+
+This prospective connection requires review. It does not activate a helper or
+create another execution allowance. The historical post-adoption turn remains
+native-completed, task-partial/blocked, X unchecked, B unexposed, and Y deferred.
+
+The existing managed-store owner can explicitly install a separate paired view
+with `ensurePinnedCodexScopedManagedRuntimeV01`, given both exact reviewed
+archives. Its `codex_managed_scoped_runtime_store.v0.1` manifest binds the native,
+helper and scoped configuration fingerprint. Old native-only manifests,
+qualification records, pin, default selection and rollback evidence retain
+their meaning. There is no fallback download or last-known-good invocation
+fabrication. Production must not point at a disposable test store.
+
+The native remains the reviewed 0.153.4 executable, SHA-256
+`b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3`.
+The official helper asset is `545043539`,
+`codex-code-mode-host-aarch64-apple-darwin.tar.gz` (22,569,619 bytes), archive
+SHA-256 `45a9b0fdf53b98b85a6bb91e175dd90e961328a7a14fb50a40902205199df1df`.
+Its sole regular member is `codex-code-mode-host-aarch64-apple-darwin`, a
+62,767,552-byte Mach-O arm64 executable, SHA-256
+`d8a2222e017342718d16a5dbe092921c628961f812f62f42036b8d960e1ffe56`.
+The verified upstream layout is `bin/codex` plus sibling
+`bin/codex-code-mode-host`; no PATH lookup or unofficial rebuild is admitted.
+These are release-digest, byte and source observations, not signed build
+attestations.
+
+Only a genuine scoped 0.153.4 task selects this paired view. The launch sets
+`features.code_mode_host={enabled=true,disable_in_process_fallback=true}` while
+retaining code-mode feature selection, prewarm and ambient suppression. Model
+metadata still owns CodeMode/CodeModeOnly routing. The typed host readback must
+match exactly. `agents.enabled=false` is also necessary: the pinned consumer
+otherwise lets bundled model metadata select v2 despite disabled feature flags.
+The non-tool native canary and historical 0.152.1 projection stay separate.
+Managed artifact integrity is revalidated before thread and turn boundaries.
+Missing helper/backend or contradictory settings refuse; configuration alone
+does not attest a model-selected tool call.
+
+The explicit model-free regression extends the existing sandbox fixture:
+
+```sh
+npm run test:codex-sandbox-projection -- --scoped-code-mode-native \
+  <reviewed-native-archive> <reviewed-helper-archive>
+```
+
+It follows pinned upstream `app-server/tests/suite/v2/code_mode_host.rs`: fixed
+loopback Responses events substitute only for the model. Private empty auth and
+state replace the ordinary account context. The real native router, exact
+stdio helper, nested ExecCommandHandler, environment projection and named OS
+permission consumer execute. The local catalog returns an empty fixture;
+bundled metadata remains effective. No credential, provider or evaluator call
+is involved. This is not a native Augnes RunReceipt or live confirmation.
+
+Allowed synthetic reads and held/outside reads, writes, apply_patch and command
+network denials are exercised, along with absent process/require/fetch globals,
+rejected imports, interruption and parent/helper/command settlement. The helper
+itself is not spawned inside the task's OS sandbox: V8/import restrictions and
+the permissions applied to nested commands are distinct boundaries. Native
+input-request tools remain exposed and unexpected server requests still refuse;
+collaboration and MCP tools must be absent. The outer 180,000 ms execution and
+10,000 ms RPC/settlement ceilings and reserve are unchanged. Fixture limits are
+smaller; helper defaults do not extend an outer invocation.
+
+**Historical blocking negative at `3bfeb871`:** after admission, an external synthetic actor replaces an
+approved file with a symlink before the next command's sandbox is compiled.
+The exact native consumer reads the held target. Pinned
+`sandboxing/src/seatbelt.rs` canonicalizes read roots when building each policy;
+Augnes's existing source validator rejects such a replacement at admission but
+does not run inside each native nested command. This is an observed fixture
+failure, not evidence that the historical worker changed files or read B.
+The original fixture and failure remain in history and its frozen evidence.
+They are not relabeled passing. The revised contract below retains that source
+replacement timing while changing the actual consumer root to an independently
+validated snapshot. It does not claim to repair mutable-path authorization in
+the native artifact itself.
+
+## Trusted-local snapshot connection (#1241, revised product scope)
+
+The supported input profile is `trusted_local_read_snapshot.v0.1`; the scoped
+contract is `codex_synthetic_read_snapshot_scope.v0.2`. It implements the
+[local snapshot semantics](../vnext/02_AUGNES_VNEXT_ARCHITECTURE_AND_PROTOCOL.md#trusted-local-read-only-input-snapshots),
+not the superseded OS-enforced immutable image/mount proposal. No mount, sealed
+backing, hostile same-user-writer resistance or general isolation platform is
+required or claimed. Controller, reviewed runtime/helper and OS are trusted;
+worker commands, delegated tools, subprocesses and their accessible services
+are not. chmod is hygiene; the native permission consumer denies worker writes
+and out-of-scope reads. This does not support arbitrary independent host writers
+or imply uninterrupted original-source currentness.
+
+`createCodexScopedTaskV01` validates the exact approved flat regular-file
+inventory, creates an exclusive controller-owned temporary directory, copies
+bytes into independent files, closes write handles, and verifies the staged
+hashes and inventory. No symlink, hardlink, extra hidden instruction or shared
+writable source object is admitted. It observes a distinct execution physical
+root and fingerprints the source-to-snapshot material. The original registered
+root, packet/GuideBrief and cutoff remain unchanged. The three-file inventory
+and held-material rules are P5.1 constraints, not universal product limits.
+
+Authenticated `LiveNativeHostRunServiceV01.start` still runs normal persisted
+packet/currentness admission. `runDirectNativeHostRoundTripV01` constructs the
+original-source request and calls `bindCodexScopedRequestV01` before invocation.
+This private binding covers the complete actual producing request and snapshot;
+it cannot be supplied by a remote request or worker. The branded adapter then
+uses the snapshot as process/thread/turn cwd and grants only its exact task
+paths. Source/runtime/configuration/instruction checks remain at their existing
+boundaries. The paired `codex_scoped_code_mode.v0.2` configuration fingerprint
+now names this input profile; the managed owner selects a distinct paired
+manifest/directory, without rewriting old native or paired manifests.
+
+The real accepted result remains bound to the original request and admission.
+After host settlement, snapshot integrity and source currentness are checked
+separately. Snapshot corruption invalidates execution evidence. Observed source
+drift blocks completion as current-source evidence while preserving bounded
+observations about valid frozen inputs. The receipt's existing observation and
+source-ref fields retain snapshot/request fingerprints and these dispositions;
+no physical snapshot path is promoted to a portable project identity. These
+checks detect observed drift, not instantaneous or transient hostile mutation.
+`service.shutdown` settles consumers before releasing the scope. Failure to
+settle, or a replaced cleanup root, retains the snapshot for reconciliation.
+Capability-only preparation must also release its unused scope. No normal
+writer updates a running snapshot and no mutable-source fallback exists.
+
+The credential-free fixture verifies approved snapshot reads after original
+symlink, same-path replacement and in-place changes, including delayed open
+after dispatch. Separate worker negatives cover writes/replacement, source and
+held/evaluator/outside access, permission escalation, nested session identity,
+imports and network. A permitted controller request reaches the same loopback
+endpoint before the sandboxed denial. The production nested-command consumer
+and exact helper execute; fixed SSE replaces only model output. Independent
+host mutation of a private snapshot is an excluded prevention claim, with
+corruption detection and cleanup-root refusal tested separately. It is not
+reassigned from worker-induced access or ordinary original-source drift.
+
+Typed `features.code_mode` namespace/yield overrides and forced non-Only flags
+must not survive the scoped scalar-false projection. Model metadata remains
+native-owned: bundled CodeModeOnly is exercised by the real fixture; pure
+projection tests cover unsupported forced routing and missing/contradictory
+process backend refusal. They do not claim a cached/remote model catalog or
+actual model-selected dispatch was observed. In the pinned consumer both
+CodeMode and CodeModeOnly use this process provider when selected; disabled
+fallback is derived from the validated typed host field. The exact optional
+native configuration readback and file/canary routes retain separate evidence.
+
+Added operational burden is one bounded copy/hash/validation pass, one private
+directory per invocation, and teardown after settlement (at most eight files,
+128 KiB each in this local implementation). Preparation/validation, fixture
+execution and cleanup timings are recorded separately in local evidence. There
+is no new dependency, mount privilege, daemon or platform-wide startup
+requirement. The executed nested-command proof is for the exact macOS arm64
+pair; other platforms gain no support claim.
+
+After the boundary is resolved and deciding evidence accepted, a later explicit
+activation may stage this exact pair through the owner in the actual service
+store on reviewed source. A separately authorized single-turn confirmation
+would then create fresh current scope/capture bindings and measure actual
+model-selected dispatch. Neither step is performed by this implementation task.

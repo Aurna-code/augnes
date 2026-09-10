@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parse } from "smol-toml";
@@ -7,6 +7,7 @@ import { parse } from "smol-toml";
 import { canonicalizeProtocolValueV01, createProtocolSha256V01 } from "@/lib/vnext/protocol-primitives";
 import { inspectNativeHostPhysicalRootIdentityV01 } from "@/lib/vnext/native-host/project-root-identity";
 import { selectPinnedCodexQualifiedRuntimeV01 } from "./codex-qualified-runtime-registry";
+import { CODEX_SCOPED_CODE_MODE_PROFILE_FINGERPRINT_V01 } from "./codex-managed-runtime-store";
 import type { NativeHostPhysicalRootIdentityV01, NativeHostRequestV01 } from "@/types/vnext/native-host-adapter";
 import type { NativeHostTimeoutSchedulerV01 } from "@/lib/vnext/runtime/direct-native-host-round-trip";
 
@@ -25,12 +26,26 @@ interface StageMaterial {
   guide_brief_fingerprint: string;
   files: readonly Readonly<{ relative_path: string; sha256: string }>[];
   approved_instruction_files: readonly Readonly<{ path: string; sha256: string }>[];
+  snapshot: CodexScopedSnapshotV01;
+}
+/** Application-local input representation, not a registered project root or
+ * Core grant. The trusted controller owns it; the worker has read access only.
+ * Independent hostile host writers and OS-enforced immutability are excluded. */
+export interface CodexScopedSnapshotV01 {
+  readonly profile: "trusted_local_read_snapshot.v0.1";
+  readonly root: string;
+  readonly physical: NativeHostPhysicalRootIdentityV01;
+  readonly files: readonly Readonly<{ relative_path: string; sha256: string }>[];
+  readonly prepared_at: string;
+  readonly fingerprint: string;
 }
 const scopes = new WeakMap<CodexScopedTaskV01, Readonly<StageMaterial>>();
 const consumed = new WeakSet<CodexScopedTaskV01>();
+const unsettled = new WeakSet<CodexScopedTaskV01>();
+const requestBindings = new WeakMap<CodexScopedTaskV01, Readonly<{ request_fingerprint: string; fingerprint: string }>>();
 export const SCOPED_CODEX_MODEL_V01 = "gpt-6-astra";
 export const SCOPED_CODEX_EFFORT_V01 = "max";
-export const SCOPED_CODEX_CONTRACT_V01 = "codex_synthetic_read_scope.v0.1";
+export const SCOPED_CODEX_CONTRACT_V01 = "codex_synthetic_read_snapshot_scope.v0.2";
 
 /** Extension compatibility, not ordinary qualification or execution authority.
  * The ordinary adapter still requires the separate qualified managed selector;
@@ -73,14 +88,28 @@ function material(scope: CodexScopedTaskV01): Readonly<StageMaterial> {
   const result = scopes.get(scope); if (!result) refuse("scope_not_source_owned"); return result;
 }
 function fileBytes(filename: string, limit = 128 * 1024): Buffer {
+  let fd: number | undefined;
   try {
-    const stat = lstatSync(filename);
+    // Reject the opened object without waiting for a writer if a FIFO is
+    // supplied or replaces an approved path before this open.
+    fd = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const stat = fstatSync(fd);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > limit || realpathSync(filename) !== filename)
       refuse("file_identity_invalid");
-    const bytes = readFileSync(filename);
-    if (bytes.length !== stat.size) refuse("file_changed");
+    const buffer = Buffer.alloc(limit + 1); let length = 0;
+    while (length < buffer.length) {
+      const count = readSync(fd, buffer, length, buffer.length - length, null);
+      if (!count) break;
+      length += count;
+    }
+    if (length > limit) refuse("file_bound_exceeded");
+    const bytes = buffer.subarray(0, length);
+    const after = fstatSync(fd), named = lstatSync(filename);
+    if (bytes.length !== stat.size || stat.dev !== named.dev || stat.ino !== named.ino || named.isSymbolicLink() ||
+        stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs) refuse("file_changed");
     return bytes;
-  } catch { refuse("file_unavailable_or_changed"); }
+  } catch { return refuse("file_unavailable_or_changed"); }
+  finally { if (fd !== undefined) closeSync(fd); }
 }
 
 /** The trusted disposable operator supplies reviewed hashes, not worker flags. */
@@ -96,7 +125,7 @@ export async function createCodexScopedTaskV01(input: {
   if (![1, 2].includes(input.stage) || !input.packet_id || !/^sha256:[a-f0-9]{64}$/u.test(input.packet_fingerprint) ||
     !/^sha256:[a-f0-9]{64}$/u.test(input.guide_brief_fingerprint) ||
     input.files.length < 1 || input.files.length > 8) refuse("stage_invalid");
-  const value: StageMaterial = {
+  const source = {
     stage: input.stage, root: input.canonical_root,
     physical: await inspectNativeHostPhysicalRootIdentityV01(input.canonical_root),
     packet_id: input.packet_id, packet_fingerprint: input.packet_fingerprint,
@@ -106,23 +135,93 @@ export async function createCodexScopedTaskV01(input: {
   };
   // Flat, exact files are sufficient for this case and exclude config/skill
   // directories and symlink traversal. No parent-directory read grant is made.
-  if (value.files.some(f => !/^[A-Za-z0-9][A-Za-z0-9_-]*\.(?:json|md|txt)$/u.test(f.relative_path) ||
+  if (source.files.some(f => !/^[A-Za-z0-9][A-Za-z0-9_-]*\.(?:json|md|txt)$/u.test(f.relative_path) ||
     /^(?:AGENTS|CLAUDE)\./iu.test(f.relative_path) || !/^[a-f0-9]{64}$/u.test(f.sha256)) ||
-    new Set(value.files.map(f => f.relative_path)).size !== value.files.length ||
-    value.approved_instruction_files.length > 4 || value.approved_instruction_files.some(f =>
+    new Set(source.files.map(f => f.relative_path)).size !== source.files.length ||
+    source.approved_instruction_files.length > 4 || source.approved_instruction_files.some(f =>
       !path.isAbsolute(f.path) || !/^[a-f0-9]{64}$/u.test(f.sha256))) refuse("files_invalid");
-  const scope = freeze({ fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01(value)), stage: input.stage });
-  scopes.set(scope, freeze(value));
-  await assertCodexScopedTaskCurrentV01(scope);
-  return scope;
+  assertInventory(source.root, source.files);
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "augnes-scoped-input-")));
+  let scope: CodexScopedTaskV01 | undefined;
+  try {
+    chmodSync(root, 0o700);
+    for (const file of source.files) {
+      const bytes = fileBytes(path.join(source.root, file.relative_path));
+      if (digest(bytes) !== file.sha256) refuse("stage_hash_changed");
+      // Independent regular files, exclusive writes, and all descriptors closed
+      // before admission. chmod is hygiene; native permissions constrain workers.
+      writeFileSync(path.join(root, file.relative_path), bytes, { flag: "wx", mode: 0o400 });
+    }
+    chmodSync(root, 0o500);
+    assertInventory(root, source.files);
+    const snapshotMaterial = { profile: "trusted_local_read_snapshot.v0.1" as const, root,
+      physical: await inspectNativeHostPhysicalRootIdentityV01(root), files: source.files, prepared_at: new Date().toISOString() };
+    const value: StageMaterial = { ...source, snapshot: { ...snapshotMaterial,
+      fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01(snapshotMaterial)) } };
+    scope = freeze({ fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01(value)), stage: input.stage });
+    scopes.set(scope, freeze(value));
+    await assertCodexScopedTaskCurrentV01(scope);
+    return scope;
+  } catch (error) {
+    if (scope) scopes.delete(scope);
+    chmodSync(root, 0o700); rmSync(root, { recursive: true });
+    throw error;
+  }
+}
+
+function assertInventory(root: string, files: StageMaterial["files"]): void {
+  if (!equal(readdirSync(root).sort(), files.map(f => f.relative_path).sort())) refuse("stage_inventory_changed");
+  for (const f of files) if (digest(fileBytes(path.join(root, f.relative_path))) !== f.sha256) refuse("stage_hash_changed");
+}
+
+export function readCodexScopedSnapshotV01(scope: CodexScopedTaskV01): Readonly<CodexScopedSnapshotV01> {
+  return material(scope).snapshot;
+}
+export async function assertCodexScopedSnapshotCurrentV01(scope: CodexScopedTaskV01): Promise<void> {
+  const s = material(scope).snapshot;
+  if (!equal(await inspectNativeHostPhysicalRootIdentityV01(s.root), s.physical)) refuse("snapshot_root_changed");
+  try { assertInventory(s.root, s.files); } catch { refuse("snapshot_content_changed"); }
+}
+/** Called only after all consumers settle (or before any invocation). Never
+ * traverse a replacement root. A refusal retains the evidence for reconciliation. */
+export async function releaseCodexScopedTaskV01(scope: CodexScopedTaskV01): Promise<void> {
+  const m = scopes.get(scope); if (!m) return;
+  if (unsettled.has(scope)) refuse("snapshot_consumers_unsettled");
+  if (!equal(await inspectNativeHostPhysicalRootIdentityV01(m.snapshot.root), m.snapshot.physical)) refuse("snapshot_cleanup_root_changed");
+  chmodSync(m.snapshot.root, 0o700);
+  rmSync(m.snapshot.root, { recursive: true });
+  scopes.delete(scope); requestBindings.delete(scope);
+}
+/** Invoked by the adapter only after transport and every owned child settle. */
+export function settleCodexScopedTaskV01(scope: CodexScopedTaskV01): void { unsettled.delete(scope); }
+
+/** Local request construction extension. Source root/reference, packet, cutoff
+ * and expiry remain in the unchanged admitted request; only execution uses the
+ * separately observed snapshot. No HTTP/worker-supplied mapping is accepted. */
+export async function bindCodexScopedRequestV01(scope: CodexScopedTaskV01, request: NativeHostRequestV01): Promise<void> {
+  await assertCodexScopedTaskCurrentV01(scope, request);
+  const request_fingerprint = createProtocolSha256V01(canonicalizeProtocolValueV01(request));
+  const prior = requestBindings.get(scope);
+  if (prior && prior.request_fingerprint !== request_fingerprint) refuse("snapshot_request_changed");
+  requestBindings.set(scope, freeze({ request_fingerprint, fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01({
+    profile: material(scope).snapshot.profile, scope: scope.fingerprint, request_fingerprint,
+    source_root_ref: request.root_scope.root_scope_ref, snapshot: material(scope).snapshot.fingerprint,
+  })) }));
+}
+export function readCodexScopedRequestBindingV01(scope: CodexScopedTaskV01, request: NativeHostRequestV01): string {
+  const binding = requestBindings.get(scope);
+  if (!binding || binding.request_fingerprint !== createProtocolSha256V01(canonicalizeProtocolValueV01(request))) refuse("snapshot_request_binding_missing");
+  return binding.fingerprint;
 }
 
 export async function assertCodexScopedTaskCurrentV01(scope: CodexScopedTaskV01, request?: NativeHostRequestV01): Promise<void> {
+  await assertCodexScopedSnapshotCurrentV01(scope);
+  await assertCodexScopedSourceCurrentV01(scope, request);
+}
+export async function assertCodexScopedSourceCurrentV01(scope: CodexScopedTaskV01, request?: NativeHostRequestV01): Promise<void> {
   const m = material(scope);
   if (!equal(await inspectNativeHostPhysicalRootIdentityV01(m.root), m.physical)) refuse("root_changed");
-  const entries = readdirSync(m.root).sort();
-  if (!equal(entries, m.files.map(f => f.relative_path).sort())) refuse("stage_inventory_changed");
-  for (const f of m.files) if (digest(fileBytes(path.join(m.root, f.relative_path))) !== f.sha256) refuse("stage_hash_changed");
+  assertInventory(m.root, m.files);
   for (const f of m.approved_instruction_files) if (digest(fileBytes(f.path)) !== f.sha256) refuse("instruction_hash_changed");
   if (!request) return;
   if (request.mode !== "interactive" || request.automation_context || request.repository_delegation_context ||
@@ -152,7 +251,7 @@ const DISABLED_FEATURES = [
   "auth_elicitation", "use_agent_identity", "shell_snapshot", "shell_snapshot_v2",
   "web_search_request", "web_search_cached", "standalone_web_search", "guardian_approval", "guardianv2",
   "guardian_ext", "step_model_switching",
-  "view_image", "code_mode", "code_mode_host", "code_mode_prewarm", "code_mode_only", "js_repl", "js_repl_tools_only",
+  "view_image", "code_mode", "code_mode_prewarm", "code_mode_only", "js_repl", "js_repl_tools_only",
   "deferred_executor", "local_thread_store_compression", "local_thread_store_shared_compression",
   "tool_call_mcp_elicitation", "unavailable_dummy_tools",
 ] as const;
@@ -260,6 +359,7 @@ export interface ScopedCodexLaunchV01 {
   readonly profile_name: string;
   readonly settings: Readonly<Record<string, unknown>>;
   readonly configuration_fingerprint: string;
+  readonly code_mode_profile_fingerprint: string | null;
   assert_sources_current(): void;
   assert_configuration(response: unknown): void;
   readonly command_environment_check: Readonly<{ command: readonly string[]; cwd: string; permissionProfile: string; timeoutMs: number; outputBytesCap: number }>;
@@ -273,7 +373,8 @@ export interface ScopedCodexLaunchV01 {
  * Never returns config contents, credentials, prompts, or personal memory. */
 export function prepareScopedCodexLaunchV01(scope: CodexScopedTaskV01, environment: NodeJS.ProcessEnv,
   runtime: CodexScopedRuntimeArtifactV01 = selectPinnedCodexQualifiedRuntimeV01().artifact): ScopedCodexLaunchV01 {
-  return prepareRestrictedCodexLaunchV01(material(scope), scope.fingerprint, environment, runtime, false);
+  const m = material(scope);
+  return prepareRestrictedCodexLaunchV01({ ...m, source_root: m.root, root: m.snapshot.root }, scope.fingerprint, environment, runtime, false);
 }
 
 /** Candidate-only narrowing projection. This is configuration, not an execution
@@ -290,18 +391,23 @@ export function prepareCodexNativeCanaryLaunchV01(input: {
   return prepareRestrictedCodexLaunchV01({ ...structuredClone(input), files: [] }, input.fingerprint, environment, runtime, true);
 }
 
-function prepareRestrictedCodexLaunchV01(m: Pick<StageMaterial, "root" | "files" | "approved_instruction_files">,
+function prepareRestrictedCodexLaunchV01(m: Pick<StageMaterial, "root" | "files" | "approved_instruction_files"> & { source_root?: string },
   fingerprint: string, environment: NodeJS.ProcessEnv, runtime: CodexScopedRuntimeArtifactV01,
   nativeCanary: boolean): ScopedCodexLaunchV01 {
   assertCodexScopedRuntimeArtifactV01(runtime);
   const runtimeVersion = runtime.version; // Detached; no mutable caller binding retained.
+  // Model metadata still owns tool-mode routing. Only the exact task extension
+  // selects the process provider; it neither forces code mode nor changes the
+  // catalog. Scalar false on the other routes replaces inherited host tables.
+  const processCodeMode = runtimeVersion === "0.153.4" && !nativeCanary;
+  const codeModeHost = processCodeMode ? { enabled: true, disable_in_process_fallback: true } : false;
   const disabledFeatures = [
     ...DISABLED_FEATURES,
     ...(runtimeVersion === "0.153.4" ? ["context_management", "mcp_oauth_refresh_coordination"] : []),
     ...(nativeCanary ? ["shell_tool", "unified_exec"] : []),
   ];
   const codexHome = path.resolve(environment.CODEX_HOME ?? path.join(environment.HOME ?? os.homedir(), ".codex"));
-  const paths = configFiles(codexHome, m.root);
+  const paths = [...new Set([...configFiles(codexHome, m.root), ...configFiles(codexHome, m.source_root ?? m.root)])].sort();
   const servers = new Set<string>();
   const nativeAuthInputs = new Map<string, unknown>();
   const sourceHashes = new Map<string, string | null>();
@@ -357,7 +463,10 @@ function prepareRestrictedCodexLaunchV01(m: Pick<StageMaterial, "root" | "files"
     model: SCOPED_CODEX_MODEL_V01, model_provider: "openai", model_reasoning_effort: SCOPED_CODEX_EFFORT_V01,
     default_permissions: profileName, permissions: { [profileName]: profile }, web_search: "disabled",
     approval_policy: "never", approvals_reviewer: "user",
-    features: { ...Object.fromEntries(disabledFeatures.map(f => [f, false])), skip_host_skill_discovery: true },
+    // Metadata can select multi-agent v2 despite both feature flags being off.
+    // This pinned Config consumer overrides that selection without a catalog edit.
+    ...(processCodeMode ? { agents: { enabled: false } } : {}),
+    features: { ...Object.fromEntries(disabledFeatures.map(f => [f, false])), code_mode_host: codeModeHost, skip_host_skill_discovery: true },
     memories: { use_memories: false, generate_memories: false },
     mcp_servers: Object.fromEntries([...servers].sort().map(name => [name, { enabled: false }])),
     skills: { bundled: { enabled: false }, include_instructions: false },
@@ -382,6 +491,16 @@ function prepareRestrictedCodexLaunchV01(m: Pick<StageMaterial, "root" | "files"
     for (const key of ["model", "model_provider", "model_reasoning_effort", "default_permissions", "web_search", "project_doc_max_bytes", "allow_login_shell"])
       if (!equal(c[key], settings[key])) refuse("effective_configuration_mismatch");
     const features = record(c.features);
+    // This typed host setting chooses a different executable. Checking only
+    // enabled (or accepting scalar true) would not establish the backend.
+    if (!equal(features.code_mode_host, codeModeHost)) refuse("code_mode_backend_mismatch");
+    // A disabled typed CodeMode table can still change nested/direct-only
+    // namespaces and yield behavior. Our scalar override must replace it, not
+    // merely turn off its feature bit. Metadata remains the routing owner.
+    if (features.code_mode !== false || features.code_mode_only !== false) refuse("code_mode_routing_override");
+    if (processCodeMode && optionalRecord(c.agents).enabled !== false) refuse("agents_enabled");
+    if (processCodeMode && features.shell_tool != null && features.shell_tool !== true)
+      refuse("nested_command_tool_disabled");
     if (nativeCanary) for (const [key, expected] of nativeAuthInputs) {
       const actual = key === "secret_auth_storage" ? features[key] : c[key];
       if (!equal(actual, expected)) refuse("native_auth_effective_source_mismatch");
@@ -438,6 +557,7 @@ function prepareRestrictedCodexLaunchV01(m: Pick<StageMaterial, "root" | "files"
         refuse("command_environment_mismatch");
     },
     configuration_fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01({ settings, source_hashes: [...sourceHashes] })),
+    code_mode_profile_fingerprint: processCodeMode ? CODEX_SCOPED_CODE_MODE_PROFILE_FINGERPRINT_V01 : null,
     assert_sources_current: assertSources, assert_configuration: assertConfiguration, assert_thread: assertThread,
     assert_mcp_catalog(response: unknown) {
       const r = record(response);
@@ -459,7 +579,9 @@ function prepareRestrictedCodexLaunchV01(m: Pick<StageMaterial, "root" | "files"
 export async function consumeScopedCodexTaskV01(scope: CodexScopedTaskV01, request: NativeHostRequestV01): Promise<void> {
   if (consumed.has(scope)) refuse("scope_already_consumed");
   consumed.add(scope);
+  readCodexScopedRequestBindingV01(scope, request);
   await assertCodexScopedTaskCurrentV01(scope, request);
+  unsettled.add(scope);
 }
 
 export interface CodexFeasibilityWindowV01 {
