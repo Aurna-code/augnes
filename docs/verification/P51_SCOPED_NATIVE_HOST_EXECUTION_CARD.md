@@ -835,3 +835,25 @@ activation may stage this exact pair through the owner in the actual service
 store on reviewed source. A separately authorized single-turn confirmation
 would then create fresh current scope/capture bindings and measure actual
 model-selected dispatch. Neither step is performed by this implementation task.
+
+
+## Completed-command snapshot cwd observation (#1234)
+
+Completed `commandExecution` items validate cwd against the execution root of
+the genuine scoped request/snapshot binding. The original registered source
+root, physical identity and packet lineage remain unchanged. This check admits
+an observation; it grants no filesystem access. Non-scoped observations and
+permission/file-change consumers retain their existing original-root rules.
+Checkpoint recording still precedes cwd validation, so rejected observations
+retain potentially observed effects and the existing reconciliation disposition.
+
+The production adapter/service fixture now sends explicit started/completed
+command items with a distinct snapshot cwd and a bounded terminal result. It
+checks normal receipt/proposal persistence and original-source plus snapshot
+lineage; source cwd, unrelated and foreign snapshot paths, traversal, forged
+bindings and conflicting replay refuse. Canonical aliases, relative cwd,
+duplicate replay and the default route retain their existing behavior. The
+fixture substitutes App Server protocol responses; it does not execute a model
+or task command. The separate real native/helper fixture does not substitute for
+this event-consumer coverage. Historical X remains unchecked, and its actual
+triggering cwd was not retained; no historical result is rewritten by this fix.

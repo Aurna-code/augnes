@@ -5,7 +5,7 @@ import {
 } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  assertCodexScopedTaskCurrentV01, consumeScopedCodexTaskV01, prepareScopedCodexLaunchV01,
+  assertCodexScopedTaskCurrentV01, assertCodexScopedSnapshotCurrentV01, consumeScopedCodexTaskV01, prepareScopedCodexLaunchV01,
   readCodexScopedRequestBindingV01, readCodexScopedSnapshotV01, settleCodexScopedTaskV01,
   SCOPED_CODEX_CONTRACT_V01, SCOPED_CODEX_MODEL_V01, SCOPED_CODEX_EFFORT_V01,
   type CodexScopedTaskV01, type ScopedCodexLaunchV01,
@@ -3143,7 +3143,16 @@ class CodexAppServerInvocationV01 {
     if (item.type === "commandExecution") {
       const command = stringV01(item.command) ?? "";
       const cwd = stringV01(item.cwd);
-      if (cwd) relativeScopeForHostPathV01(this.request, cwd);
+      if (cwd) {
+        if (this.options.scoped_task) {
+          // Observation validation is not an access grant. Keep the original
+          // request/source lineage; only the genuinely bound execution view
+          // supplies this command's cwd boundary. Never accept their union.
+          readCodexScopedRequestBindingV01(this.options.scoped_task, this.request);
+          await assertCodexScopedSnapshotCurrentV01(this.options.scoped_task);
+          relativeScopeForRootV01(this.executionRoot, this.request.root_scope.path_flavor, cwd);
+        } else relativeScopeForHostPathV01(this.request, cwd);
+      }
       this.observedCommands.push({
         command_id: itemId,
         summary: publicSafeCommandSummaryV01(command),
@@ -5015,12 +5024,19 @@ function relativeScopeForHostPathV01(
   request: NativeHostRequestV01,
   candidate: string,
 ): string[] {
+  return relativeScopeForRootV01(request.root_scope.canonical_root, request.root_scope.path_flavor, candidate);
+}
+
+function relativeScopeForRootV01(
+  root: string,
+  pathFlavor: NativeHostRequestV01["root_scope"]["path_flavor"],
+  candidate: string,
+): string[] {
   if (!candidate || candidate.includes("\0")) {
     throw new CodexProtocolErrorV01("codex_approval_path_invalid");
   }
-  const root = request.root_scope.canonical_root;
   if (sameCanonicalRootV01(root, candidate)) return [];
-  if (request.root_scope.path_flavor === "posix") {
+  if (pathFlavor === "posix") {
     if (/^[a-zA-Z]:/u.test(candidate) || candidate.startsWith("\\")) {
       throw new CodexProtocolErrorV01("codex_approval_path_outside_root");
     }

@@ -5,9 +5,10 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 
 import Database from "better-sqlite3";
+import { readAutonomyRunLedgerRecord } from "../lib/autonomy/runner-ledger";
 import { LiveNativeHostRunServiceV01 } from "../lib/vnext/runtime/live-native-host-run-service";
 import { createCodexAppServerAdapterV01 } from "../lib/vnext/native-host/codex-app-server-adapter";
-import { createCodexScopedTaskV01, createCodexFeasibilityWindowV01, readCodexScopedSnapshotV01 } from "../lib/vnext/native-host/codex-scoped-task";
+import { createCodexScopedTaskV01, createCodexFeasibilityWindowV01, readCodexScopedSnapshotV01, releaseCodexScopedTaskV01 } from "../lib/vnext/native-host/codex-scoped-task";
 import { buildTaskStartGuideBriefCodexProjectionV02 } from "../lib/vnext/guide-brief/project-guide-brief";
 import { buildSelectedWorkSourceEntry, compareSelectedWorkSources, normalizeSelectedWorkSources, readSelectedWorkSources } from "../lib/intake/selected-work-source-comparison";
 import { SELECTED_WORK_SOURCE_LABELS } from "../types/vnext/project-work-revision";
@@ -51,6 +52,7 @@ import {
 import {
   consumeVNextLocalOperatorBootstrapV01,
   issueVNextLocalOperatorBootstrapV01,
+  revokeVNextLocalOperatorSessionByIdV01,
   readVNextLocalOperatorCredentialFromRequestV01,
   VNEXT_LOCAL_OPERATOR_SESSION_COOKIE_V01,
   type VNextLocalOperatorPilotConfigV01,
@@ -87,6 +89,7 @@ import { readSharedProjectInspectorV01 } from "../lib/vnext/runtime/shared-proje
 import type { EpisodeDeltaProposalV01 } from "../types/vnext/episode-delta-proposal";
 import type { NativeHostRequestV01 } from "../types/vnext/native-host-adapter";
 import type { TaskContextPacketV01 } from "../types/vnext/task-context-packet";
+import type { RunReceiptV01 } from "../types/vnext/run-receipt";
 import {
   INITIAL_PROJECT_WORK_LIMITS_V01,
   type DefineInitialProjectWorkRequestV01,
@@ -165,12 +168,21 @@ async function main(): Promise<void> {
 }
 
 async function assertScopedNativeHostConnectionV01(): Promise<void> {
-  for (const scenario of ["success", "prestart_source", "running_source", "snapshot_corruption"] as const) {
+  for (const scenario of ["success", "cwd_alias", "cwd_relative", "cwd_source", "cwd_other_snapshot",
+    "cwd_outside", "cwd_traversal", "cwd_invalid", "cwd_duplicate", "cwd_conflict",
+    "default_success", "default_outside", "prestart_source", "running_source", "snapshot_corruption"] as const) {
     const mismatch = scenario === "prestart_source";
+    const scoped = !scenario.startsWith("default_");
+    const commandItems = !["prestart_source", "running_source", "snapshot_corruption"].includes(scenario);
+    const rejectedCwd = ["cwd_source", "cwd_other_snapshot", "cwd_outside", "cwd_traversal", "cwd_invalid", "default_outside"].includes(scenario);
+    const rejectedEvent = rejectedCwd || scenario === "cwd_conflict";
     const name = `scoped-${scenario}`;
     const fixture = createFixtureV01(name, false, true, true);
     let service: LiveNativeHostRunServiceV01 | null = null;
     let snapshotRoot: string | undefined;
+    const scopes: Awaited<ReturnType<typeof createCodexScopedTaskV01>>[] = [];
+    const processes = new Set<number>();
+    let sessionId: string | undefined;
     try {
       const taskFile = path.join(fixture.root, "TASK.txt");
       writeFileSync(taskFile, "Synthetic scoped native result check.\n");
@@ -178,21 +190,49 @@ async function assertScopedNativeHostConnectionV01(): Promise<void> {
         config: fixture.config, credential: authenticatedSessionV01(fixture, "scoped"),
         request: requestV01(fixture), clock: fixedClock(T2),
       });
-      const scope = await createCodexScopedTaskV01({ stage: 1, canonical_root: fixture.root,
+      const scopeInput = { stage: 1 as const, canonical_root: fixture.root,
         packet_id: defined.packet.packet_id, packet_fingerprint: defined.packet.integrity.fingerprint,
         guide_brief_fingerprint: createProtocolSha256V01(canonicalizeProtocolValueV01(buildTaskStartGuideBriefCodexProjectionV02({ packet: defined.packet, project_name: `First work ${name}` }))),
         files: [{ relative_path: "TASK.txt", sha256: createHash("sha256").update(readFileSync(taskFile)).digest("hex") }],
-      });
+      };
+      const scope = await createCodexScopedTaskV01(scopeInput); scopes.push(scope);
       const snapshot = readCodexScopedSnapshotV01(scope); snapshotRoot = snapshot.root;
       assert.notEqual(snapshotRoot, fixture.root);
+      let commandCwd = scoped ? snapshot.root : fixture.root;
+      if (scenario === "cwd_source") commandCwd = fixture.root;
+      if (scenario === "cwd_outside" || scenario === "default_outside") commandCwd = ROOT;
+      if (scenario === "cwd_traversal") commandCwd = `${snapshot.root}/../outside`;
+      if (scenario === "cwd_invalid") commandCwd = "C:\\outside";
+      if (scenario === "cwd_relative") commandCwd = ".";
+      if (scenario === "cwd_alias") {
+        // macOS /var aliases /private/var. Other platforms retain the canonical
+        // path spelling; their existing path-owner cases run separately.
+        commandCwd = process.platform === "darwin" ? snapshot.root.replace(/^\/private\/var\//u, "/var/") : snapshot.root + "/.";
+        assert.equal(realpathSync(commandCwd), snapshot.root);
+      }
+      if (scenario === "cwd_other_snapshot") {
+        const other = await createCodexScopedTaskV01(scopeInput); scopes.push(other);
+        commandCwd = readCodexScopedSnapshotV01(other).root;
+        assert.notEqual(commandCwd, snapshot.root);
+        // Neither a forged handle nor another genuine scope can replace the
+        // service's producing binding. Capability reads launch no host.
+        assert.throws(() => new LiveNativeHostRunServiceV01({
+          scoped_task: { scope: { ...scope }, window: createCodexFeasibilityWindowV01() },
+        }).readCapabilityContractV01(), /scope_not_source_owned/);
+        assert.throws(() => new LiveNativeHostRunServiceV01({
+          scoped_task: { scope, window: createCodexFeasibilityWindowV01() },
+          adapter_factory: () => createCodexAppServerAdapterV01({ scoped_task: other }),
+        }).readCapabilityContractV01(), /scoped_adapter/);
+      }
       const hostHome = path.join(ROOT, `${name}-home`); mkdirSync(hostHome);
       const trace = path.join(ROOT, `${name}-trace.jsonl`);
       const cleanup = path.join(ROOT, `${name}-cleanup`);
       const window = createCodexFeasibilityWindowV01();
       service = new LiveNativeHostRunServiceV01({ now: timestampSequenceV01("2026-08-01T00:00:04.000Z"),
-        scoped_task: { scope, window }, timeout_ms: 10_000, stop_settle_timeout_ms: 3_000,
+        ...(scoped ? { scoped_task: { scope, window } } : {}), timeout_ms: 10_000, stop_settle_timeout_ms: 3_000,
         adapter_factory: bound => createCodexAppServerAdapterV01({ scoped_task: bound,
           observe: observation => {
+            if (observation.kind === "spawned" && observation.process_id) processes.add(observation.process_id);
             if (observation.kind !== "turn_started") return;
             if (scenario === "running_source") writeFileSync(taskFile, "Synthetic source drift after turn submission.\n");
             if (scenario === "snapshot_corruption") {
@@ -204,11 +244,16 @@ async function assertScopedNativeHostConnectionV01(): Promise<void> {
           }, launch: {
           command: process.execPath, prefix_args: [path.join(process.cwd(), "scripts/fixtures/fake-codex-app-server.mjs")],
           environment: { NODE_ENV: "test", HOME: hostHome, CODEX_HOME: hostHome, PATH: process.env.PATH,
-            FAKE_CODEX_SCENARIO: "scoped_success", FAKE_CODEX_TRACE_PATH: trace, FAKE_CODEX_CLEANUP_MARKER_PATH: cleanup },
+            FAKE_CODEX_SCENARIO: commandItems ? (scoped ? "scoped_command_cwd" : "command_cwd") : "scoped_success",
+            FAKE_CODEX_COMMAND_CWD: commandCwd,
+            FAKE_CODEX_COMMAND_TERMINAL: rejectedEvent ? "withhold" : "complete",
+            FAKE_CODEX_COMMAND_REPLAY: scenario === "cwd_duplicate" ? "duplicate" : scenario === "cwd_conflict" ? "conflict" : "none",
+            FAKE_CODEX_TRACE_PATH: trace, FAKE_CODEX_CLEANUP_MARKER_PATH: cleanup },
         } }),
       });
       if (mismatch) writeFileSync(taskFile, "Synthetic drift after admission preparation.\n");
       const credential = credentialFromCookieV01(defined.session_admission.cookie_value);
+      sessionId = credential.session_id;
       const start = () => service!.start({ config: fixture.config, mode: "interactive", operator_mutation: { credential, clock: fixedClock("2026-08-01T00:00:04.000Z") } });
       if (mismatch) await assert.rejects(start(), /direct_host_scoped_snapshot_admission_changed/);
       const started = mismatch ? null : await start();
@@ -224,31 +269,76 @@ async function assertScopedNativeHostConnectionV01(): Promise<void> {
         assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 10 }).length, 0);
         assert.equal(readdirSync(ROOT).includes(path.basename(trace)), false, "Refused source must not spawn even the fake host");
       } else {
-        assert.equal(projection.status, scenario === "success" ? "completed" : scenario === "running_source" ? "blocked" : "failed");
+        if (commandItems) {
+          const run = readAutonomyRunLedgerRecord(projection.run_ref!, { db: fixture.db });
+          const checkpoints = run?.events.flatMap(event => event.payload?.checkpoint ? [event.payload.checkpoint] : []) ?? [];
+          console.log(JSON.stringify({ check: "scoped_completed_command_cwd", scenario, status: projection.status,
+            reason: projection.public_reason, source_snapshot_distinct: snapshot.root !== fixture.root,
+            checkpoints }));
+          assert.equal(checkpoints.length, 2, "Rejected/replayed observations must not erase or duplicate checkpoints");
+          assert.equal(run?.metadata.root_kind, "plain_folder");
+        }
         const receipts = listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["run_receipt"], limit: 10 });
-        assert.equal(receipts.length, 1);
-        const durable = canonicalizeProtocolValueV01(receipts);
-        assert(durable.includes(snapshot.fingerprint));
-        assert(durable.includes("trusted_local_read_snapshot.v0.1"));
-        assert(durable.includes('snapshot valid: ' + (scenario !== "snapshot_corruption")));
-        assert(durable.includes('original source current at return: ' + (scenario !== "running_source")));
-        assert(durable.includes('host outcome before input validation: completed'));
-        assert(durable.includes(defined.packet.packet_id));
-        assert(!durable.includes(snapshot.root), "physical execution path is local binding, not a portable project root");
-        assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 10 }).length, 1);
+        if (rejectedEvent) {
+          assert.equal(projection.status, "paused");
+          assert.equal(projection.reconciliation_required, true);
+          assert.equal(projection.public_reason, scenario === "cwd_conflict" ? "codex_item_event_conflict" : "codex_approval_path_outside_root");
+          assert.equal(receipts.length, 0);
+          assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 10 }).length, 0);
+        } else {
+          assert.equal(projection.status, scenario === "running_source" ? "blocked" : scenario === "snapshot_corruption" ? "failed" : "completed");
+          assert.equal(receipts.length, 1);
+          const receipt = receipts[0]!.payload as RunReceiptV01;
+          const run = readAutonomyRunLedgerRecord(projection.run_ref!, { db: fixture.db })!;
+          assert(receipt.task_context_packet_ref);
+          assert.equal(receipt.task_context_packet_ref.external_id, defined.packet.packet_id);
+          const originalRootRef = receipt.source_refs.find(ref => ref.ref_type === "project_root_scope");
+          assert.equal(originalRootRef?.external_id, fixture.project_id);
+          assert.equal(originalRootRef?.source_ref, run.metadata.root_fingerprint);
+          const durable = canonicalizeProtocolValueV01(receipts);
+          if (scoped) {
+            const observation = receipt.observations.find(value => value.observation_kind === "source_bound_input_snapshot");
+            assert(observation);
+            assert(observation.source_refs.some(ref => ref.ref_type === "native_host_input_snapshot" && ref.external_id === snapshot.fingerprint));
+            assert(observation.source_refs.some(ref => ref.ref_type === "native_host_input_request_binding" && /^sha256:[a-f0-9]{64}$/u.test(ref.external_id)));
+            assert(observation.source_refs.some(ref => ref.ref_type === "project_root_scope" && ref.source_ref === originalRootRef?.source_ref));
+            assert(durable.includes(snapshot.fingerprint));
+            assert(durable.includes("trusted_local_read_snapshot.v0.1"));
+            assert(durable.includes('snapshot valid: ' + (scenario !== "snapshot_corruption")));
+            assert(durable.includes('original source current at return: ' + (scenario !== "running_source")));
+            assert(durable.includes('host outcome before input validation: completed'));
+          }
+          assert(durable.includes(defined.packet.packet_id));
+          assert(!durable.includes(snapshot.root), "physical execution path is local binding, not a portable project root");
+          if (commandItems) {
+            assert(durable.includes("snapshot-command-item"));
+            assert(durable.includes("host_command_item_completed"));
+          }
+          assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 10 }).length, 1);
+        }
         assert.equal(readFileSync(cleanup, "utf8"), "settled\n");
         const rows = readFileSync(trace, "utf8").trim().split("\n").map(line => JSON.parse(line));
+        if (commandItems) {
+          const commandRows = rows.filter(row => row.kind === "command_cwd_items");
+          assert.equal(commandRows.length, 1);
+          assert.equal(commandRows[0].value.cwd, commandCwd, "Protocol item must retain the explicit cwd under test");
+        }
         for (const row of rows.filter(row => row.kind === "received" && ["thread/start", "turn/start"].includes(row.value.method)))
-          assert.equal(row.value.cwd, snapshot.root);
+          assert.equal(row.value.cwd, scoped ? snapshot.root : fixture.root);
       }
       assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["state_transition_receipt"], limit: 10 }).length, 0);
-      await assert.rejects(service.start({ config: fixture.config, mode: "interactive", operator_mutation: { credential } }), /window_start_refused/);
+      if (scoped) await assert.rejects(service.start({ config: fixture.config, mode: "interactive", operator_mutation: { credential } }), /window_start_refused/);
     } finally {
-      try { await service?.shutdown(); if (snapshotRoot) assert.equal(existsSync(snapshotRoot), false); }
-      finally { fixture.db.close(); }
+      try {
+        await service?.shutdown();
+        for (const scope of scopes) await releaseCodexScopedTaskV01(scope);
+        if (snapshotRoot) assert.equal(existsSync(snapshotRoot), false);
+        for (const pid of processes) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+        if (sessionId) assert(revokeVNextLocalOperatorSessionByIdV01(fixture.db, { config: fixture.config, session_id: sessionId, clock: fixedClock("2026-08-01T00:01:00.000Z") }).revoked_at);
+      } finally { fixture.db.close(); assert.equal(fixture.db.open, false); }
     }
   }
-  console.log("scoped disposable service: normal authenticated admission binds source packet/guide to a distinct snapshot cwd; receipt readback retains snapshot/source-currentness separately; prestart drift refuses, running source drift blocks completion, snapshot corruption invalidates; no Transition/replay; settled snapshots removed; model calls=0");
+  console.log("scoped disposable service: fake App Server command items exercise the real adapter/service, authenticated synthetic admission, receipt/proposal and source/snapshot lineage; cwd aliases/default parity/replay pass; source/foreign snapshot/outside/traversal/forged binding/conflict refuse; checkpoints retained; source drift blocks and snapshot corruption invalidates; processes/sessions/DBs/snapshots settled; model calls=0; no actual task-command execution claimed");
 }
 
 async function assertExecutedReviewedFollowUpV01(): Promise<void> {
