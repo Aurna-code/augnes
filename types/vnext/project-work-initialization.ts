@@ -1,6 +1,9 @@
 import type { TaskContextPacketSelectedEntryV01, TaskContextPacketV01 } from "./task-context-packet";
 import type { ProjectWorkRevisionEligibilityV01 } from "./project-work-revision";
 
+// Shared leaf identity: safe for both task normalization and runtime owners.
+export const AUTHORED_SUCCESSOR_TASK_V01 = "augnes.authored-successor-task.v0.1" as const;
+
 export const PROJECT_WORK_INITIALIZATION_VERSION_V01 =
   "project_work_initialization.v0.1" as const;
 
@@ -15,6 +18,7 @@ export const INITIAL_PROJECT_WORK_LIMITS_V01 = Object.freeze({
 
 export type ProjectWorkInitializationStateV01 =
   | "not_defined"
+  | "defined_successor_work"
   | "defined_initial_work"
   | "defined_revised_work"
   | "defined_transition_work"
@@ -39,6 +43,7 @@ export interface ProjectWorkInitializationV01 {
    */
   reason:
     | "zero_durable_work_history"
+    | "current_successor_packet"
     | "current_initial_packet"
     | "current_revision_packet"
     | "current_transition_packet"
@@ -65,6 +70,7 @@ export interface ProjectWorkInitializationV01 {
     lineage_kind:
       | "initial_user_defined"
       | "pre_execution_user_revision"
+      | "authored_successor_task"
       | "semantic_transition"
       | "source_linked_operational_continuation";
   };

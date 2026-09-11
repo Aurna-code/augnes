@@ -55,6 +55,7 @@ export const ProjectionSchema = z.object({
     lineage_kind: z.enum([
       "initial_user_defined",
       "pre_execution_user_revision",
+      "authored_successor_task",
       "semantic_transition",
       "source_linked_operational_continuation",
     ]).nullable(),

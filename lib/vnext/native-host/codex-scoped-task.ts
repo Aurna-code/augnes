@@ -1,3 +1,4 @@
+import { AUTHORED_SUCCESSOR_TASK_V01, assertAuthoredSuccessorInventoryV01 } from "@/lib/vnext/authored-successor-task";
 import { createHash } from "node:crypto";
 import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -8,9 +9,10 @@ import { canonicalizeProtocolValueV01, createProtocolSha256V01 } from "@/lib/vne
 import { inspectNativeHostPhysicalRootIdentityV01 } from "@/lib/vnext/native-host/project-root-identity";
 import { selectPinnedCodexQualifiedRuntimeV01 } from "./codex-qualified-runtime-registry";
 import { CODEX_SCOPED_CODE_MODE_PROFILE_FINGERPRINT_V01 } from "./codex-managed-runtime-store";
-import type { NativeHostPhysicalRootIdentityV01, NativeHostRequestV01 } from "@/types/vnext/native-host-adapter";
+import type { NativeHostPhysicalRootIdentityV01, NativeHostRequestV01, NativeHostRootScopeV01 } from "@/types/vnext/native-host-adapter";
 import type { NativeHostTimeoutSchedulerV01 } from "@/lib/vnext/runtime/direct-native-host-round-trip";
 import type Database from "better-sqlite3";
+import type { TaskContextPacketV01 } from "@/types/vnext/task-context-packet";
 import { preparePersistedCodexContinuationV01, type PersistedCodexContinuationInputV01 } from "@/lib/vnext/runtime/persisted-codex-continuation";
 
 // An application-local restriction. It is never serialized as an authority
@@ -27,6 +29,7 @@ interface StageMaterial {
   packet_fingerprint: string;
   guide_brief_fingerprint: string;
   files: readonly Readonly<{ relative_path: string; sha256: string }>[];
+  historical_files?: readonly Readonly<{ relative_path: string; sha256: string }>[];
   approved_instruction_files: readonly Readonly<{ path: string; sha256: string }>[];
   snapshot: CodexScopedSnapshotV01;
 }
@@ -122,6 +125,8 @@ export async function createCodexScopedTaskV01(input: {
   packet_fingerprint: string;
   guide_brief_fingerprint: string;
   files: readonly Readonly<{ relative_path: string; sha256: string }>[];
+  /** Authored successor only: retained source material excluded from execution. */
+  historical_files?: readonly Readonly<{ relative_path: string; sha256: string }>[];
   approved_instruction_files?: readonly Readonly<{ path: string; sha256: string }>[];
 }): Promise<CodexScopedTaskV01> {
   if (![1, 2].includes(input.stage) || !input.packet_id || !/^sha256:[a-f0-9]{64}$/u.test(input.packet_fingerprint) ||
@@ -133,16 +138,18 @@ export async function createCodexScopedTaskV01(input: {
     packet_id: input.packet_id, packet_fingerprint: input.packet_fingerprint,
     guide_brief_fingerprint: input.guide_brief_fingerprint,
     files: structuredClone(input.files),
+    ...(input.historical_files ? { historical_files: structuredClone(input.historical_files) } : {}),
     approved_instruction_files: structuredClone(input.approved_instruction_files ?? []),
   };
   // Flat, exact files are sufficient for this case and exclude config/skill
   // directories and symlink traversal. No parent-directory read grant is made.
-  if (source.files.some(f => !/^[A-Za-z0-9][A-Za-z0-9_-]*\.(?:json|md|txt)$/u.test(f.relative_path) ||
+  const sourceFiles = [...source.files, ...(source.historical_files ?? [])];
+  if (sourceFiles.length > 8 || sourceFiles.some(f => !/^[A-Za-z0-9][A-Za-z0-9_-]*\.(?:json|md|txt)$/u.test(f.relative_path) ||
     /^(?:AGENTS|CLAUDE)\./iu.test(f.relative_path) || !/^[a-f0-9]{64}$/u.test(f.sha256)) ||
-    new Set(source.files.map(f => f.relative_path)).size !== source.files.length ||
+    new Set(sourceFiles.map(f => f.relative_path)).size !== sourceFiles.length ||
     source.approved_instruction_files.length > 4 || source.approved_instruction_files.some(f =>
       !path.isAbsolute(f.path) || !/^[a-f0-9]{64}$/u.test(f.sha256))) refuse("files_invalid");
-  assertInventory(source.root, source.files);
+  assertInventory(source.root, sourceFiles);
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "augnes-scoped-input-")));
   let scope: CodexScopedTaskV01 | undefined;
   try {
@@ -210,6 +217,15 @@ export async function bindCodexScopedRequestV01(scope: CodexScopedTaskV01, reque
     source_root_ref: request.root_scope.root_scope_ref, snapshot: material(scope).snapshot.fingerprint,
   })) }));
 }
+/** Read-only handoff admission, before the executor records a new run claim. */
+export async function assertCodexAuthoredSuccessorScopeV01(scope: CodexScopedTaskV01, packet: TaskContextPacketV01, root: NativeHostRootScopeV01): Promise<void> {
+  await assertCodexScopedTaskCurrentV01(scope);
+  const m = material(scope);
+  if (m.packet_id !== packet.packet_id || m.packet_fingerprint !== packet.integrity.fingerprint ||
+    m.root !== root.canonical_root || !equal(m.physical, root.physical_root_identity)) refuse("request_binding_mismatch");
+  assertAuthoredSuccessorInventoryV01(packet, { files: m.files, historical_files: m.historical_files ?? [],
+    approved_instruction_hashes: m.approved_instruction_files.map(f => f.sha256) });
+}
 export function readCodexScopedRequestBindingV01(scope: CodexScopedTaskV01, request: NativeHostRequestV01): string {
   const binding = requestBindings.get(scope);
   if (!binding || binding.request_fingerprint !== createProtocolSha256V01(canonicalizeProtocolValueV01(request))) refuse("snapshot_request_binding_missing");
@@ -223,9 +239,15 @@ export async function assertCodexScopedTaskCurrentV01(scope: CodexScopedTaskV01,
 export async function assertCodexScopedSourceCurrentV01(scope: CodexScopedTaskV01, request?: NativeHostRequestV01): Promise<void> {
   const m = material(scope);
   if (!equal(await inspectNativeHostPhysicalRootIdentityV01(m.root), m.physical)) refuse("root_changed");
-  assertInventory(m.root, m.files);
+  assertInventory(m.root, [...m.files, ...(m.historical_files ?? [])]);
   for (const f of m.approved_instruction_files) if (digest(fileBytes(f.path)) !== f.sha256) refuse("instruction_hash_changed");
   if (!request) return;
+  const authored = request.packet.compatibility.source_contracts.includes(AUTHORED_SUCCESSOR_TASK_V01);
+  if (authored || m.historical_files) {
+    assertAuthoredSuccessorInventoryV01(request.packet, { files: m.files, historical_files: m.historical_files ?? [], approved_instruction_hashes: m.approved_instruction_files.map(f => f.sha256) });
+    if (!("source_transition_receipt_ref" in request.packet_lineage) &&
+      (!("lineage_kind" in request.packet_lineage) || request.packet_lineage.lineage_kind !== "authored_successor_task")) refuse("request_binding_mismatch");
+  }
   if (request.mode !== "interactive" || request.automation_context || request.repository_delegation_context ||
     request.repository_resume_context || request.execution_grant_ref || request.packet_capability_grant ||
     request.root_scope.root_kind !== "plain_folder" || request.root_scope.canonical_root !== m.root ||
@@ -236,7 +258,7 @@ export async function assertCodexScopedSourceCurrentV01(scope: CodexScopedTaskV0
     request.policy.filesystem !== "selected_project_root_only" || request.policy.model !== "native_host_managed" ||
     !request.allowed_operation_categories.includes("read_validated_task_context") ||
     !request.allowed_operation_categories.includes("return_bounded_structured_result") ||
-    (m.stage === 2 && (!("source_transition_receipt_ref" in request.packet_lineage) || !request.packet_lineage.source_transition_receipt_ref))) refuse("request_binding_mismatch");
+    (m.stage === 2 && !authored && (!("source_transition_receipt_ref" in request.packet_lineage) || !request.packet_lineage.source_transition_receipt_ref))) refuse("request_binding_mismatch");
 }
 
 // Pin only the small extension's controls, not the historical qualification

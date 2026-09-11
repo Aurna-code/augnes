@@ -1,3 +1,5 @@
+import { AUTHORED_SUCCESSOR_TASK_V01 } from "@/lib/vnext/authored-successor-task";
+import { isStandaloneAuthoredSuccessorV01 } from "@/lib/vnext/runtime/authored-successor-task";
 import { TextDecoder } from "node:util";
 import { randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, rmdirSync } from "node:fs";
@@ -1055,7 +1057,11 @@ function readPortableOperatorProvenanceSessionsV01(
       );
     } else if (record.record_kind === "task_context_packet") {
       const packet = record.payload as TaskContextPacketV01;
-      if (
+      if (isStandaloneAuthoredSuccessorV01(packet)) {
+        provenanceRequired = true;
+        const action = packet.selected_context.find(e => e.entry_id === AUTHORED_SUCCESSOR_TASK_V01)?.compatibility_source_ref;
+        refs = action?.ref_type === "local_operator_session_action" ? [action] : [];
+      } else if (
         initialProjectWorkIdempotencyKeyV01(packet) !== null ||
         preExecutionProjectWorkRevisionIdempotencyKeyV01(packet) !== null
       ) {

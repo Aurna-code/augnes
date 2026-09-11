@@ -772,7 +772,13 @@ execution with failed criterion verification is eligible predecessor evidence,
 not semantic acceptance. Paused/unresolved state, mismatches and a later run
 refuse. The unknown-operation original candidate remains non-transitionable.
 
-Trusted disposable orchestration uses this sequence (no HTTP/worker flag):
+This is a **same-task** continuation owner. Its task-equality rule is not a
+blanket restriction on explicitly authored successor tasks. The retained live
+continuation subsequently consumed its allowance while preserving an X-only
+task; native completion did not establish B comparison. Do not replay this
+sequence against that consumed disposition.
+
+Trusted disposable same-task orchestration uses this sequence (no HTTP/worker flag):
 
 1. Open the completed study DB through its normal lifecycle and call the
    factory with its real config, receipt ID and original proposal ID. This is
@@ -824,6 +830,75 @@ the real frozen clarification nor runs X, B or Y. Historical failed checks,
 attested reads, user-declaration boundaries and all original evidence remain
 unchanged. Review/merge, deployment and a new explicit continuation dispatch
 remain separate from this implementation and its model-free verification.
+
+## Authored successor handoff after the consumed continuation (#1234)
+
+The retained prefix is completed X, applied clarification, later packet,
+completed B-intended/X-repeat run, and consumed continuation. No new clarification
+or Transition is needed to author a successor. The old three-file/X-only task
+and original TASK.md remain immutable historical evidence. Merely selecting
+accepted context mentioning B or copying B into a snapshot is not a B handoff.
+
+The prospective local sequence after review/merge and separate deployment is:
+
+1. Read the actual current packet and latest settled receipt through normal
+   owners, including their fingerprints, active selection and source/root
+   binding. Never pick a different receipt to renew a consumed allowance.
+2. With separate explicit task-authoring authority, call
+   `defineAuthoredSuccessorTaskV01` using normal operator credentials. Author a
+   calibration-B objective, comparison criteria/check IDs and stop conditions
+   (retain clarified X scope/uncertainty, no X repeat, no Y). Declare B's exact
+   task-data hash and the original files as historical material. The packet's
+   task is the current instruction; historical TASK.md is not copied or edited.
+   Do not supply the expected comparison outcome. Reference values belong in
+   the artifact to be checked. Approved generic host-instruction hashes are
+   separately bound; these must not contradict the reviewed task.
+3. Inspect the returned definition and normal continuity readback. The owner
+   appends a new work-definition/packet identity, retains accepted context and
+   its actual Transition references, and links the latest result without
+   accepting its proposal. Stale/duplicate authorship refuses. Existing
+   semantic compilation remains a same-task context update.
+   Consecutive authored tasks inherit revalidated semantic/context validity
+   separately from task supersession. The newest exact successor can be current
+   while its predecessor is historical; changed accepted context still makes
+   the successor stale. The writer checks compiled currentness before commit.
+4. `prepareAuthoredSuccessorHandoffV01` normally admits that exact packet and
+   GuideBrief and creates a genuine source-bound snapshot of task data only.
+   It rejects an old X-only packet, changed source/hash/root, or unbound
+   instruction inventory before any Start or adapter invocation. It creates
+   **no window or execution authority**. The old continuation remains consumed.
+5. A later live dispatch must separately authorize one new bounded invocation.
+   The existing authenticated `runDirectNativeHostRoundTripV01` consumer accepts
+   this prepared scope with its genuine cached recording adapter; it refuses a
+   missing scope, wrong adapter or resume before claiming a run. Its normal
+   request, result and receipt owners remain in control. Do not pass the scope
+   to the consumed coordinator, relabel it stage 1, or invent a window. Preserve
+   the requested model/effort, existing execution/RPC/settlement limits and
+   explicit single-attempt authorization. Always settle consumers before
+   releasing the snapshot and closing the disposable session/DB.
+
+Model-free coverage reproduces the X-only conflict through normal synthetic
+revision/Transition and the real adapter/service consumer, then checks an
+authored successor's exact serialized packet, GuideBrief, roles and snapshot
+using the existing fixed fake App Server. Its X-only response deliberately
+omits the calibration check; native completion remains separate from comparison
+completion. The required-check list binds verification obligations; this
+profile does not reuse the unrelated project-root criterion-verification plan.
+Reported checks/file reads retain their actual evidence basis. Structural
+consistency cannot detect every contradiction in authored prose or task data;
+review the exact handoff rather than claiming automatic semantic validation.
+
+One supporting-serial child covers this handoff with its own 30-second ceiling;
+legacy initialization/continuation ceilings and cases are unchanged. This adds
+30 seconds to aggregate permitted child time, not a speedup. No live runtime,
+helper or study execution is part of this fixture. The change adds no dependency,
+Core migration, allowance-renewal mechanism, or automatic recovery. Older source
+does not understand the new lineage: preserve data and use the compatible
+reader instead of deleting packets or deploying an older reader over them.
+
+This amendment is prospective. It does not modify the real prefix, activate a
+successor, grant a live attempt, accept the later proposal, or establish B/X/Y
+success, stronger file attribution, or P5.1 usefulness.
 
 ## Trusted-local snapshot connection (#1241, revised product scope)
 

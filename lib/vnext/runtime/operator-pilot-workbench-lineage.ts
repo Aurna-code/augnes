@@ -1,3 +1,4 @@
+import { authoredSuccessorPacketIdempotencyKeyV01, inspectAuthoredSuccessorPacketV01, isStandaloneAuthoredSuccessorV01 } from "./authored-successor-task";
 import type Database from "better-sqlite3";
 
 import {
@@ -307,12 +308,17 @@ function loadValidatedCompiledPackets(
       record_id: packet.packet_id,
       fingerprint: packet.integrity.fingerprint,
       idempotency_key:
+        authoredSuccessorPacketIdempotencyKeyV01(packet) ??
         initialProjectWorkIdempotencyKeyV01(packet) ??
         preExecutionProjectWorkRevisionIdempotencyKeyV01(packet),
       created_at: packet.generated_at,
       workspace_id: packet.workspace_id,
       project_id: packet.project_id,
     });
+    if (isStandaloneAuthoredSuccessorV01(packet)) {
+      inspectAuthoredSuccessorPacketV01(db, { config, packet });
+      continue;
+    }
     if (
       !packet.compatibility.source_contracts.includes(
         VNEXT_PERSISTED_SEMANTIC_CONTEXT_COMPILER_VERSION_V01,

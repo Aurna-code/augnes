@@ -578,6 +578,36 @@ unchanged. Portable project v0.1, backup, restore, and recovery preserve and
 canonically revalidate the entire chain without a schema or portable-contract
 version bump.
 
+#### Explicit post-execution task authorship
+
+The local `augnes.authored-successor-task.v0.1` compiler appends a new task
+definition after an exact settled result. `defineAuthoredSuccessorTaskV01`
+uses normal operator authentication and compare-and-set current packet,
+latest receipt, active project selection, and original root bindings. It
+creates a new work-definition identity and TaskContextPacket, not a new Core
+record kind, Decision, Transition, execution window, or allowance. Failed
+criterion verification does not invalidate completed execution evidence.
+Authorship requires the actual settled local run. Recovery and portable readers
+revalidate the retained receipt and authenticated authorship without rebuilding
+a machine-local run or granting execution on a different root.
+
+Accepted context retains its original Transition lineage; the latest settled
+result remains evidence and its proposal remains unreviewed. Current goal,
+criteria/check identifiers and stop conditions come from the explicit authored
+definition. Prior task instructions remain historical references, not current
+commands. The normal semantic compiler still preserves the task while updating
+context; accepted-state prose never implicitly authors another task.
+
+This bounded read-only profile declares exact task-data and historical-material
+paths/hashes plus approved host-instruction hashes. Only task data enters its
+snapshot. Source inventory/currentness still covers retained historical files.
+Normal request admission requires a genuine scope-bound adapter and checks the
+declared roles before recording a run claim; the ordinary whole-root route
+refuses this profile. Definition consistency is structural, not comprehensive
+natural-language contradiction detection. The authored handoff requires exact
+user review, and execution requires separate authority. A native-completed
+result missing a required comparison check is not verified task completion.
+
 #### Trusted-local read-only input snapshots
 
 An explicitly selected local host profile may execute independent copies of

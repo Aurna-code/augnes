@@ -310,7 +310,7 @@ function readProjectWorkInitializationStrictV01(
   // A sparse predecessor may still select only current state. Work succession
   // comes from validated packet lineage, not equality with all canonical state.
   const semanticPredecessors = new Set(inspected.flatMap((entry) =>
-    entry.lineage_kind === "semantic_transition" && entry.prior_packet
+    (entry.lineage_kind === "semantic_transition" || entry.lineage_kind === "authored_successor_task") && entry.prior_packet
       ? [`${entry.prior_packet.packet_id}|${entry.prior_packet.packet_fingerprint}`]
       : [],
   ));
@@ -349,6 +349,7 @@ function readProjectWorkInitializationStrictV01(
     !invalidBlocksCurrent
   ) {
     const state =
+      current.lineage_kind === "authored_successor_task" ? "defined_successor_work" :
       current.lineage_kind === "initial_user_defined"
         ? "defined_initial_work"
         : current.lineage_kind === "pre_execution_user_revision"
@@ -357,6 +358,7 @@ function readProjectWorkInitializationStrictV01(
             ? "defined_transition_work"
             : "defined_operational_continuation_work";
     const reason =
+      current.lineage_kind === "authored_successor_task" ? "current_successor_packet" :
       current.lineage_kind === "initial_user_defined"
         ? "current_initial_packet"
         : current.lineage_kind === "pre_execution_user_revision"
