@@ -86,7 +86,7 @@ import { recordVNextOperatorPilotProposalRevisionV01 } from "../lib/vnext/runtim
 import { readVNextOperatorPilotSemanticReviewV01, recordVNextOperatorPilotReviewDecisionV01 } from "../lib/vnext/runtime/operator-pilot-review-material";
 import { prepareVNextOperatorPilotSemanticCommitPreviewV01, confirmVNextOperatorPilotSemanticCommitV01, applyVNextOperatorPilotReviewedSemanticTransitionV01 } from "../lib/vnext/runtime/operator-pilot-semantic-transition";
 import { createEpisodeDeltaCandidateFingerprintV01 } from "../lib/vnext/review-decision";
-import { projectVNextOperatorPilotContinuityV01 } from "../lib/vnext/runtime/operator-pilot-project-continuity";
+import { inspectVNextOperatorPilotPacketLineageV01, projectVNextOperatorPilotContinuityV01 } from "../lib/vnext/runtime/operator-pilot-project-continuity";
 import { readVNextOperatorPilotProposalDurableLineageV01 } from "../lib/vnext/runtime/operator-pilot-workbench-lineage";
 import { readSharedProjectInspectorV01 } from "../lib/vnext/runtime/shared-project-inspector";
 import type { EpisodeDeltaProposalV01 } from "../types/vnext/episode-delta-proposal";
@@ -962,12 +962,6 @@ async function assertPersistedScopedContinuationV01(scenarios: readonly string[]
         const sent = readFileSync(successorTrace, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(row => row.kind === "received" && row.value.method === "turn/start")!.value;
         assert(!canonicalizeProtocolValueV01(finalRequest.packet).includes(initial.packet.task.goal), "The historical X instruction is not active in the successor request");
         assert.equal(readProjectWorkInitializationV01(fixture.db, fixture).state, "defined_successor_work");
-        const recovery = validateRecoveryCanonicalDatabaseV01(fixture.db);
-        assert.equal(recovery.status, "valid", recovery.code);
-        const portable = parseAndValidatePortableProjectV01(exportActivePortableProjectV01(fixture.db,
-          { include_personal_perspective: false }).bytes);
-        assert(portable.records.some(r => r.record_id === authored.packet.packet_id));
-        assert(portable.operator_provenance_sessions.some(s => s.session_id === sessionId));
         assert.equal(successorFakeLaunches, 1);
         assert.equal(sent.packet_payload_sha256, createProtocolSha256V01(canonicalizeProtocolValueV01(finalRequest.packet)));
         assert.equal(sent.packet_fingerprint, authored.packet.integrity.fingerprint);
@@ -976,6 +970,100 @@ async function assertPersistedScopedContinuationV01(scenarios: readonly string[]
         assert(next.receipt.verification.required_check_ids.includes("calibration_comparison_completed"));
         assert(next.receipt.skipped_checks.some(c => c.check_id === "calibration_comparison_completed"));
         assert.equal(readFileSync(oldDispositionPath, "utf8"), consumedDisposition);
+        // A settled authored task can be followed by another explicit authored
+        // task without changing accepted context or replaying its Transition.
+        const beforeSecond = listVNextCoreRecordsV01(fixture.db, { ...fixture,
+          record_kinds: ["episode_delta_proposal", "review_decision", "state_transition_receipt", "run_receipt"], limit: 100 });
+        const second = await defineAuthoredSuccessorTaskV01(fixture.db, { config: fixture.config, credential,
+          request: { ...handoffRequest, expected_current_packet_id: authored.packet.packet_id,
+            expected_current_packet_fingerprint: authored.packet.integrity.fingerprint,
+            expected_latest_receipt_id: next.receipt.receipt_id,
+            expected_latest_receipt_fingerprint: next.receipt.integrity.fingerprint,
+            definition: { ...handoffRequest.definition, objective: "Check calibration-B.json against its reference in a new explicitly authored task. Preserve the accepted X scope and uncertainty; leave Y untested." } },
+          clock: { now: () => new Date().toISOString() } });
+        credential = credentialFromCookieV01(second.session_admission.cookie_value);
+        const secondBinding = { config: fixture.config, packet_id: second.packet.packet_id, packet_fingerprint: second.packet.integrity.fingerprint };
+        const secondLineage = inspectVNextOperatorPilotPacketLineageV01(fixture.db, secondBinding);
+        const secondContinuity = projectVNextOperatorPilotContinuityV01(fixture.db, { config: fixture.config });
+        const secondInitialization = readProjectWorkInitializationV01(fixture.db, fixture);
+        console.log(JSON.stringify({ consecutive_successor: { first: authored.packet.packet_id, settled_receipt: next.receipt.receipt_id,
+          second: second.packet.packet_id, inserted: second.status, projection_current: secondLineage.projection_current,
+          continuity_currentness: secondContinuity.packet_currentness, initialization: secondInitialization.state } }));
+        assert.equal(secondLineage.projection_current, true, "The newest authored successor inherits accepted-context validity, not its predecessor's supersession");
+        assert.equal(secondContinuity.latest_compiled_packet?.packet_id, second.packet.packet_id);
+        assert.equal(secondContinuity.packet_currentness, "fresh");
+        assert.equal(secondInitialization.state, "defined_successor_work");
+        assert.equal(secondInitialization.current_packet?.packet_id, second.packet.packet_id);
+        const secondHandoff = await prepareAuthoredSuccessorHandoffV01(fixture.db, secondBinding); scopes.push(secondHandoff.scope);
+        assert.deepEqual(secondHandoff.admission.packet, second.packet);
+        assert.equal(secondHandoff.guide.current_goal, second.packet.task.goal);
+        assert.equal(secondHandoff.execution_authority_granted, false);
+        assert.equal(secondHandoff.execution_window_created, false);
+        assert.notDeepEqual(second.packet.work_ref, authored.packet.work_ref);
+        assert.deepEqual(second.packet.selected_context.filter(e => e.entry_kind === "accepted_state_ref"),
+          prepared.admission.packet.selected_context.filter(e => e.entry_kind === "accepted_state_ref"));
+        assert.deepEqual(second.packet.compatibility.source_refs.filter(r => r.ref_type === "state_transition_receipt"), transitionRefs);
+        for (const old of [initial.packet, prepared.admission.packet, authored.packet]) {
+          await assert.rejects(prepareAuthoredSuccessorHandoffV01(fixture.db, { config: fixture.config,
+            packet_id: old.packet_id, packet_fingerprint: old.integrity.fingerprint }), /stale|superseded/);
+        }
+        const firstLineage = inspectVNextOperatorPilotPacketLineageV01(fixture.db, packetBinding);
+        assert.equal(firstLineage.lineage_kind, "authored_successor_task");
+        assert(firstLineage.lineage_kind === "authored_successor_task");
+        assert.equal(firstLineage.inherited_context_current, true);
+        assert.equal(firstLineage.projection_current, false);
+        await assert.rejects(defineAuthoredSuccessorTaskV01(fixture.db, { config: fixture.config, credential,
+          request: { ...handoffRequest, expected_current_packet_id: authored.packet.packet_id,
+            expected_current_packet_fingerprint: authored.packet.integrity.fingerprint,
+            expected_latest_receipt_id: next.receipt.receipt_id, expected_latest_receipt_fingerprint: next.receipt.integrity.fingerprint } }), /stale|superseded/);
+        await assert.rejects(prepareAuthoredSuccessorHandoffV01(fixture.db, { ...secondBinding,
+          packet_fingerprint: authored.packet.integrity.fingerprint }), /fingerprint_mismatch/);
+        assert.deepEqual(listVNextCoreRecordsV01(fixture.db, { ...fixture,
+          record_kinds: ["episode_delta_proposal", "review_decision", "state_transition_receipt", "run_receipt"], limit: 100 }), beforeSecond);
+        assert.equal(readFileSync(oldDispositionPath, "utf8"), consumedDisposition);
+        const recovery = validateRecoveryCanonicalDatabaseV01(fixture.db);
+        assert.equal(recovery.status, "valid", recovery.code);
+        const portable = parseAndValidatePortableProjectV01(exportActivePortableProjectV01(fixture.db,
+          { include_personal_perspective: false }).bytes);
+        for (const packet of [authored.packet, second.packet]) assert(portable.records.some(r => r.record_id === packet.packet_id));
+        assert(portable.operator_provenance_sessions.some(s => s.session_id === sessionId));
+        // Separate negative: genuinely revise the selected accepted state via
+        // normal review/Transition owners. Task supersession must not hide this
+        // semantic drift. This does not prepare S2 or accept its result.
+        assert(laterProposal.status === "available");
+        const driftSource = readVNextOperatorPilotSemanticReviewV01(fixture.db, { config: fixture.config,
+          proposal_id: laterProposal.proposal_id, authenticated_session_id: credential.session_id });
+        const driftCandidate = driftSource.candidates[0]!;
+        const driftRevision = recordVNextOperatorPilotProposalRevisionV01(fixture.db, { config: fixture.config, credential,
+          request: { ...revision, proposal_id: driftSource.proposal.proposal_id, proposal_fingerprint: driftSource.proposal_fingerprint,
+            candidate_id: driftCandidate.candidate.candidate_id, candidate_fingerprint: driftCandidate.candidate_fingerprint,
+            operation: "revise", proposed_state_summary: "A separate synthetic user declaration changes the previously selected state." } });
+        credential = credentialFromCookieV01(driftRevision.session_cookie.value);
+        const driftDelta = driftRevision.proposal.proposed_deltas[0]!;
+        const driftDecision = recordVNextOperatorPilotReviewDecisionV01(fixture.db, { config: fixture.config, credential,
+          request: { ...decisionRequest, proposal_id: driftRevision.proposal.proposal_id, proposal_fingerprint: driftRevision.proposal.integrity.fingerprint,
+            candidate_id: driftDelta.candidate_id, candidate_fingerprint: createEpisodeDeltaCandidateFingerprintV01(driftDelta) } });
+        credential = credentialFromCookieV01(driftDecision.session_cookie.value);
+        const driftBinding = { proposal_id: driftRevision.proposal.proposal_id, proposal_fingerprint: driftRevision.proposal.integrity.fingerprint,
+          decision_id: driftDecision.decision.decision_id, decision_fingerprint: driftDecision.decision.integrity.fingerprint };
+        const driftPreview = prepareVNextOperatorPilotSemanticCommitPreviewV01(fixture.db, { config: fixture.config, credential, request: driftBinding });
+        const driftGate = confirmVNextOperatorPilotSemanticCommitV01(fixture.db, { config: fixture.config, credential,
+          request: { ...driftBinding, confirmation_digest: driftPreview.preview.confirmation_digest }, preview_binding_cookie: driftPreview.preview_binding_cookie });
+        credential = credentialFromCookieV01(driftGate.session_admission.cookie_value);
+        const driftApplied = applyVNextOperatorPilotReviewedSemanticTransitionV01(fixture.db, { config: fixture.config, credential,
+          request: { ...driftBinding, gate_record_id: driftGate.gate_record.gate_record_id, gate_record_fingerprint: driftGate.gate_record.integrity.fingerprint,
+            prior_packet_id: prepared.admission.packet.packet_id, prior_packet_fingerprint: prepared.admission.packet.integrity.fingerprint } });
+        credential = credentialFromCookieV01(driftApplied.session_admission.cookie_value);
+        assert.equal(driftApplied.status, "applied");
+        const staleSecond = inspectVNextOperatorPilotPacketLineageV01(fixture.db, secondBinding);
+        assert(staleSecond.lineage_kind === "authored_successor_task");
+        assert.equal(staleSecond.inherited_context_current, false);
+        assert.equal(staleSecond.projection_current, false);
+        await assert.rejects(prepareAuthoredSuccessorHandoffV01(fixture.db, secondBinding), /direct_host_packet_stale/);
+        assert.equal(successorFakeLaunches, 1, "S2 admission and stale refusal launch no worker");
+        assert.equal(readFileSync(oldDispositionPath, "utf8"), consumedDisposition);
+        console.log(JSON.stringify({ consecutive_successor_checks: "passed", historical_admission: "refused", changed_accepted_context: "refused",
+          recovery_and_portable: "valid", semantic_prefix_unchanged_by_authorship: true, second_worker_launches: 0 }));
         console.log(JSON.stringify({ authored_successor: "passed", old_allowance: "consumed_unchanged", task_goal: finalRequest.packet.task.goal,
           task_checks: finalRequest.packet.constraints.required_checks, snapshot_files: successorSnapshot.files.map(f => f.relative_path),
           serialized_packet_sha256: sent.packet_payload_sha256, native_only_result_verification: next.receipt.verification.status, successor_fake_launches: successorFakeLaunches,

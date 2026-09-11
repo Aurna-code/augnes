@@ -858,6 +858,10 @@ The prospective local sequence after review/merge and separate deployment is:
    its actual Transition references, and links the latest result without
    accepting its proposal. Stale/duplicate authorship refuses. Existing
    semantic compilation remains a same-task context update.
+   Consecutive authored tasks inherit revalidated semantic/context validity
+   separately from task supersession. The newest exact successor can be current
+   while its predecessor is historical; changed accepted context still makes
+   the successor stale. The writer checks compiled currentness before commit.
 4. `prepareAuthoredSuccessorHandoffV01` normally admits that exact packet and
    GuideBrief and creates a genuine source-bound snapshot of task data only.
    It rejects an old X-only packet, changed source/hash/root, or unbound

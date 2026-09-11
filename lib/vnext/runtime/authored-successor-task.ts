@@ -45,6 +45,7 @@ export interface AuthoredSuccessorPacketLineageV01 {
   lineage_kind: "authored_successor_task";
   packet: TaskContextPacketV01;
   prior_packet: { packet_id: string; packet_fingerprint: string };
+  inherited_context_current: boolean;
   projection_current: boolean;
   source_transition_receipt: null;
   successor_definition_ref: ExternalRefV01;
@@ -168,7 +169,7 @@ export async function defineAuthoredSuccessorTaskV01(db: Database.Database, inpu
     const write = insertVNextCoreRecordV01(db, { record_kind: "task_context_packet", record_id: built.packet.packet_id,
       workspace_id: input.config.workspace_id, project_id: input.config.project_id, fingerprint: built.packet.integrity.fingerprint,
       idempotency_key: digest({ action: ACTION, prior: predecessor.packet.integrity.fingerprint, request }), payload: built.packet, created_at: built.packet.generated_at });
-    inspectAuthoredSuccessorPacketV01(db, { config: input.config, packet: built.packet });
+    check(inspectAuthoredSuccessorPacketV01(db, { config: input.config, packet: built.packet }).projection_current, "compiled_packet_stale");
     db.exec("COMMIT");
     return { status: write.status, packet: built.packet, session_admission: auth, execution_authority_granted: false as const, semantic_transition_created: false as const };
   } catch (error) { if (db.inTransaction) db.exec("ROLLBACK"); throw error; }
@@ -195,10 +196,15 @@ export function inspectAuthoredSuccessorPacketV01(db: Database.Database, input: 
     packet_id: prior.packet.packet_id, packet_fingerprint: prior.packet.integrity.fingerprint });
   const expected = build({ prior: prior.packet, receipt: prior.receipt, material, operator_id: session.operator_id, at: packet.generated_at });
   check(equal(expected.packet, packet), "compiler_binding");
-  // Prior currentness becomes false through this explicit supersession. Compare
-  // the accepted context with the actual semantic projection in the common owner.
+  // An authored predecessor is historical as soon as its successor exists.
+  // Inherit its independently revalidated context, not that task-supersession
+  // flag. The first non-authored ancestor still checks actual semantic state
+  // through the common lineage owner on every read.
+  const inheritedContextCurrent = lineage.lineage_kind === "authored_successor_task"
+    ? lineage.inherited_context_current : lineage.projection_current;
   return { ...expected, lineage_kind: "authored_successor_task", prior_packet: { packet_id: prior.packet.packet_id, packet_fingerprint: prior.packet.integrity.fingerprint },
-    projection_current: lineage.projection_current && !hasAuthoredSuccessorOfPacketV01(db, input.config, packet.packet_id), source_transition_receipt: null };
+    inherited_context_current: inheritedContextCurrent,
+    projection_current: inheritedContextCurrent && !hasAuthoredSuccessorOfPacketV01(db, input.config, packet.packet_id), source_transition_receipt: null };
 }
 
 export function hasAuthoredSuccessorOfPacketV01(db: Database.Database, config: Pick<VNextLocalOperatorPilotConfigV01, "workspace_id" | "project_id">, packetId: string): boolean {
