@@ -1,3 +1,4 @@
+import { authoredSuccessorPacketIdempotencyKeyV01, inspectAuthoredSuccessorPacketV01, isStandaloneAuthoredSuccessorV01 } from "../lib/vnext/runtime/authored-successor-task";
 import type Database from "better-sqlite3";
 
 import { validateBoundedAutomationCapabilityGrantV01 } from "../lib/vnext/bounded-automation-cycle";
@@ -586,6 +587,7 @@ function validatePayloadAndEnvelopeV01(record: ParsedCanonicalRecordV01): void {
         project_id: payload.project_id,
         fingerprint: exactFingerprintV01(payload),
         idempotency_key:
+          authoredSuccessorPacketIdempotencyKeyV01(payload as unknown as TaskContextPacketV01) ??
           initialProjectWorkIdempotencyKeyV01(
             payload as unknown as TaskContextPacketV01,
           ) ??
@@ -864,6 +866,11 @@ function validateCompiledTaskContextPacketRelationV01(
   byIdentity: Map<string, ParsedCanonicalRecordV01>,
 ): void {
   const packet = record.payload as unknown as TaskContextPacketV01;
+  if (isStandaloneAuthoredSuccessorV01(packet)) {
+    inspectAuthoredSuccessorPacketV01(db, { packet, config: { enabled: true, workspace_id: record.workspace_id,
+      project_id: record.project_id, operator_id: "recovery-read", database_path: db.name } });
+    return;
+  }
   if (
     packet.compatibility.source_contracts.includes(
       SOURCE_LINKED_OPERATIONAL_CONTINUATION_VERSION_V01,

@@ -106,6 +106,15 @@ export interface NativeHostAutomationContextV01 {
 
 export type NativeHostPacketLineageV01 =
   | {
+      lineage_kind: "authored_successor_task";
+      successor_definition_ref: ExternalRefV01;
+      operator_action_ref: ExternalRefV01;
+      immediate_prior_packet_ref: ExternalRefV01;
+      predecessor_receipt_ref: ExternalRefV01;
+      packet_source_refs: ExternalRefV01[];
+      selected_context_refs: ExternalRefV01[];
+    }
+  | {
       /** Historical v0.1 transition-derived shape remains byte-compatible. */
       source_transition_receipt_ref: ExternalRefV01;
       packet_source_refs: ExternalRefV01[];

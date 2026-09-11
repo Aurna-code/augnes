@@ -1063,7 +1063,8 @@ const integrationChildren = [
   "project-work-initialization",
   "project-work-scoped-host",
     "executed-reviewed-follow-up",
-    "persisted-scoped-continuation",
+  "authored-successor-handoff",
+  "persisted-scoped-continuation",
   "blank-state",
   "guide-brief-current-project",
   "codex-read-guide-brief",
@@ -1137,6 +1138,11 @@ requireText(readCanonicalChildRegistration(integrationSource, "project-work-scop
 const firstWorkFixture = readFileSync(path.join(repositoryRoot, "scripts/test-vnext-project-work-initialization.ts"), "utf8");
 assert.equal(countOccurrences(firstWorkFixture, "await assertScopedNativeHostConnectionV01();"), 1,
   "the default initialization path must not repeat the scoped matrix");
+const successorRegistration = readCanonicalChildRegistration(integrationSource, "authored-successor-handoff");
+for (const fragment of ['group: "supporting-serial"', 'timeoutMs: 30_000', '"process-owning"', '"--successor-handoff-only"'])
+  requireText(successorRegistration.block, fragment, "authored successor retains one bounded serial owner");
+assert.equal(countOccurrences(firstWorkFixture, 'await assertPersistedScopedContinuationV01(["handoff"]);'), 1,
+  "the handoff profile must run once without extending the legacy continuation child");
 const continuationRegistration = readCanonicalChildRegistration(integrationSource, "persisted-scoped-continuation");
 for (const fragment of ['group: "supporting-serial"', 'timeoutMs: 30_000', '"process-owning"', '"--persisted-continuation-only"'])
   requireText(continuationRegistration.block, fragment, "persisted continuation must retain bounded serial ownership");

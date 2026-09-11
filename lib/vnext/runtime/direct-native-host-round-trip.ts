@@ -1,3 +1,6 @@
+import { AUTHORED_SUCCESSOR_TASK_V01 } from "@/lib/vnext/authored-successor-task";
+import { assertCodexScopedAdapterV01 } from "@/lib/vnext/native-host/codex-app-server-adapter";
+import { assertCodexAuthoredSuccessorScopeV01 } from "@/lib/vnext/native-host/codex-scoped-task";
 import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
 
@@ -175,6 +178,13 @@ export interface PersistedHostPacketAdmissionV01 {
   work_ref: ExternalRefV01;
   task_ref: ExternalRefV01;
   packet_lineage:
+    | {
+        lineage_kind: "authored_successor_task";
+        successor_definition_ref: ExternalRefV01;
+        operator_action_ref: ExternalRefV01;
+        immediate_prior_packet_ref: ExternalRefV01;
+        predecessor_receipt_ref: ExternalRefV01;
+      }
     | {
         lineage_kind: "semantic_transition";
         source_transition_receipt_ref: ExternalRefV01;
@@ -439,7 +449,11 @@ export async function admitPersistedHostTaskContextPacketV01(
       packet.packet_version,
     ),
     packet_lineage:
-      lineage.lineage_kind === "semantic_transition"
+      lineage.lineage_kind === "authored_successor_task"
+        ? { lineage_kind: "authored_successor_task", successor_definition_ref: lineage.successor_definition_ref,
+            operator_action_ref: lineage.operator_action_ref, immediate_prior_packet_ref: lineage.immediate_prior_packet_ref,
+            predecessor_receipt_ref: lineage.predecessor_receipt_ref }
+        : lineage.lineage_kind === "semantic_transition"
         ? {
             lineage_kind: "semantic_transition",
             source_transition_receipt_ref: localRef(
@@ -787,6 +801,14 @@ export async function runDirectNativeHostRoundTripV01(
       interactive_authorized: dependencies.live_host_egress_authorized === true,
       repository_delegation_context: input.repository_delegation_context ?? null,
     });
+  }
+  if (admitted.packet.compatibility.source_contracts.includes(AUTHORED_SUCCESSOR_TASK_V01)) {
+    // This explicit read-only task profile must not silently take the desktop's
+    // whole-root route. Authoring and readiness never manufacture an allowance.
+    if (!dependencies.scoped_task || input.mode !== "interactive" || dependencies.resume_existing_run)
+      refuse("direct_host_authored_successor_scope_required", 403);
+    assertCodexScopedAdapterV01(adapter, dependencies.scoped_task);
+    await assertCodexAuthoredSuccessorScopeV01(dependencies.scoped_task, admitted.packet, admitted.root_scope);
   }
   let taskStartGuide: NativeHostRequestV01["guide_brief"];
   if (shouldAttachNativeHostTaskStartGuideV01({
@@ -1687,7 +1709,10 @@ function buildNativeHostRequest(input: {
     packet,
     guide_brief: input.guide_brief,
     packet_lineage:
-      input.admission.packet_lineage.lineage_kind === "semantic_transition"
+      input.admission.packet_lineage.lineage_kind === "authored_successor_task"
+        ? { ...input.admission.packet_lineage, packet_source_refs: packet.compatibility.source_refs,
+            selected_context_refs: packet.selected_context.flatMap(e => e.external_ref ? [e.external_ref] : []) }
+        : input.admission.packet_lineage.lineage_kind === "semantic_transition"
         ? {
             source_transition_receipt_ref:
               input.admission.packet_lineage.source_transition_receipt_ref,
@@ -3233,7 +3258,9 @@ export function buildDirectNativeHostRunIdentityV01(input: {
   repository_delegation_context?: NativeHostRepositoryDelegationContextV01 | null;
 }) {
   const lineageMaterial =
-    input.admission.packet_lineage.lineage_kind === "semantic_transition"
+    input.admission.packet_lineage.lineage_kind === "authored_successor_task"
+      ? { authored_successor: input.admission.packet_lineage }
+      : input.admission.packet_lineage.lineage_kind === "semantic_transition"
       ? {
           source_transition_receipt_ref:
             input.admission.packet_lineage.source_transition_receipt_ref,
@@ -3310,7 +3337,10 @@ function sourceTransitionReceiptRefV01(
 function admissionLineageRefsV01(
   admission: PersistedHostPacketAdmissionV01,
 ): ExternalRefV01[] {
-  return admission.packet_lineage.lineage_kind === "semantic_transition"
+  return admission.packet_lineage.lineage_kind === "authored_successor_task"
+    ? [admission.packet_lineage.successor_definition_ref, admission.packet_lineage.operator_action_ref,
+        admission.packet_lineage.immediate_prior_packet_ref, admission.packet_lineage.predecessor_receipt_ref]
+    : admission.packet_lineage.lineage_kind === "semantic_transition"
     ? [admission.packet_lineage.source_transition_receipt_ref]
     : admission.packet_lineage.lineage_kind === "initial_user_defined"
       ? [

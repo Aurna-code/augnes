@@ -1,3 +1,6 @@
+import { readProjectRunResultDetailV01 } from "../lib/vnext/runtime/project-run-result-read-model";
+import { defineAuthoredSuccessorTaskV01, prepareAuthoredSuccessorHandoffV01 } from "../lib/vnext/runtime/authored-successor-task";
+import { assertAuthoredSuccessorInventoryV01, readAuthoredSuccessorDefinitionV01, normalizeAuthoredSuccessorTaskV01 } from "../lib/vnext/authored-successor-task";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -119,6 +122,10 @@ async function main(): Promise<void> {
     }
     if (process.argv.includes("--executed-follow-up-only")) {
       await assertExecutedReviewedFollowUpV01();
+      return;
+    }
+    if (process.argv.includes("--successor-handoff-only")) {
+      await assertPersistedScopedContinuationV01(["handoff"]);
       return;
     }
     if (process.argv.includes("--persisted-continuation-only")) {
@@ -571,9 +578,9 @@ async function assertExecutedReviewedFollowUpV01(): Promise<void> {
 // adapter, then its DB is closed/reopened. B uses protocol-faithful fake App
 // Server command items through the production scoped adapter and service.
 // These are model-free substitutions, not observed native task-file reads.
-async function assertPersistedScopedContinuationV01(): Promise<void> {
-  for (const scenario of ["complete", "expired_review", "repeat_arm", "auth_refused", "missing_transition",
-    "expired_start", "wrong_scope", "failed_B", "wrong_context", "wrong_prior", "superseded", "request_refusal"] as const) {
+async function assertPersistedScopedContinuationV01(scenarios: readonly string[] = ["complete", "expired_review", "repeat_arm", "auth_refused", "missing_transition",
+  "expired_start", "wrong_scope", "failed_B", "wrong_context", "wrong_prior", "superseded", "request_refusal"]): Promise<void> {
+  for (const scenario of scenarios) {
     const started = performance.now();
     const wallBase = Date.now() - 60_000;
     const wall = (seconds: number) => new Date(wallBase + seconds * 1_000).toISOString();
@@ -591,10 +598,16 @@ async function assertPersistedScopedContinuationV01(): Promise<void> {
       const file = path.join(fixture.root, "sample.txt");
       writeFileSync(file, "Synthetic sample 9; reference 4. Later calibration is separate.\n");
       const files = [{ relative_path: "sample.txt", sha256: createHash("sha256").update(readFileSync(file)).digest("hex") }];
+      if (scenario === "handoff") {
+        for (const [relative_path, content] of [["TASK.md", "Read only TASK.md, sample.txt and notes.md. Compare recorded X with its reference. Stop after X; do not read calibration-B.json."], ["notes.md", "X is a bounded recorded sample; cause unknown. Y untested."]]) {
+          writeFileSync(path.join(fixture.root, relative_path!), content!);
+          files.push({ relative_path: relative_path!, sha256: createHash("sha256").update(content!).digest("hex") });
+        }
+      }
       const bootstrap = issueVNextLocalOperatorBootstrapV01(fixture.db, { config: fixture.config, clock: fixedClock(wall(0)) });
       const session = consumeVNextLocalOperatorBootstrapV01(fixture.db, { config: fixture.config, bootstrap_token: bootstrap.bootstrap_token, clock: fixedClock(wall(1)) });
       const initial = defineInitialProjectWorkV01(fixture.db, { config: fixture.config, credential: session.credential,
-        request: requestV01(fixture, { goal: "Review a bounded sample and choose a calibration follow-up", success_criteria: ["Compare the recorded sample with its reference"], non_goals: ["No unmeasured-condition execution"] }), clock: fixedClock(wall(2)) });
+        request: requestV01(fixture, { goal: scenario === "handoff" ? readFileSync(path.join(fixture.root, "TASK.md"), "utf8") : "Review a bounded sample and choose a calibration follow-up", success_criteria: [scenario === "handoff" ? "Fulfil TASK.md and stop after X." : "Compare the recorded sample with its reference"], non_goals: ["No unmeasured-condition execution"] }), clock: fixedClock(wall(2)) });
       let credential = credentialFromCookieV01(initial.session_admission.cookie_value); sessionId = credential.session_id;
       let xInvocations = 0;
       let originalRequest: NativeHostRequestV01 | undefined;
@@ -745,6 +758,11 @@ async function assertPersistedScopedContinuationV01(): Promise<void> {
         await assert.rejects(coordinator.prepareStage2({ files }), /project_not_active/);
         continue;
       }
+      if (scenario === "handoff") {
+        const content = '{"calibration":3,"reference":3}\n';
+        writeFileSync(path.join(fixture.root, "calibration-B.json"), content);
+        files.push({ relative_path: "calibration-B.json", sha256: createHash("sha256").update(content).digest("hex") });
+      }
       const laterPacketId = applied.later_packet.packet_id;
       // Returned material is detached from the coordinator's retained authority.
       applied.later_packet.packet_id = initial.packet.packet_id;
@@ -799,13 +817,14 @@ async function assertPersistedScopedContinuationV01(): Promise<void> {
           observe: observation => { if (observation.kind === "spawned" && observation.process_id) { fakeLaunches += 1; processes.add(observation.process_id); } },
           launch: { command: process.execPath, prefix_args: [path.join(process.cwd(), "scripts/fixtures/fake-codex-app-server.mjs")],
             environment: { NODE_ENV: "test", HOME: hostHome, CODEX_HOME: hostHome, PATH: process.env.PATH,
-              FAKE_CODEX_SCENARIO: "scoped_command_cwd", FAKE_CODEX_COMMAND_CWD: scenario === "failed_B" ? fixture.root : snapshot.root,
+              FAKE_CODEX_SCENARIO: "scoped_command_cwd", FAKE_CODEX_SCOPED_RESULT_KIND: scenario === "handoff" ? "x_only" : undefined, FAKE_CODEX_COMMAND_CWD: scenario === "failed_B" ? fixture.root : snapshot.root,
               FAKE_CODEX_COMMAND_TERMINAL: scenario === "failed_B" ? "withhold" : "complete", FAKE_CODEX_TRACE_PATH: trace, FAKE_CODEX_CLEANUP_MARKER_PATH: cleanup } } }),
       });
       const startInput = { config: fixture.config, mode: "interactive" as const, operator_mutation: { credential, clock: fixedClock(wall(12)) } };
       const pending = service.start(startInput);
       await assert.rejects(service.start(startInput), /window_start_refused/);
-      await pending;
+      const startedResult = await pending;
+      if (startedResult.session_admission) credential = credentialFromCookieV01(startedResult.session_admission.cookie_value);
       const deadline = performance.now() + 10_000;
       let projection = service.read(fixture.config);
       while (!["completed", "failed", "paused", "blocked", "cancelled", "timed_out"].includes(projection.status)) {
@@ -826,6 +845,13 @@ async function assertPersistedScopedContinuationV01(): Promise<void> {
         assert(receipt.observations.some(observation => observation.observation_kind === "source_bound_input_snapshot" && observation.source_refs.some(ref => ref.external_id === snapshot.fingerprint)));
         assert.equal(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["episode_delta_proposal"], limit: 10 }).length, 3);
       }
+      if (scenario === "handoff") {
+        assert.deepEqual(prepared.admission.packet.task, initial.packet.task);
+        assert.equal(prepared.guide.current_goal, initial.packet.task.goal);
+        assert(readCodexScopedSnapshotV01(prepared.scope).files.some(file => file.relative_path === "calibration-B.json"));
+        assert(prepared.admission.packet.selected_context.some(entry => entry.bounded_summary === revision.proposed_state_summary));
+        console.log(JSON.stringify({ handoff_baseline: "X-only active task survives accepted B context and four-file snapshot", task: prepared.admission.packet.task, native_status: projection.status, consumed_attempts: coordinator.window.snapshot().attempts, b_readiness: false }));
+      }
       assert.equal(xInvocations, 1, "No replay of the synthetic predecessor");
       assert.equal(fakeLaunches, 1); assert.equal(coordinator.window.snapshot().attempts, 1);
       await assert.rejects(service.start(startInput), /window_start_refused/);
@@ -835,6 +861,126 @@ async function assertPersistedScopedContinuationV01(): Promise<void> {
       const originalReceipt = receipts.find(row => row.receipt_id === first.receipt.receipt_id)!;
       const source = readVNextOperatorPilotSemanticReviewV01(fixture.db, { config: fixture.config, proposal_id: original.proposal_id, authenticated_session_id: null }).proposal;
       assert.equal(canonicalizeProtocolValueV01({ receipt: originalReceipt, proposal: source }), historical);
+      if (scenario === "handoff") {
+        const laterReceipt = receipts.find(r => r.run_id === projection.run_ref)!;
+        const oldDispositionPath = coordinator.disposition_path;
+        await service.shutdown(); service = undefined;
+        await coordinator.close();
+        const consumedDisposition = readFileSync(oldDispositionPath, "utf8");
+        assert.equal(coordinator.window.snapshot().attempts, 1);
+        const semanticPrefix = listVNextCoreRecordsV01(fixture.db, { ...fixture,
+          record_kinds: ["episode_delta_proposal", "review_decision", "state_transition_receipt", "run_receipt"], limit: 100 });
+        await assert.rejects(prepareAuthoredSuccessorHandoffV01(fixture.db, { config: fixture.config,
+          packet_id: prepared.admission.packet.packet_id, packet_fingerprint: prepared.admission.packet.integrity.fingerprint }), /authored_definition_required/);
+        assert.equal(fakeLaunches, 1, "An X-only task plus B context does not admit an authored B handoff");
+        const handoffRequest = { action: "define_authored_successor_task" as const,
+          expected_current_packet_id: prepared.admission.packet.packet_id,
+          expected_current_packet_fingerprint: prepared.admission.packet.integrity.fingerprint,
+          expected_latest_receipt_id: laterReceipt.receipt_id, expected_latest_receipt_fingerprint: laterReceipt.integrity.fingerprint,
+          expected_active_selection_revision: readActiveProjectSelectionV01(fixture.db, fixture.workspace_id)!.selection_revision,
+          expected_root_fingerprint: prepared.admission.root_scope.root_fingerprint,
+          definition: { objective: "Read calibration-B.json and compare its calibration value with its reference. Report both values, their difference and comparison. Preserve the accepted declared-sample scope and uncertainty for X; do not repeat X.",
+            checks: [{ check_id: "calibration_comparison_completed", criterion: "Compare the calibration artifact with its task reference and report the comparison, whether matching or not." }],
+            stop_conditions: ["Stop after the calibration comparison.", "Leave Y untested and deferred.", "Do not repeat X, write files, use network or accept another proposal."],
+            approved_instruction_hashes: [],
+            materials: files.map(f => ({ ...f, role: f.relative_path === "calibration-B.json" ? "task_data" as const : "historical_material" as const })) } };
+        for (const request of [{ ...handoffRequest, expected_root_fingerprint: `sha256:${"0".repeat(64)}` },
+          { ...handoffRequest, expected_latest_receipt_id: first.receipt.receipt_id, expected_latest_receipt_fingerprint: first.receipt.integrity.fingerprint }]) {
+          await assert.rejects(defineAuthoredSuccessorTaskV01(fixture.db, { config: fixture.config, credential, request, clock: { now: () => new Date().toISOString() } }), /root_changed|predecessor_unsettled_or_mismatched/);
+        }
+        await assert.rejects(defineAuthoredSuccessorTaskV01(fixture.db, { config: fixture.config, credential: { ...credential, session_id: "session:forged" }, request: handoffRequest, clock: { now: () => new Date().toISOString() } }), /session/);
+        const authored = await defineAuthoredSuccessorTaskV01(fixture.db, { config: fixture.config, credential, request: handoffRequest, clock: { now: () => new Date().toISOString() } });
+        credential = credentialFromCookieV01(authored.session_admission.cookie_value);
+        assert.equal(authored.status, "inserted"); assert.equal(authored.execution_authority_granted, false); assert.equal(authored.semantic_transition_created, false);
+        assert.notDeepEqual(authored.packet.work_ref, initial.packet.work_ref);
+        assert.notEqual(authored.packet.packet_id, prepared.admission.packet.packet_id);
+        assert.equal(canonicalizeProtocolValueV01(listVNextCoreRecordsV01(fixture.db, { ...fixture,
+          record_kinds: ["episode_delta_proposal", "review_decision", "state_transition_receipt", "run_receipt"], limit: 100 })), canonicalizeProtocolValueV01(semanticPrefix), "Task authorship never reapplies clarification or accepts the later proposal");
+        assert.equal(readFileSync(oldDispositionPath, "utf8"), consumedDisposition);
+        await assert.rejects(defineAuthoredSuccessorTaskV01(fixture.db, { config: fixture.config, credential, request: handoffRequest, clock: { now: () => new Date().toISOString() } }), /superseded|stale|current_packet_changed/);
+        await assert.rejects(createPersistedCodexFeasibilityContinuationV01(fixture.db, input), /superseded|stale|later_run|disposition/);
+        const laterProposal = readProjectRunResultDetailV01(fixture.db, { ...fixture, receipt_id: laterReceipt.receipt_id }).proposal;
+        assert.equal(laterProposal.status, "available");
+        if (laterProposal.status === "available") await assert.rejects(createPersistedCodexFeasibilityContinuationV01(fixture.db,
+          { config: fixture.config, receipt_id: laterReceipt.receipt_id, proposal_id: laterProposal.proposal_id }), /superseded|stale/);
+        const packetBinding = { config: fixture.config, packet_id: authored.packet.packet_id, packet_fingerprint: authored.packet.integrity.fingerprint };
+        const bPath = path.join(fixture.root, "calibration-B.json"), approvedB = readFileSync(bPath);
+        writeFileSync(bPath, '{"unapproved":true}');
+        try { await assert.rejects(prepareAuthoredSuccessorHandoffV01(fixture.db, packetBinding), /stage_hash_changed/); }
+        finally { writeFileSync(bPath, approvedB); }
+        const movedRoot = fixture.root + "-task-moved";
+        renameSync(fixture.root, movedRoot); mkdirSync(fixture.root);
+        try { await assert.rejects(prepareAuthoredSuccessorHandoffV01(fixture.db, packetBinding), /root_changed/); }
+        finally { rmSync(fixture.root, { recursive: true }); renameSync(movedRoot, fixture.root); }
+        await assert.rejects(prepareAuthoredSuccessorHandoffV01(fixture.db, { ...packetBinding, packet_fingerprint: `sha256:${"0".repeat(64)}` }), /fingerprint_mismatch/);
+        const beforeFakeCalls = processes.size;
+        const successor = await prepareAuthoredSuccessorHandoffV01(fixture.db, { config: fixture.config,
+          packet_id: authored.packet.packet_id, packet_fingerprint: authored.packet.integrity.fingerprint }); scopes.push(successor.scope);
+        assert.equal(processes.size, beforeFakeCalls, "Preparation and consistency checks cannot invoke a worker");
+        assert.equal(successor.execution_window_created, false);
+        const successorSnapshot = readCodexScopedSnapshotV01(successor.scope);
+        assert.deepEqual(successorSnapshot.files, files.filter(f => f.relative_path === "calibration-B.json"));
+        assert.equal(readFileSync(path.join(successorSnapshot.root, "calibration-B.json"), "utf8"), readFileSync(path.join(fixture.root, "calibration-B.json"), "utf8"));
+        assert.equal(existsSync(path.join(successorSnapshot.root, "TASK.md")), false);
+        const currentDefinition = readAuthoredSuccessorDefinitionV01(successor.admission.packet);
+        assert.deepEqual(currentDefinition, normalizeAuthoredSuccessorTaskV01(handoffRequest.definition));
+        assert.equal(successor.guide.current_goal, currentDefinition.objective);
+        assert.deepEqual(successor.admission.packet.selected_context.filter(e => e.entry_kind === "accepted_state_ref"), prepared.admission.packet.selected_context.filter(e => e.entry_kind === "accepted_state_ref"));
+        const transitionRefs = prepared.admission.packet.compatibility.source_refs.filter(r => r.ref_type === "state_transition_receipt");
+        assert(transitionRefs.length > 0);
+        for (const r of transitionRefs) assert(successor.admission.packet.compatibility.source_refs.some(v => canonicalizeProtocolValueV01(v) === canonicalizeProtocolValueV01(r)));
+        assert.throws(() => assertAuthoredSuccessorInventoryV01(authored.packet, { files, historical_files: [], approved_instruction_hashes: [] }), /inventory_role_conflict/);
+        await assert.rejects(prepareAuthoredSuccessorHandoffV01(fixture.db, { config: fixture.config,
+          packet_id: authored.packet.packet_id, packet_fingerprint: authored.packet.integrity.fingerprint,
+          approved_instruction_files: [{ path: file, sha256: files[0]!.sha256 }] }), /instruction_hashes_changed/);
+        const successorTrace = path.join(ROOT, `${name}-successor-trace.jsonl`);
+        const successorHome = path.join(ROOT, `${name}-successor-home`); mkdirSync(successorHome);
+        let successorFakeLaunches = 0;
+        const successorAdapter = createCodexAppServerAdapterV01({ scoped_task: successor.scope,
+          observe: observation => { if (observation.kind === "spawned" && observation.process_id) { successorFakeLaunches += 1; processes.add(observation.process_id); } },
+          launch: { command: process.execPath, prefix_args: [path.join(process.cwd(), "scripts/fixtures/fake-codex-app-server.mjs")],
+            environment: { NODE_ENV: "test", HOME: successorHome, CODEX_HOME: successorHome, PATH: process.env.PATH,
+              FAKE_CODEX_SCENARIO: "scoped_command_cwd", FAKE_CODEX_COMMAND_CWD: successorSnapshot.root, FAKE_CODEX_SCOPED_RESULT_KIND: "x_only",
+              FAKE_CODEX_TRACE_PATH: successorTrace } } });
+        const runsBeforeRefusal = listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["run_receipt"], limit: 100 });
+        await assert.rejects(runDirectNativeHostRoundTripV01(fixture.db, { config: fixture.config, mode: "interactive",
+          operator_mutation: { credential, clock: { now: () => new Date().toISOString() } } }, { adapter: base, now: () => new Date().toISOString() }), /authored_successor_scope_required/);
+        await assert.rejects(runDirectNativeHostRoundTripV01(fixture.db, { config: fixture.config, mode: "interactive",
+          operator_mutation: { credential, clock: { now: () => new Date().toISOString() } } }, { adapter: base, scoped_task: successor.scope, now: () => new Date().toISOString() }), /adapter_binding_missing/);
+        assert.equal(successorFakeLaunches, 0);
+        assert.deepEqual(listVNextCoreRecordsV01(fixture.db, { ...fixture, record_kinds: ["run_receipt"], limit: 100 }), runsBeforeRefusal);
+        let finalRequest: NativeHostRequestV01 | undefined;
+        // Explicit synthetic executor seam, no feasibility window renewal. Its
+        // fixed answer deliberately lacks the calibration check. Request capture,
+        // not a B-looking fake answer, is the positive handoff evidence.
+        const next = await runDirectNativeHostRoundTripV01(fixture.db, { config: fixture.config, mode: "interactive",
+          operator_mutation: { credential, clock: { now: () => new Date().toISOString() } } }, { adapter: successorAdapter, scoped_task: successor.scope,
+          before_adapter_invoke: async request => { finalRequest = structuredClone(request); }, now: () => new Date().toISOString(), timeout_ms: 10_000, stop_settle_timeout_ms: 3_000 });
+        credential = credentialFromCookieV01(next.session_admission!.cookie_value);
+        assert(finalRequest); assert.deepEqual(finalRequest.packet, successor.admission.packet);
+        assert.deepEqual(finalRequest.guide_brief, successor.guide);
+        const sent = readFileSync(successorTrace, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(row => row.kind === "received" && row.value.method === "turn/start")!.value;
+        assert(!canonicalizeProtocolValueV01(finalRequest.packet).includes(initial.packet.task.goal), "The historical X instruction is not active in the successor request");
+        assert.equal(readProjectWorkInitializationV01(fixture.db, fixture).state, "defined_successor_work");
+        const recovery = validateRecoveryCanonicalDatabaseV01(fixture.db);
+        assert.equal(recovery.status, "valid", recovery.code);
+        const portable = parseAndValidatePortableProjectV01(exportActivePortableProjectV01(fixture.db,
+          { include_personal_perspective: false }).bytes);
+        assert(portable.records.some(r => r.record_id === authored.packet.packet_id));
+        assert(portable.operator_provenance_sessions.some(s => s.session_id === sessionId));
+        assert.equal(successorFakeLaunches, 1);
+        assert.equal(sent.packet_payload_sha256, createProtocolSha256V01(canonicalizeProtocolValueV01(finalRequest.packet)));
+        assert.equal(sent.packet_fingerprint, authored.packet.integrity.fingerprint);
+        assert.equal(sent.cwd, successorSnapshot.root); assert.equal(sent.guide_before_task_context_packet, true);
+        assert.equal(next.receipt.execution.status, "completed"); assert.notEqual(next.receipt.verification.status, "passed");
+        assert(next.receipt.verification.required_check_ids.includes("calibration_comparison_completed"));
+        assert(next.receipt.skipped_checks.some(c => c.check_id === "calibration_comparison_completed"));
+        assert.equal(readFileSync(oldDispositionPath, "utf8"), consumedDisposition);
+        console.log(JSON.stringify({ authored_successor: "passed", old_allowance: "consumed_unchanged", task_goal: finalRequest.packet.task.goal,
+          task_checks: finalRequest.packet.constraints.required_checks, snapshot_files: successorSnapshot.files.map(f => f.relative_path),
+          serialized_packet_sha256: sent.packet_payload_sha256, native_only_result_verification: next.receipt.verification.status, successor_fake_launches: successorFakeLaunches,
+          real_worker_execution: false, fixed_fake_transport: true }));
+      }
     } finally {
       try { await service?.shutdown(); }
       finally {
@@ -843,7 +989,7 @@ async function assertPersistedScopedContinuationV01(): Promise<void> {
           try {
             for (const scope of scopes) await releaseCodexScopedTaskV01(scope);
             for (const pid of processes) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
-            if (sessionId) assert(revokeVNextLocalOperatorSessionByIdV01(fixture.db, { config: fixture.config, session_id: sessionId, clock: fixedClock(wall(60)) }).revoked_at);
+            if (sessionId) assert(revokeVNextLocalOperatorSessionByIdV01(fixture.db, { config: fixture.config, session_id: sessionId, clock: fixedClock(scenario === "handoff" ? new Date().toISOString() : wall(60)) }).revoked_at);
           } finally { if (fixture.db.open) fixture.db.close(); globalThis.fetch = originalFetch; }
         }
       }

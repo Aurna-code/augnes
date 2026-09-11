@@ -1770,6 +1770,12 @@ function completeUnsafeTextStructuredResult(summary) {
 }
 
 function structuredResult() {
+  if (scenario === "scoped_command_cwd" && process.env.FAKE_CODEX_SCOPED_RESULT_KIND === "x_only") return JSON.stringify({
+    result_version: "codex_host_structured_result.v0.1", summary: "Repeated the recorded X comparison: sample 9 exceeds reference 4. Calibration was not checked; Y remains untested.",
+    changed_files: [], artifacts: [], observed_actions: [], commands: [],
+    checks: [{ check_id: "recorded_sample", required: true, status: "failed", summary: "Recorded X exceeds its reference." }],
+    skipped_checks: [], uncertainty: ["Fixed synthetic response, not model execution or file-read evidence."], gaps: [], proposed_next_steps: [],
+  });
   if ((scopedScenario && !candidateCanaryScenario && scenario !== "scoped_result_effect") || scenario === "command_cwd") return JSON.stringify({
     result_version: "codex_host_structured_result.v0.1", summary: "The synthetic scoped fixture returned a bounded result.",
     changed_files: [], artifacts: [], observed_actions: [], commands: [],

@@ -1339,7 +1339,9 @@ function laterContextSectionV01(
     "Later context and feedback",
     packet ? "available" : input.continuity ? "pending" : exactTargetPacket ? "unavailable" : "missing",
     packet
-      ? packet.lineage_kind === "pre_execution_user_revision"
+      ? packet.lineage_kind === "authored_successor_task"
+        ? "The current task was explicitly authored after a settled result. Accepted context is retained; task definition grants no execution authority."
+        : packet.lineage_kind === "pre_execution_user_revision"
         ? "The current packet is an append-only user revision saved before execution. Presentation, actual use, and usefulness remain separate."
         : packet.lineage_kind === "initial_user_defined"
           ? "The current packet is the user's initial work definition. Presentation, actual use, and usefulness remain separate."
@@ -1361,7 +1363,9 @@ function laterContextSectionV01(
     packet
       ? [itemV01(
           packet.packet_id,
-          packet.lineage_kind === "pre_execution_user_revision"
+          packet.lineage_kind === "authored_successor_task"
+            ? "Authored successor TaskContextPacket"
+            : packet.lineage_kind === "pre_execution_user_revision"
             ? "Pre-execution revised TaskContextPacket"
             : packet.lineage_kind === "initial_user_defined"
               ? "Initial user-defined TaskContextPacket"

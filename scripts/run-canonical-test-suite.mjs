@@ -632,6 +632,15 @@ const suites = {
       requireNaturalExit: true,
     },
     {
+      id: "authored-successor-handoff",
+      group: "supporting-serial",
+      requirements: ["database", "migrations", "filesystem", "mutable-module-state", "process-owning"],
+      label: "authored successor task, consumed prefix, exact worker request and historical instruction exclusion",
+      ...rootNode("scripts/test-vnext-project-work-initialization.ts", "--successor-handoff-only"),
+      timeoutMs: 30_000,
+      requireNaturalExit: true,
+    },
+    {
       id: "persisted-scoped-continuation",
       group: "supporting-serial",
       requirements: ["database", "migrations", "filesystem", "mutable-module-state", "process-owning"],

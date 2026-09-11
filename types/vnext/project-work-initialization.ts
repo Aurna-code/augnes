@@ -15,6 +15,7 @@ export const INITIAL_PROJECT_WORK_LIMITS_V01 = Object.freeze({
 
 export type ProjectWorkInitializationStateV01 =
   | "not_defined"
+  | "defined_successor_work"
   | "defined_initial_work"
   | "defined_revised_work"
   | "defined_transition_work"
@@ -39,6 +40,7 @@ export interface ProjectWorkInitializationV01 {
    */
   reason:
     | "zero_durable_work_history"
+    | "current_successor_packet"
     | "current_initial_packet"
     | "current_revision_packet"
     | "current_transition_packet"
@@ -65,6 +67,7 @@ export interface ProjectWorkInitializationV01 {
     lineage_kind:
       | "initial_user_defined"
       | "pre_execution_user_revision"
+      | "authored_successor_task"
       | "semantic_transition"
       | "source_linked_operational_continuation";
   };
