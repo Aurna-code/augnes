@@ -3228,7 +3228,7 @@ export function buildDirectNativeHostRunIdentityV01(input: {
   config: VNextLocalOperatorPilotConfigV01;
   mode: NativeHostRunModeV01;
   admission: PersistedHostPacketAdmissionV01;
-  adapter: NativeHostAdapterV01;
+  adapter: Pick<NativeHostAdapterV01, "adapter_version" | "capability_version">;
   automation_context: NativeHostAutomationContextV01 | null;
   repository_delegation_context?: NativeHostRepositoryDelegationContextV01 | null;
 }) {
