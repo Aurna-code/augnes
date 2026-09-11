@@ -1,9 +1,10 @@
+import { AUTHORED_SUCCESSOR_TASK_V01 } from "@/types/vnext/project-work-initialization";
 import { canonicalizeProtocolValueV01, createProtocolSha256V01 } from "./protocol-primitives";
 import { normalizeInitialProjectWorkDefinitionV01 } from "./runtime/initial-project-work-context";
 import type { TaskContextPacketV01 } from "@/types/vnext/task-context-packet";
 
 /** Local task-authoring profile, not a semantic Transition or execution grant. */
-export const AUTHORED_SUCCESSOR_TASK_V01 = "augnes.authored-successor-task.v0.1" as const;
+export { AUTHORED_SUCCESSOR_TASK_V01 } from "@/types/vnext/project-work-initialization";
 export interface AuthoredSuccessorTaskDefinitionV01 {
   objective: string;
   approved_instruction_hashes: string[];

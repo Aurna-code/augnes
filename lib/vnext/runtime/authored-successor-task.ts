@@ -1,7 +1,8 @@
+import { AUTHORED_SUCCESSOR_TASK_V01 } from "@/types/vnext/project-work-initialization";
 import { VNEXT_PERSISTED_SEMANTIC_CONTEXT_COMPILER_VERSION_V01 } from "./persisted-semantic-context-compiler";
 import type Database from "better-sqlite3";
 import { listAutonomyRunLedgerRecords } from "@/lib/autonomy/runner-ledger";
-import { AUTHORED_SUCCESSOR_TASK_V01, equalSuccessorV01 as equal, normalizeAuthoredSuccessorTaskV01,
+import { equalSuccessorV01 as equal, normalizeAuthoredSuccessorTaskV01,
   readAuthoredSuccessorDefinitionV01, requireSuccessorV01 as check, successorDigestV01 as digest,
   type AuthoredSuccessorTaskDefinitionV01 } from "@/lib/vnext/authored-successor-task";
 import { canonicalizeProtocolValueV01 } from "@/lib/vnext/protocol-primitives";
